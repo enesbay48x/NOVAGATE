@@ -35,3 +35,6 @@ Yeni\ klasör/
 # Sistem dosyaları
 Thumbs.db
 .DS_Store
+
+# Gecici iOS ikonlar (sadece CI'de uretilir, depoya girmez)
+icons/
