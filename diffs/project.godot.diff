@@ -1,0 +1,18 @@
+--- ../data_gd/project.godot	2026-10-31 21:02:08.000000000 +0000
++++ project.godot	2026-10-31 20:25:50.063537248 +0000
+@@ -17,6 +17,7 @@
+ config/name="NOVAGATE"
+ run/main_scene="res://main.tscn"
+ config/features=PackedStringArray("4.7")
++config/quit_on_go_back=false
+ 
+ [display]
+ 
+@@ -24,6 +25,7 @@
+ window/size/viewport_height=720
+ window/stretch/mode="canvas_items"
+ window/stretch/aspect="expand"
++window/handheld/orientation=4
+ 
+ [rendering]
+ 

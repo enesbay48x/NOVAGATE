@@ -1,0 +1,57 @@
+NOVAGATE - COK OYUNCULU PAKETI (surum 1)
+=========================================
+
+KURULUM
+  1) Projenin yedegini al.
+  2) Zipin icindekileri project.godot'un oldugu klasore kopyala (uzerine yaz):
+       net.gd, net_server.gd, net_game.gd   (YENI)
+       main.gd, hud_do.gd, extras.gd        (kucuk eklemeler)
+       project.godot                        (sadece [autoload] Net satiri eklendi)
+       sunucu_baslat.bat                    (sunucuyu baslatir)
+     NOT: Kendi main.gd'ni zip yuklendikten sonra degistirdiysen once bana gonder, ayni
+     eklemeleri senin dosyana uygulayayim. project.godot'u elle eklemek istersen:
+     Proje > Proje Ayarlari > Global (Autoload) > net.gd'yi "Net" adiyla ekle.
+  3) Godot'u ac, calistir (hata olursa Cikti penceresindeki mesaji gonder).
+
+SUNUCUYU BASLATMA (senin bilgisayarin)
+  - sunucu_baslat.bat icindeki GODOT yolunu duzenle, cift tikla. Pencerede
+    "NOVAGATE SUNUCUSU calisiyor | UDP port 7777" yazisi gorunmeli.
+  - Sunucu ayri bir surectir; oyunu AYRICA acip kendin de baglanirsin.
+  - Editorden denemek icin: Hata Ayikla > Birden Cok Ornek Calistir (Run Multiple Instances),
+    Proje > Run Instances ayarindan bir ornege "--server" arguman olarak ver.
+
+OYUNA BAGLANMA
+  - Giris ekraninda "Cok oyunculu (sunucuya baglan)" kutusunu isaretle, adresi yaz, giris yap.
+      Ayni bilgisayar : 127.0.0.1:7777
+      Ayni ag (LAN)   : sunucu PC'nin yerel IP'si, ornek 192.168.1.20:7777  (cmd > ipconfig)
+      Internet        : modemde UDP 7777'yi sunucu PC'ye yonlendir + Windows Guvenlik Duvari'nda
+                        UDP 7777 gelen baglantiya izin ver, arkadaslar genel IP'nle baglanir.
+                        (Daha kolay: ZeroTier / Radmin VPN / Tailscale ile ayni sanal aga girin,
+                        sonra o agdaki IP'yi kullanin; port yonlendirme gerekmez.)
+  - Kutu isaretli degilse oyun eskisi gibi tek oyunculu calisir.
+  - Adres ve secim user://novagate_net.cfg dosyasina kaydedilir.
+  - Android surumunde baglanmak icin export ayarlarinda "Internet" izni acik olmali.
+
+NELER SUNUCUDA CALISIR (herkes ayni seyi gorur)
+  - NPC'ler: dogus, hareket, saldiri, HP/kalkan, olum, yeniden dogus (harita basina, oyuncu varken)
+  - Cubikon + Protegit savunma dalgalari (en cok hasar veren oyuncuyu hedefler)
+  - NPC oldurme odulu: en cok hasar veren oyuncuya (XP/Kredi/Honor/Uridium)
+  - Oyuncular: konum, gemi modeli, isim, HP/kalkan; harita basina gorunurluk
+  - PvP: farkli sirket oyunculari birbirini hedefleyip vurabilir (guvenli bolge disinda).
+    Ayni sirket: yalnizca gorunur, vurulamaz. PvP oldurmede +100 Honor.
+  - Baskalarinin lazer atislari gorunur, NPC'lerin diger oyunculara atislari gorunur
+  - Sohbet: herkese (Enter), giris/cikis duyurulari, oldurme duyurulari
+  - Nukleer, SAB, roket hasari sunucuya bildirilir; EMA/Koruma sirasinda NPC'ler seni hedeflemez
+
+SINIRLAR (bilerek ilk surumde yok)
+  - Hesap, kayit ve ekonomi hala her oyuncunun KENDI bilgisayarinda (user://). Sunucu hasar ve
+    odulleri istemciye guveniyor: test icin yeterli, gercek yayin icin sunucu tarafli hesap gerekir.
+  - Bonus kutular herkeste ayri (yerel).
+  - Baska oyuncularin droid dizilimi ve ozel esya efektleri gorunmez.
+  - Dost oyuncular minimap'te gosterilmez (dusman oyuncular kirmizi nokta olarak gorunur).
+  - Sunucu surekli acik kalmali; kapanirsa istemciler menuye doner.
+
+SUNUCU GUNLUGU: katilma/ayrilma, PvP olumleri, sohbet ve dakikada bir ozet yazilir.
+
+DURUM: Bu paket Godot calistirilmadan, statik olarak yazildi ve kontrol edildi. Ilk calistirmada
+konsolda hata gorursen mesaji oldugu gibi gonder, hemen duzelteyim.

@@ -1,0 +1,26 @@
+NOVAGATE - ATIS SURESI VE NPC HASAR DUZENLEMESI
+===============================================
+
+AYAR (tek yer: data.gd, en ustte)
+  NPC_FIRE_INTERVAL    = 0.90   tum NPC'ler (standart, Boss, Uber, Protegit)
+  PLAYER_FIRE_INTERVAL = 0.60   oyuncu, lazer turunden bagimsiz
+
+DEGISEN DOSYALAR (uzerine yaz; eski halleri *.ates_yedek olarak ekte)
+  data.gd, main.gd, net_game.gd, net_server.gd, test_lazer.gd
+
+NASIL CALISIR
+  - Atis tamamen zaman tabanli (dt ile geri sayan sayac). DOData.rearm_cd() her cagrida EN FAZLA 1 atis uretir;
+    dusuk FPS'te ayni karede ust uste atis birikmez. Ortalama aralik tam 0.90 / 0.60 sn kalir.
+  - Ilk atis: hedef kilitli + menzildeyken hemen. Sonraki atislar aralikla. Menzil disi/olum/koruma = sayac durur, atis yok.
+  - Bir atis = TEK lazer gorseli + TEK hasar (eskiden 3 mermi x 1/3 hasar + rastgele %70-100 carpan vardi; kaldirildi).
+  - NPC hasari DPS degil, atis basina hasardir. "dmg" = sabit ya da minimum; "dmg_max" varsa her atista dmg..dmg_max rastgele.
+  - Cok oyunculu: NPC atis zamani ve hasar degerini SUNUCU belirler (net_server.gd), istemci yalnizca uygular.
+    Oyuncu salvolari sunucuda jeton kovasi ile dogrulanir (PLAYER_FIRE_INTERVAL'dan sik salvo yayinlanmaz).
+  - Boss/Uber NPC'lerin mevcut "dmg" degerleri korundu; artik her atista sabit uygulanir (rastgele carpan yok).
+
+NOTLAR
+  - Protegit icin eski rastgele 3-8 sn aralik ve fire_lock (0.35) kaldirildi / 0'landi; aksi halde 0.90 sn saglanamaz.
+    Cubikon savunmasi cok daha sert olur: ayni anda en fazla 30 Protegit, her biri 0.90 sn'de bir 1125-1500 hasar.
+    Yumusatmak istersen: data.gd CUBIKON "fire_lock" degerini arttir (ama bu 0.90 garantisini bozar).
+  - HP/kalkan degerlerine DOKUNULMADI. Tablodaki bazi degerler projedekinden farkli (RAPORA bak).
+  - Godot bu paket hazirlanirken calistirilmadi; ilk acilista Cikti penceresindeki hatalari kontrol et.

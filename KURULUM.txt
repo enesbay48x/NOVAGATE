@@ -1,0 +1,27 @@
+OZEL ESYALAR PAKETI (5 ekstra)
+
+KURULUM
+ 1) Projenin yedegini al (main.gd, hud_do.gd).
+ 2) Zipin icindekileri project.godot'un oldugu klasore AYNI YOLLARLA kopyala, uzerine yaz:
+      extras.gd          (YENI)
+      main.gd            (senin guncel main.gd'n + 11 satir ekleme)
+      hud_do.gd          (senin guncel hud_do.gd'n + ekler)
+      control_panel.gd   (droidler artik Uzantilar'da degil, DROIDLER sekmesinde gemiye takilir)
+      main.gd ayrica: droidler icin ayri envanter SV.drone_inv (eski kayittaki droidler otomatik tasinir)
+      assets/extras/     (ikonlar + animasyonlar, .import dosyalariyla birlikte)
+ 3) Godot'u ac, import bitsin, calistir.
+
+KULLANIM
+ Alt-orta menuden "Ozel esyalar" kategorisine tikla -> 5 ekstra ust sirada gorunur.
+ Ekstrayi FAREYLE alt siradaki bir slota surukle. Alt slota tikla ya da 1..0 tusuna bas.
+
+FIYAT / BEKLEME (extras.gd -> DEFS: "price" Uridium, "cd" sn)
+ Nukleer 300 Uridium, bekleme 30 sn | Koruma 3 sn etki, 300 U, bekleme 25 sn | EMA 3 sn etki, 300 U, bekleme 40 sn
+ 10'lu Tamir: basis basina 300 U, 10 hak, haklar bitince 120 sn bekleme sonra 10 hak yenilenir
+ ENC: 500 U, 300 sn etki, bekleme etki bitince baslar (120 sn)
+ Ucret sadece kullanim basarili olunca kesilir; bekleme/yetersiz Uridium/basarisiz kullanimda kesilmez.
+
+main.gd'DE DEGISENLER (hepsi kucuk eklemeler)
+ const Extras / var extras / _ready'de olusturma, _update_game'de extras.tick(dt),
+ hurt() (koruma), _bolt_hit() (ENC), dusman AI + _npc_bolt + _update_guard (EMA),
+ _die() ve _start_run() (reset).

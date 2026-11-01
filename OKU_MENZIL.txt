@@ -1,0 +1,10 @@
+KURULUM
+1) Hepsini proje klasorunun ustune kopyala (main.gd'nin oldugu klasor), "degistir" de:
+     map_bg.gd, minimap_do.gd, mobile_hud.gd      (ESKILERININ USTUNE YAZ)
+     menzil_uygula.py                              (sadece kurulum icin)
+   map_bg.gd'nin bu surumu onceki arka plan paketindekinin yerine gecer (arka plan ozellikleri aynen duruyor).
+2) Proje klasorunde:   python menzil_uygula.py     (main.gd'ye 1 satir + gerekirse 1 const ekler, yedek alir)
+3) Godot'u ac, oyunu calistir.
+
+AYAR: map_bg.gd basindaki VISION_MUL (su an 2.0 = lazer menzilinin 2 kati). Buyutursan hem ekranda hem minimap'te gorus menzili buyur.
+GERI ALMA: main.gd.menzil_yedek -> main.gd

@@ -1,0 +1,66 @@
+--- ../data_gd/hud_do.gd	2026-10-31 19:03:38.000000000 +0000
++++ hud_do.gd	2026-10-31 20:25:50.061834454 +0000
+@@ -24,8 +24,10 @@
+ const PITCH := 43.0
+ const CELL := 40.0
+ const Extras := preload("res://extras.gd")
++const MobileHud = preload("res://mobile_hud.gd")
+ 
+ var game = null
++var mobile = null            # mobile_hud.gd (telefon arayuzu: joystick + tasinabilir butonlar)
+ var minimap = null
+ var lbl_toast: Label
+ var lbl_prompt: Label
+@@ -104,6 +106,7 @@
+ 	var subtitle := ""
+ 	var body: Control
+ 	var moved := false
++	var locked := false   # mobil: minimap gibi sabit pencereler suruklenemez
+ 	var _tex := {}
+ 	var _font: SystemFont
+ 	var _drag := false
+@@ -152,7 +155,7 @@
+ 	func _gui_input(ev: InputEvent) -> void:
+ 		var mb := ev as InputEventMouseButton
+ 		if mb != null and mb.button_index == MOUSE_BUTTON_LEFT:
+-			if mb.pressed and mb.position.y < HEAD:
++			if mb.pressed and mb.position.y < HEAD and not locked:
+ 				_drag = true
+ 				_drag_off = get_global_mouse_position() - global_position
+ 			else:
+@@ -507,6 +510,11 @@
+ 	_build_menu()
+ 	_build_actionbar()
+ 	_build_labels()
++	mobile = MobileHud.new()
++	mobile.game = game
++	mobile.hud = self
++	add_child(mobile)
++	mobile.build()
+ 	resized.connect(_layout)
+ 	_layout()
+ 	_log_system("NOVAGATE HUD hazir. Kisayollar: Enter sohbet, F arkadaslar, Q gorevler.")
+@@ -1380,6 +1388,12 @@
+ 	lbl_toast.position = Vector2(vs.x * 0.5 - 300.0, 140.0)
+ 	lbl_prompt.position = Vector2(abar.position.x + abar.size.x * 0.5 - 300.0, abar.position.y - 30.0)
+ 	lbl_help.position = Vector2(10, vs.y - 18.0)
++	if mobile != null:
++		mobile.apply_layout()   # telefonda: joystick/butonlari ve PC pencerelerini mobil duzene sok
++
++
++func mobile_ui_on() -> bool:
++	return mobile != null and mobile.mobile_on()
+ 
+ 
+ func layout_right() -> void:
+@@ -1439,6 +1453,10 @@
+ 			if le.has_focus() and not le.get_global_rect().has_point(mb.position):
+ 				le.release_focus()
+ 	var k := ev as InputEventKey
++	if k != null and k.pressed and not k.echo and k.keycode == KEY_F10 and mobile != null:
++		mobile.toggle_forced()   # PC'de mobil arayuzu denemek icin
++		get_viewport().set_input_as_handled()
++		return
+ 	if k != null and k.pressed and k.keycode == KEY_ESCAPE:
+ 		for le in [chat_in, friend_in]:
+ 			if le.has_focus():

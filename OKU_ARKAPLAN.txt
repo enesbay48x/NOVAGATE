@@ -1,0 +1,16 @@
+KURULUM (3 adim)
+1) Bu zip'in icindekileri oyunun proje klasorune kopyala (main.gd'nin oldugu klasor):
+     map_bg.gd, arkaplan_uygula.py  ->  proje klasorune
+     assets/backgrounds/            ->  proje icindeki assets klasorune
+2) Proje klasorunde komut satirini ac ve calistir:   python arkaplan_uygula.py
+   (main.gd'ye 4 kucuk satir ekler, yedegini main.gd.arkaplan_yedek olarak alir)
+3) Godot'u ac, 29 gorselin iceri aktarilmasini bekle, oyunu calistir.
+
+AYARLAR (map_bg.gd'nin basinda)
+  MAP_BG        : hangi haritada hangi gorsel (1..29). Istedigini degistir.
+  EDGE_SOFT     : sinira yaklasirken kararma mesafesi
+  DIM_PORTAL_R / DIM_PORTAL_K : kapi cevresi kisma yaricapi / gucu
+  DIM_BASE_R / DIM_BASE_K     : ust cevresi
+  OVERSCAN      : gorselin kayma payi (1.0 = kayma yok)
+
+GERI ALMA: main.gd.arkaplan_yedek dosyasini main.gd olarak geri kopyala.

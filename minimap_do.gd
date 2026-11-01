@@ -1,0 +1,194 @@
+extends Control
+const DOData = preload("res://data.gd")
+const MapBg = preload("res://map_bg.gd")
+# DarkOrbit tarzi minimap penceresi:
+#  - ustte harita adi + gemi koordinati (baslik seridi)
+#  - harita resmi, gemi (beyaz ok), dusmanlar (kirmizi), kapilar (kapi ikonu), ust (yesil kare)
+#  - altta dusman / kapi sayaci seridi
+#  - sol tik / surukle = gemiyi oraya gonder
+
+signal move_requested(wx: float, wz: float)   # Godot birimi cinsinden dunya konumu
+
+const PAD := 0.0
+const HEAD := 0.0
+const FOOT := 18.0
+const IMG_W := 210.0
+
+var game = null            # main.gd (Variant: dinamik erisim)
+var title_win = null       # pencere cercevesi (baslikta harita adi + koordinat)
+var tex: Texture2D = null
+var gate_tex: Texture2D = null
+var map_name := ""
+var map_w := 21000.0       # DO birimi
+var map_h := 13100.0
+var img_h := 131.0
+
+const REDRAW_HZ := 12.0
+var _redraw_acc := 0.0
+
+
+func _init() -> void:
+	mouse_filter = Control.MOUSE_FILTER_STOP
+
+
+func _process(dt: float) -> void:
+	if not visible or game == null or not game.running or game.P == null:
+		return
+	_redraw_acc += dt
+	if _redraw_acc < 1.0 / REDRAW_HZ:
+		return
+	_redraw_acc = 0.0
+	queue_redraw()
+
+
+var _font: SystemFont = null
+
+
+func _get_font() -> Font:
+	if _font == null:
+		_font = SystemFont.new()
+		_font.font_names = PackedStringArray(["Verdana", "Tahoma", "Segoe UI", "Arial"])
+	return _font
+
+
+func panel_size() -> Vector2:
+	return Vector2(IMG_W, img_h + FOOT)
+
+
+func set_map(n: String, w: float, h: float, t: Texture2D) -> void:
+	map_name = n
+	map_w = w
+	map_h = h
+	tex = t
+	img_h = IMG_W * h / w
+	if gate_tex == null and game != null:
+		gate_tex = game._tex("res://assets/hud/win/mk_gate.png")
+	queue_redraw()
+
+
+func _g2m(p: Vector3) -> Vector2:
+	return Vector2(PAD + p.x / (map_w * DOData.S) * IMG_W, HEAD + p.z / (map_h * DOData.S) * img_h)
+
+
+func _gui_input(event: InputEvent) -> void:
+	var mb := event as InputEventMouseButton
+	if mb != null:
+		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			_emit_move(mb.position)
+			accept_event()
+		return
+	var mo := event as InputEventMouseMotion
+	if mo != null and (mo.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
+		_emit_move(mo.position)
+		accept_event()
+
+
+func _emit_move(local: Vector2) -> void:
+	var nx := clampf((local.x - PAD) / IMG_W, 0.0, 1.0)
+	var nz := clampf((local.y - HEAD) / img_h, 0.0, 1.0)
+	move_requested.emit(nx * map_w * DOData.S, nz * map_h * DOData.S)
+
+
+func _draw() -> void:
+	if game == null or game.P == null or not is_instance_valid(game.P.node):
+		return
+	var sz := panel_size()
+	var font: Font = _get_font()
+	var img_rect := Rect2(PAD, HEAD + 0.0, IMG_W, img_h)
+	var pp: Vector3 = game.P.node.position
+	var coord := "%d / %d" % [int(pp.x / DOData.S), int(pp.z / DOData.S)]
+	if title_win != null and (title_win.title != map_name or title_win.subtitle != coord):
+		title_win.title = map_name
+		title_win.subtitle = coord
+		title_win.queue_redraw()
+
+	# Arka plan: duz siyah (harita resmi cizilmez)
+	draw_rect(img_rect, Color(0.0, 0.0, 0.0, 1.0))
+	# Izgara (DO minimap hissi)
+	for i in range(1, 4):
+		var gx := img_rect.position.x + img_rect.size.x * float(i) / 4.0
+		draw_line(Vector2(gx, img_rect.position.y), Vector2(gx, img_rect.end.y), Color(0.4, 0.7, 0.9, 0.12), 1.0)
+	for j in range(1, 3):
+		var gy := img_rect.position.y + img_rect.size.y * float(j) / 3.0
+		draw_line(Vector2(img_rect.position.x, gy), Vector2(img_rect.end.x, gy), Color(0.4, 0.7, 0.9, 0.12), 1.0)
+	draw_rect(img_rect, Color(0.45, 0.7, 0.85, 0.85), false, 1.0)
+
+	# Ust + guvenli bolge
+	if game.base_pos != null:
+		var bp := _g2m(game.base_pos)
+		var rr: float = DOData.SAFE_RADIUS / map_w * IMG_W
+		draw_arc(bp, rr, 0.0, TAU, 28, Color(0.4, 1.0, 0.55, 0.45), 1.0)
+		draw_rect(Rect2(bp - Vector2(4, 4), Vector2(8, 8)), Color(0.4, 1.0, 0.55))
+		draw_rect(Rect2(bp - Vector2(4, 4), Vector2(8, 8)), Color(0, 0.25, 0.1), false, 1.0)
+
+	# Kapilar
+	for p in game.portals:
+		var c := _g2m(p.pos)
+		if gate_tex != null:
+			draw_texture(gate_tex, c - gate_tex.get_size() * 0.5)
+		else:
+			draw_arc(c, 4.5, 0.0, TAU, 16, Color(0.3, 0.95, 1.0), 1.6)
+
+	# Gorus menzili siniri: yalnizca bu daire icindeki dusmanlar gorunur (zoom'dan etkilenmez)
+	var vis_do: float = MapBg.vision_do()
+	# (menzil dairesi artik cizilmez; gorus menzili gorunmez, yalnizca menzildeki dusmanlar gosterilir)
+
+	# Dusmanlar (yalnizca menzildekiler)
+	var lim: float = vis_do * DOData.S
+	var n_en := 0
+	for e in game.enemies:
+		if not is_instance_valid(e.node):
+			continue
+		if Vector2(e.node.position.x - pp.x, e.node.position.z - pp.z).length() > lim:
+			continue
+		n_en += 1
+		var ep := _g2m(e.node.position)
+		var col := Color(1.0, 0.25, 0.25)
+		if e.aggro:
+			col = Color(1.0, 0.55, 0.1)
+		draw_rect(Rect2(ep - Vector2(1.5, 1.5), Vector2(3, 3)), col)
+
+	# Grup arkadaslari: gorus menzili siniri YOK, haritanin her yerinde gorunur (yesil)
+	if Net.online and Net.gm != null:
+		for ge in Net.gm.group_ents():
+			var gp := _g2m(ge.node.position)
+			draw_rect(Rect2(gp - Vector2(3, 3), Vector2(6, 6)), Color(0.35, 1.0, 0.45))
+			draw_rect(Rect2(gp - Vector2(3, 3), Vector2(6, 6)), Color(1, 1, 1, 0.9), false, 1.0)
+			draw_string(font, gp + Vector2(5, 3), str(ge.name), HORIZONTAL_ALIGNMENT_LEFT, 70, 9, Color(0.6, 1.0, 0.65))
+
+	# Hedef
+	if game.target != null and is_instance_valid(game.target.node):
+		var tp := _g2m(game.target.node.position)
+		draw_arc(tp, 5.0, 0.0, TAU, 14, Color(1.0, 0.95, 0.3), 1.4)
+
+	# Gidilecek nokta
+	if game.dest != null:
+		var dp := _g2m(game.dest)
+		draw_arc(dp, 3.0, 0.0, TAU, 12, Color(0.4, 1.0, 0.4), 1.2)
+
+	# Kamera gorus kutusu
+	var vr: Rect2 = game.view_rect
+	if vr.size.x > 0.0:
+		var a := _g2m(Vector3(vr.position.x, 0.0, vr.position.y))
+		var b := _g2m(Vector3(vr.end.x, 0.0, vr.end.y))
+		var box := Rect2(a, b - a).intersection(img_rect)
+		if box.size.x > 0.0 and box.size.y > 0.0:
+			draw_rect(box, Color(1, 1, 1, 0.5), false, 1.0)
+
+	# Gemi (beyaz ok)
+	var sp := _g2m(pp)
+	var yaw: float = game.P.node.rotation.y
+	var fwd := Vector2(sin(yaw), cos(yaw))
+	var side := Vector2(fwd.y, -fwd.x)
+	var tip := sp + fwd * 6.0
+	var l := sp - fwd * 3.0 + side * 3.5
+	var r := sp - fwd * 3.0 - side * 3.5
+	draw_colored_polygon(PackedVector2Array([tip, l, sp - fwd * 1.2, r]), Color(1, 1, 1))
+
+	# Alt serit: sayaclar
+	var fy := HEAD + img_h + 14.0
+	draw_line(Vector2(1, HEAD + img_h + 1.0), Vector2(sz.x - 1, HEAD + img_h + 1.0), Color(0.3, 0.62, 0.85, 0.5), 1.0)
+	draw_rect(Rect2(PAD, fy - 8.0, 6, 6), Color(1.0, 0.3, 0.3))
+	draw_string(font, Vector2(PAD + 10.0, fy), "Dusman %d" % n_en, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.93, 1.0))
+	draw_rect(Rect2(sz.x * 0.5 + 4.0, fy - 8.0, 6, 6), Color(0.3, 0.95, 1.0))
+	draw_string(font, Vector2(sz.x * 0.5 + 14.0, fy), "Kapi %d" % game.portals.size(), HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.93, 1.0))

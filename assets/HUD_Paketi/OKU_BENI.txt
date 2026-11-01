@@ -1,0 +1,32 @@
+DarkOrbit HUD Paketi (darkorbit-cms-master.zip icinden ayiklandi)
+Klasor yapisi orijinal projeyle ayni; ayni yollara kopyalayabilirsin.
+
+SAVAS HUD'LARI
+  spacemap/graphics/ui/spacemap.swf, ui.swf, gameclientCommonUI.swf (+Structure.xml)
+  spacemap/graphics/ui/windows/killUI/killUI.xml
+  spacemap/graphics/ui/battleStationsUI.swf, sectorControl.swf
+  spacemap/graphics/ui/windows/booster/ (booster HUD)
+  spacemap/graphics/ui/itemsControlMenu* , featuresMenu* (alt/yan menu + ikonlar)
+  spacemap/graphics/ui/bitmapFont*, icons.swf, iconsPack.xml, hints.swf, misc.swf,
+  placeholders.swf, clickBubbles.swf, window.swf, downGradedWindow.swf, pearkIcons.swf
+
+MINIMAP
+  spacemap/graphics/ui/minimap.swf
+  spacemap/graphics/minimaps/ (harita resimleri)
+
+ARKADAS EKLEME (Contacts)
+  spacemap/graphics/ui/windows/contacts/
+
+GOREV (Quest)
+  spacemap/graphics/ui/questSystem.swf, questWin.swf
+  spacemap/graphics/ui/windows/questChain/
+  spacemap/templates/en/resource_quest.xml
+
+CHAT
+  gamechat/as3/ (chat.swf, cfg, lang, skin)
+  spacemap/graphics/ui/windows/chat/
+
+BUTONLAR / ORTAK
+  swf_global/inventory/graphics/ui/accordionBtn.swf
+  spacemap/graphics/ui/windows/confirmationPopup/, settings/
+  spacemap/templates/en/flashres.xml, language_en.xml, spacemap/xml/resources.xml

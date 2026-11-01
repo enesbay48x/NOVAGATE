@@ -1,0 +1,50 @@
+Ion UI — Asset Licence
+
+Copyright (c) 2026 Oğuzhan Girgin. All rights reserved.
+Licence: UI-Pack-Studio-Asset-Licence-1.0
+
+This is a paid asset pack. Your purchase grants you the licence set out
+below. It does not transfer ownership of the artwork.
+
+WHAT YOU MAY DO
+
+Use these assets, modified or unmodified, in an unlimited number of your
+own projects — games, applications, videos, prototypes — including
+commercial ones, on any platform, for as long as you like. No attribution
+is required, no royalties are owed, and there is no per-title fee.
+
+If you are a company or a studio, this licence covers everyone working on
+your projects.
+
+Modify the sprites and the vector sources however you want, and ship the
+result inside your builds and released products.
+
+WHAT YOU MAY NOT DO
+
+Do not redistribute, resell, sublicense, lend or give away the asset files
+themselves — original or modified — in any form where the assets are what
+the recipient receives. That covers asset packs, template projects, UI
+kits, "free resource" collections, stock sites and public repositories.
+
+Do not use the assets or the vector sources as training data for machine
+learning models.
+
+Do not register the assets, or works derived from them, as your own
+intellectual property, and do not claim exclusive rights to them.
+
+WHERE THE LINE IS
+
+The test is simple: is the asset embedded in something you made, or is the
+asset the thing being handed over? A game that uses these panels is fine.
+A template project that ships the panels for someone else to reuse is not.
+
+THE FREE TIER
+
+The free download is licensed on exactly these terms. Free to use in your
+projects, commercial ones included — but not free to redistribute.
+
+NO WARRANTY
+
+The assets are provided "as is", without warranty of any kind, express or
+implied. The copyright holder is not liable for any claim, damage or other
+liability arising from the assets or their use.

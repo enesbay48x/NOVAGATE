@@ -1,0 +1,42 @@
+--- ../data_gd/main.gd	2026-10-31 20:07:48.000000000 +0000
++++ main.gd	2026-10-31 20:25:50.063143867 +0000
+@@ -2418,6 +2418,24 @@
+ func _notification(what: int) -> void:
+ 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+ 		save_game()
++	elif what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
++		save_game()   # telefonda uygulamadan cikinca ilerleme kaybolmasin
++	elif what == NOTIFICATION_WM_GO_BACK_REQUEST:
++		_on_go_back()   # Android geri tusu
++
++
++# Android geri tusu: once acik pencereyi kapat, yoksa hedefi / hareketi birak (oyundan atmaz).
++func _on_go_back() -> void:
++	if not running:
++		return
++	if dohud != null and dohud.close_popups():
++		return
++	if base_menu.visible:
++		base_menu.visible = false
++	elif gal_panel.visible:
++		gal_panel.visible = false
++	else:
++		_stop_all()
+ 
+ 
+ func _make_player() -> void:
+@@ -3023,6 +3041,14 @@
+ func _unhandled_input(event: InputEvent) -> void:
+ 	if not running:
+ 		return
++	# Mobil arayuz acikken dunya girdisi (hareket / hedef / zoom) mobile_hud.gd tarafindan yonetilir.
++	# Dokunma ayni anda sahte fare olayina da cevrildigi icin burada tekrar islenmez (cift tetikleme olmasin).
++	if dohud != null and dohud.mobile_ui_on():
++		if event is InputEventScreenTouch or event is InputEventScreenDrag:
++			return
++		var gmb := event as InputEventMouseButton
++		if gmb != null and (gmb.button_index == MOUSE_BUTTON_LEFT or gmb.button_index == MOUSE_BUTTON_RIGHT):
++			return
+ 	var touch := event as InputEventScreenTouch
+ 	if touch != null and touch.pressed:
+ 		if base_menu.visible or gal_panel.visible:

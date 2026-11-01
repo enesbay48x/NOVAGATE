@@ -1,0 +1,33 @@
+NOVAGATE - MOBIL ARAYUZ PAKETI
+
+KURULUM
+  1) Projenizin yedegini alin (main.gd, hud_do.gd, project.godot).
+  2) Bu zipin icindekileri proje klasorune (project.godot'un oldugu yer) AYNI YOLLARLA kopyalayin:
+       mobile_hud.gd           (YENI)
+       hud_do.gd               (mobil baglantisi eklendi)
+       main.gd                 (mobilde dunya girdisi + Android geri tusu + otomatik kayit)
+       project.godot           (yatay ekran kilidi + geri tusu oyunu kapatmaz)
+       assets/mobile/*.png     (buton cerceveleri, Ion UI)
+     Dosyalariniz bu paketi aldiginiz zip'ten sonra degistiyse, *.diff dosyalarindaki
+     satirlari elle ekleyin (hud_do.gd'de ~18, main.gd'de ~24, project.godot'ta 2 satir).
+  3) Godot'u acin (yeni PNG'ler import edilir), Android'e export edin. Virtual-Joystick-DX eklentisine
+     gerek yok; joystickler mobile_hud.gd icinde yazili.
+
+NASIL CALISIR
+  Telefon / tablet : mobil arayuz otomatik acilir. PC'de eskisi gibi PC ekrani gelir.
+  PC'de denemek    : F10 (ac / kapat) ya da oyunu "--mobil" parametresiyle baslat.
+  Sol joystick     : gemi hareketi (ne kadar iterseniz o kadar hizli).
+  Sag joystick     : yon verdikce o yondeki dusmani hedef secer. Kisa dokunus: en yakin dusmani sec + ates ac/kapat.
+  Butonlar         : X1 X2 X3 X4 SAB RSB, ROKET, 5 ozel esya, ATES, ATLA (kapi), DIZ (dizilim), MENU, CHAT.
+  Minimap          : sag ustte sabit.
+  Bos yere dokunus : git, dusmana dokunus: hedef sec. Iki parmakla sikistir/ac: zoom.
+  MENU butonu      : ust menuyu acar. Orada "HUD DUZENLE" var.
+
+HUD DUZENLE
+  Butonlari ve joystickleri surukleyip istediginiz yere birakin. Dokunarak secin, -/+ ile o ogenin boyutunu,
+  secim yokken tum arayuzun boyutunu ayarlayin. SEFFAFLIK ve SIFIRLA var. BITTI ile kaydedilir
+  (cihazda user://mobile_ui.cfg).
+
+NOT
+  Bu paket Godot calistirilmadan, statik olarak kontrol edildi. Ilk acilista konsolda hata gorurseniz
+  mesaji gonderin, duzeltelim.

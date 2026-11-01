@@ -1,0 +1,14 @@
+NOVAGATE - UZAY SISI + BONUS KUTU SENKRONU
+
+KURULUM
+ 1) Projenin yedegini al.
+ 2) Bu klasorun icindekileri project.godot klasorune AYNI YOLLARLA kopyala (uzerine yaz):
+      space_fog.gd (YENI), assets/fog/cloud_01..10.png (YENI)
+      main.gd, net.gd, net_server.gd, net_game.gd (senin son dosyalarin + kucuk eklemeler)
+ 3) Godot ac, dokularin iceri aktarilmasini bekle, calistir. Hata olursa Cikti mesajini gonder.
+ 4) Sunucuyu ve TUM istemcileri bu surumle guncelle (PROTO 3 -> 4).
+
+SIS AYARLARI: space_fog.gd basi (intensity, speed, quality, LAYERS, TINTS, MAP_TINTS)
+  F8 = ac/kapat   Shift+F8 = kalite
+BONUS KUTULAR: sunucu dogurur, herkes ayni kutulari gorur, ilk alan kazanir, 90 sn sonra yenisi cikar (BOX_RESPAWN).
+Godot calistirilmadan, statik olarak yazildi ve kontrol edildi.
