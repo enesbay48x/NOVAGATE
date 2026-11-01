@@ -50,10 +50,6 @@ jobs:
           "$GODOT" --headless --path "$GITHUB_WORKSPACE" --export-release "iOS" build/NOVAGATE.ipa 2>&1 | tee export.log
           test -f build/NOVAGATE.xcodeproj/project.pbxproj
 
-      - name: Fix linker flags in Xcode project
-        run: |
-          python3 .github/scripts/fix_linker_flags.py
-
       - name: Build unsigned .app with xcodebuild
         run: |
           set -o pipefail
@@ -66,7 +62,7 @@ jobs:
             -archivePath build/NOVAGATE.xcarchive \
             archive \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
-            OTHER_LDFLAGS="-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio" | tee xcodebuild.log
+            -xcconfig .github/scripts/linker_flags.xcconfig | tee xcodebuild.log
 
       - name: Package unsigned IPA
         run: |
