@@ -61,7 +61,8 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/NOVAGATE.xcarchive \
             archive \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" | tee xcodebuild.log
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            OTHER_LDFLAGS="-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio" | tee xcodebuild.log
 
       - name: Package unsigned IPA
         run: |
