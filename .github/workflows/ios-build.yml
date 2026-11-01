@@ -38,25 +38,10 @@ jobs:
       - name: Create temporary iOS icons
         run: |
           mkdir -p icons
-          cat > /tmp/make_icons.py <<'EOF'
-import struct, zlib
-sig = b'\x89PNG\r\n\x1a\n'
-ihdr = struct.pack('>IIBBBBB', 1,1,8,2,0,0,0)
-ihdr_crc = zlib.crc32(b'IHDR'+ihdr) & 0xffffffff
-ihdr_chunk = struct.pack('>I', 13) + b'IHDR' + ihdr + struct.pack('>I', ihdr_crc)
-raw = b'\x00\x00\x00\x00'
-idat_raw = b'\x00' + raw
-comp = zlib.compress(idat_raw)
-idat_crc = zlib.crc32(b'IDAT'+comp) & 0xffffffff
-idat_chunk = struct.pack('>I', len(comp)) + b'IDAT' + comp + struct.pack('>I', idat_crc)
-iend_crc = zlib.crc32(b'IEND') & 0xffffffff
-iend_chunk = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
-png = sig + ihdr_chunk + idat_chunk + iend_chunk
-sizes = ['icon_1024x1024','icon_1024x1024_dark','icon_1024x1024_tinted','ios_128x128','ios_136x136','ios_192x192','ipad_152x152','ipad_167x167','iphone_120x120','iphone_180x180','notification_114x114','notification_40x40','notification_60x60','notification_76x76','settings_58x58','settings_87x87','spotlight_120x120','spotlight_80x80']
-for s in sizes:
-    open('icons/'+s+'.png','wb').write(png)
-EOF
-          python3 /tmp/make_icons.py
+          B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+          for s in icon_1024x1024 icon_1024x1024_dark icon_1024x1024_tinted ios_128x128 ios_136x136 ios_192x192 ipad_152x152 ipad_167x167 iphone_120x120 iphone_180x180 notification_114x114 notification_40x40 notification_60x60 notification_76x76 settings_58x58 settings_87x87 spotlight_120x120 spotlight_80x80; do
+            printf '%s' "$B64" | base64 -d > "icons/$s.png"
+          done
 
       - name: Export iOS Xcode project (official Godot method)
         run: |
