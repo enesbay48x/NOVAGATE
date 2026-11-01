@@ -50,6 +50,18 @@ jobs:
           "$GODOT" --headless --path "$GITHUB_WORKSPACE" --export-release "iOS" build/NOVAGATE.ipa 2>&1 | tee export.log
           test -f build/NOVAGATE.xcodeproj/project.pbxproj
 
+      - name: Fix linker flags in Xcode project
+        run: |
+          # Godot 4.7.2 libgodot.a uses Metal/QuartCore symbols that the exported Xcode
+          # project does not link by default. Add them to OTHER_LDFLAGS in CI only.
+          PBX="build/NOVAGATE.xcodeproj/project.pbxproj"
+          FLAGS='-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio'
+          if grep -q "OTHER_LDFLAGS" "$PBX"; then
+            sed -i '' 's/OTHER_LDFLAGS = [^;]*;/OTHER_LDFLAGS = "'"$FLAGS"'";/' "$PBX"
+          else
+            sed -i '' 's/buildSettings = {/buildSettings = {\n\t\t\tOTHER_LDFLAGS = "'"$FLAGS"'";/' "$PBX"
+          fi
+
       - name: Build unsigned .app with xcodebuild
         run: |
           set -o pipefail
