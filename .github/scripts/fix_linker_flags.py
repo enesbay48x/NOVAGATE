@@ -9,11 +9,16 @@ except FileNotFoundError:
     sys.exit(1)
 
 flags = "-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio"
+replacement = 'OTHER_LDFLAGS = "' + flags + '";'
 
 if "OTHER_LDFLAGS" in s:
-    s = re.sub(r'OTHER_LDFLAGS = [^;]*;', 'OTHER_LDFLAGS = "%s";' % flags, s)
+    count = len(re.findall(r'OTHER_LDFLAGS = [^;]*;', s))
+    s = re.sub(r'OTHER_LDFLAGS = [^;]*;', replacement, s)
+    print("Updated %d OTHER_LDFLAGS entries" % count)
 else:
-    s = re.sub(r'(buildSettings = \{)', r'\1\n\t\tOTHER_LDFLAGS = "%s";' % flags, s)
+    count = len(re.findall(r'buildSettings = \{', s))
+    s = re.sub(r'(buildSettings = \{)', lambda m: m.group(1) + "\n\t\tOTHER_LDFLAGS = " + '"' + flags + '";', s, count=count)
+    print("Added OTHER_LDFLAGS to %d buildSettings blocks" % count)
 
 open(p, "w").write(s)
 print("OTHER_LDFLAGS patched in", p)
