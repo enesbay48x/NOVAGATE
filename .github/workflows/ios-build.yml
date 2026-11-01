@@ -38,6 +38,7 @@ jobs:
       - name: iOS export (resmi Godot yontemi - Xcode projesi uret)
         run: |
           set -o pipefail
+          mkdir -p build
           "$GODOT" --headless --path "$GITHUB_WORKSPACE" --export-release "iOS" build/NOVAGATE.ipa 2>&1 | tee export.log
           test -f build/NOVAGATE.xcodeproj/project.pbxproj
 
