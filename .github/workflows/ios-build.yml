@@ -55,12 +55,16 @@ jobs:
           # Godot 4.7.2 libgodot.a uses Metal/QuartCore symbols that the exported Xcode
           # project does not link by default. Add them to OTHER_LDFLAGS in CI only.
           PBX="build/NOVAGATE.xcodeproj/project.pbxproj"
-          FLAGS='-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio'
-          if grep -q "OTHER_LDFLAGS" "$PBX"; then
-            sed -i '' 's/OTHER_LDFLAGS = [^;]*;/OTHER_LDFLAGS = "'"$FLAGS"'";/' "$PBX"
-          else
-            sed -i '' '/buildSettings = {/a\'"\t\tOTHER_LDFLAGS = "'"$FLAGS"'";' "$PBX"
-          fi
+          python3 -c "
+import re
+p = '$PBX'
+s = open(p).read()
+if 'OTHER_LDFLAGS' in s:
+    s = re.sub(r'OTHER_LDFLAGS = [^;]*;', 'OTHER_LDFLAGS = \"-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio\";', s)
+else:
+    s = re.sub(r'(buildSettings = \{)', r'\1\n\t\tOTHER_LDFLAGS = \"-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio\";', s)
+open(p,'w').write(s)
+"
 
       - name: Build unsigned .app with xcodebuild
         run: |
