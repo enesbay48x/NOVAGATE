@@ -8,7 +8,7 @@ except FileNotFoundError:
     print("pbxproj not found at", p)
     sys.exit(1)
 
-flags = "-framework QuartzCore -framework Metal -framework CoreGraphics -framework CoreAudio"
+flags = "-Wl,-framework,QuartzCore -Wl,-framework,Metal -Wl,-framework,CoreGraphics -Wl,-framework,CoreAudio"
 replacement = 'OTHER_LDFLAGS = "' + flags + '";'
 
 if "OTHER_LDFLAGS" in s:
