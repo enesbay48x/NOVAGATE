@@ -1,0 +1,80 @@
+name: NOVAGATE iOS IPA Build
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Godot 4.7
+        run: |
+          GODOT_VERSION="4.7"
+          GODOT_OS="macos"
+          wget -q "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-${GODOT_OS}.x86_64.zip" -O godot.zip
+          unzip -q godot.zip -d godot
+          chmod +x godot/Godot_v${GODOT_VERSION}-${GODOT_OS}.x86_64
+          echo "GODOT_PATH=$PWD/godot/Godot_v${GODOT_VERSION}-${GODOT_OS}.x86_64" >> $GITHUB_ENV
+
+      - name: Download Godot 4.7 iOS export templates
+        run: |
+          GODOT_VERSION="4.7"
+          wget -q "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/ios_template.zip" -O ios_template.zip
+          wget -q "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/ios_debug_template.zip" -O ios_debug_template.zip
+          mkdir -p ~/.local/share/godot/export_templates/
+          unzip -o -q ios_template.zip -d ~/.local/share/godot/export_templates/
+          unzip -o -q ios_debug_template.zip -d ~/.local/share/godot/export_templates/
+
+      - name: Export iOS Xcode project with Godot
+        run: |
+          $GODOT_PATH --headless --export-release "iOS" export/ios/NOVAGATE.xcodeproj
+
+      - name: Install Xcode command line tools
+        run: |
+          xcode-select --install 2>/dev/null || true
+          sudo xcode-select -switch /Applications/Xcode_15.app/Contents/Developer 2>/dev/null || true
+          xcodebuild -version
+
+      - name: Build IPA with Xcode
+        run: |
+          cd export/ios
+          xcodebuild -project NOVAGATE.xcodeproj \
+            -scheme NOVAGATE \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath ../build/NOVAGATE.xcarchive \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+          
+          mkdir -p ../build/ios
+          xcodebuild -exportArchive \
+            -archivePath ../build/NOVAGATE.xcarchive \
+            -exportPath ../build/ios \
+            -exportOptionsPlist ExportOptions.plist \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO 2>&1 || true
+
+      - name: List build output
+        run: |
+          ls -la build/ios/ 2>/dev/null || echo "No IPA output directory found"
+          find build -name "*.ipa" 2>/dev/null || echo "No .ipa file found"
+
+      - name: Upload IPA artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVAGATE-iOS-IPA
+          path: build/ios/NOVAGATE.ipa
+          retention-days: 90
