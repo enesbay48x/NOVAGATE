@@ -20,14 +20,20 @@ jobs:
       - name: Install iOS export templates
         run: |
           curl -L -o ios_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_export_templates.tpz"
+          mkdir -p /tmp/godot_templates
+          unzip -o -q ios_templates.tpz -d /tmp/godot_templates
+          echo "=== Template archive contents ==="
+          find /tmp/godot_templates -type f | sort
+          IOS_ZIP=$(find /tmp/godot_templates -name "ios.zip" | head -1)
+          echo "Found iOS template: $IOS_ZIP"
           TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable"
           mkdir -p "$TEMPL_DIR"
-          unzip -o -q ios_templates.tpz -d "$TEMPL_DIR"
-          echo "=== Extracted template contents ==="
-          find "$TEMPL_DIR" -type f | sort
+          cp "$IOS_ZIP" "$TEMPL_DIR/ios.zip"
+          echo "Copied to: $TEMPL_DIR/ios.zip"
 
       - name: Export iOS Xcode project
         run: |
+          mkdir -p export/ios
           GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
           if [ -z "$GODOT_BIN" ]; then
             GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
