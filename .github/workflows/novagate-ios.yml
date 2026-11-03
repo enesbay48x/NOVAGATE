@@ -1,186 +1,221 @@
-# NovaGate iOS Build Workflow
-# ⚠️ IMPORTANT: IPA export requires paid Apple Developer account ($99/year).
-# Free Apple account supports direct device install via Xcode only.
-# IPA export is NOT possible with free account.
+# =============================================================================
+# NovaGate - iOS build (GitHub Actions, macOS + Xcode) -> unsigned IPA
+#
+# Produces:  NovaGate-unsigned.ipa   (Payload/NOVAGATE.app, arm64, NOT signed)
+#
+# Why the IPA is unsigned:
+#   Signing needs an Apple Developer team, a certificate and a provisioning
+#   profile. Nothing like that is faked here. Sideloadly (Windows/macOS) signs
+#   the .app with your own FREE Apple ID at install time and installs it on the
+#   iPhone (free accounts must re-sign every 7 days).
+#
+# Godot 4.7 facts verified in engine source
+# (editor/export/editor_export_platform_apple_embedded.cpp):
+#   * Export fails if `application/app_store_team_id` is empty:
+#       ERR_FAIL_COND_V_MSG(team_id.length() == 0, ...)
+#     so export_presets.cfg keeps a non-signing placeholder value
+#     ("0000000000"). It is never used for signing because xcodebuild runs
+#     with CODE_SIGNING_ALLOWED=NO and DEVELOPMENT_TEAM="".
+#   * The generated scheme name equals the export file base name ("NOVAGATE").
+#     It is still discovered with `xcodebuild -list` instead of being assumed.
+#   * The export target directory must exist before exporting.
+#
+# No `|| true` and no `continue-on-error`: every failing step fails the job.
+# =============================================================================
 
 name: NovaGate iOS Build
 
 on:
   push:
     branches: [ master ]
+    paths-ignore:
+      - 'server/**'
+      - '**.py'
+      - '**.md'
+      - 'aws/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
-  GODOT_VERSION: "4.7"
-  PROJECT_NAME: "NovaGate"
+  GODOT_TAG: "4.7-stable"
+  APP_NAME: "NOVAGATE"
+  XCODEPROJ_NAME: "NOVAGATE.xcodeproj"
 
 jobs:
   build-ios:
+    name: Build unsigned iOS IPA
     runs-on: macos-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Godot 4.7
+      - name: Show runner toolchain
         run: |
-          echo "📥 Downloading Godot 4.7..."
-          curl -L -o godot.zip "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}/Godot_v${{ env.GODOT_VERSION }}_stable_macos.zip"
-          unzip -q godot.zip -d /tmp/godot_build
-          cp -R /tmp/godot_build/Godot.app /Applications/Godot.app
-          echo "✅ Godot 4.7 installed"
+          set -euo pipefail
+          sw_vers
+          xcode-select -p
+          xcodebuild -version
 
-      - name: Verify Godot version
+      - name: Install Godot 4.7 editor
         run: |
-          /Applications/Godot.app/Contents/MacOS/Godot --version
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/godot"
+          curl -fL --retry 3 --retry-delay 5 \
+            -o "$RUNNER_TEMP/godot.zip" \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/Godot_v${GODOT_TAG}_macos.universal.zip"
+          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
+          test -x "$RUNNER_TEMP/godot/Godot.app/Contents/MacOS/Godot"
+          "$RUNNER_TEMP/godot/Godot.app/Contents/MacOS/Godot" --version
 
-      - name: Download Godot iOS Export Template
+      - name: Install Godot 4.7 export templates
         run: |
-          echo "📥 Downloading iOS Export Template..."
-          curl -L -o ios_template.zip "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}/Godot_v${{ env.GODOT_VERSION }}_stable_export_ios.tpz"
-          mkdir -p ~/.local/share/godot/editor/templates/4.7/
-          unzip -q ios_template.zip -d ~/.local/share/godot/editor/templates/4.7/ios
-          echo "✅ iOS Export Template installed"
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 5 \
+            -o "$RUNNER_TEMP/templates.tpz" \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/Godot_v${GODOT_TAG}_export_templates.tpz"
+          mkdir -p "$RUNNER_TEMP/tpz"
+          unzip -q "$RUNNER_TEMP/templates.tpz" -d "$RUNNER_TEMP/tpz"
+          test -f "$RUNNER_TEMP/tpz/templates/ios.zip"
+          TPL_VERSION="$(tr -d '\r\n' < "$RUNNER_TEMP/tpz/templates/version.txt")"
+          echo "Export template version: $TPL_VERSION"
+          DEST="$HOME/Library/Application Support/Godot/export_templates/$TPL_VERSION"
+          mkdir -p "$DEST"
+          cp -R "$RUNNER_TEMP/tpz/templates/." "$DEST/"
+          test -f "$DEST/ios.zip"
+          ls -la "$DEST"
 
-      - name: Verify iOS export preset in export_presets.cfg
+      - name: Verify project and iOS export preset
         run: |
-          echo "🔍 Checking iOS export preset in export_presets.cfg..."
-          if ! grep -q 'name="iOS"' export_presets.cfg; then
-            echo "❌ ERROR: iOS export preset not found in export_presets.cfg"
+          set -euo pipefail
+          test -f project.godot
+          test -f main.tscn
+          test -f export_presets.cfg
+          grep -q 'config/features=PackedStringArray("4.7")' project.godot
+          grep -q '^name="iOS"$' export_presets.cfg
+          grep -q '^platform="iOS"$' export_presets.cfg
+          grep -q '^application/export_project_only=true$' export_presets.cfg
+          grep -Eq '^application/app_store_team_id=".+"' export_presets.cfg
+          echo "iOS preset verified in export_presets.cfg"
+
+      - name: Import Godot project resources
+        run: |
+          set -euo pipefail
+          GODOT="$RUNNER_TEMP/godot/Godot.app/Contents/MacOS/Godot"
+          "$GODOT" --headless --path "$GITHUB_WORKSPACE" --import
+
+      - name: Export Xcode project from Godot
+        run: |
+          set -euo pipefail
+          GODOT="$RUNNER_TEMP/godot/Godot.app/Contents/MacOS/Godot"
+          mkdir -p "$GITHUB_WORKSPACE/build/ios"
+          "$GODOT" --headless --path "$GITHUB_WORKSPACE" \
+            --export-release "iOS" \
+            "$GITHUB_WORKSPACE/build/ios/${XCODEPROJ_NAME}"
+          test -f "$GITHUB_WORKSPACE/build/ios/${XCODEPROJ_NAME}/project.pbxproj"
+          echo "Xcode project generated:"
+          ls -la "$GITHUB_WORKSPACE/build/ios"
+
+      - name: Discover Xcode scheme
+        run: |
+          set -euo pipefail
+          PROJECT="$GITHUB_WORKSPACE/build/ios/${XCODEPROJ_NAME}"
+          xcodebuild -list -project "$PROJECT" -json > "$RUNNER_TEMP/xcode-list.json"
+          cat "$RUNNER_TEMP/xcode-list.json"
+          SCHEME="$(python3 -c '
+          import json, sys
+          text = open(sys.argv[1]).read()
+          start = text.find("{")
+          data = json.loads(text[start:])
+          schemes = (data.get("project") or {}).get("schemes") or []
+          print(schemes[0] if schemes else "")
+          ' "$RUNNER_TEMP/xcode-list.json")"
+          if [ -z "$SCHEME" ]; then
+            echo "ERROR: the generated Xcode project exposes no shared scheme."
             exit 1
           fi
-          echo "✅ iOS preset found in export_presets.cfg"
+          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
+          echo "Selected scheme: $SCHEME"
 
-      - name: Export iOS project from Godot
+      - name: Build unsigned Xcode archive
         run: |
-          echo "🎮 Exporting iOS project from Godot..."
-          /Applications/Godot.app/Contents/MacOS/Godot \
-            --headless \
-            --path . \
-            --export "iOS" \
-            ./build/ios_export/Novagate.xcodeproj
-
-          if [ ! -d "./build/ios_export/Novagate.xcodeproj" ]; then
-            echo "❌ ERROR: Godot iOS export failed!"
-            echo "🔍 Created files in build/ios_export/:"
-            ls -la ./build/ios_export/ 2>/dev/null || echo "(directory does not exist)"
-            exit 1
-          fi
-          echo "✅ Godot iOS project exported successfully"
-
-      - name: Discover Xcode scheme name
-        run: |
-          echo "🔍 Discovering Xcode scheme name..."
-          cd ./build/ios_export
-          SCHEME_NAME=$(grep -o '"[^"]*" = {isa = PBXNativeTarget;' Novagate.xcodeproj/project.pbxproj | head -1 | sed 's/"//g' | sed 's/ = {isa = PBXNativeTarget;//')
-          echo "📱 Discovered scheme: $SCHEME_NAME"
-          
-          if [ -z "$SCHEME_NAME" ]; then
-            echo "❌ ERROR: Xcode scheme name not found!"
-            exit 1
-          fi
-          echo "SCHEME_NAME=$SCHEME_NAME" >> $GITHUB_ENV
-
-      - name: Xcode Archive
-        run: |
-          cd ./build/ios_export
-          echo "🍎 Building Xcode archive..."
-
-          xcodebuild -scheme "$SCHEME_NAME" -sdk iphoneos \
+          set -euo pipefail
+          PROJECT="$GITHUB_WORKSPACE/build/ios/${XCODEPROJ_NAME}"
+          ARCHIVE="$GITHUB_WORKSPACE/build/NovaGate.xcarchive"
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
             -configuration Release \
-            -archivePath ./Novagate.xcarchive \
-            archive 2>&1 || {
-            echo "❌ ERROR: Xcode archive failed!"
-            exit 1
-          }
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            ONLY_ACTIVE_ARCH=NO \
+            archive
+          test -d "$ARCHIVE/Products/Applications"
+          ls -la "$ARCHIVE/Products/Applications"
 
-          if [ ! -d "./Novagate.xcarchive" ]; then
-            echo "❌ ERROR: Archive not created!"
-            exit 1
-          fi
-
-          echo "✅ Xcode archive created successfully"
-
-      - name: Export IPA (requires paid Apple Developer account)
+      - name: Package unsigned IPA (Payload folder)
         run: |
-          cd ./build/ios_export
-
-          cat > export_options.plist << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>ad-hoc</string>
-              <key>compileBitcode</key>
-              <false/>
-              <key>embedOnDemandResources</key>
-              <false/>
-              <key>stripSwiftSymbols</key>
-              <false/>
-              <key>teamID</key>
-              <string></string>
-          </dict>
-          </plist>
-          EOF
-
-          echo "🍎 Exporting IPA..."
-          xcodebuild -exportArchive \
-            -archivePath ./Novagate.xcarchive \
-            -exportPath ./export \
-            -exportOptionsPlist ./export_options.plist 2>&1 || {
-            echo "❌ ERROR: IPA export failed!"
-            echo ""
-            echo "💡 IMPORTANT: IPA export requires PAID Apple Developer account."
-            echo "              Free Apple account supports direct device install via Xcode only."
-            echo "              IPA export is NOT available with free account."
-            echo ""
-            echo "  To install on your iPhone without paid account:"
-              echo "   1. Download the .xcarchive artifact from this workflow"
-              echo "   2. Open in Xcode on macOS"
-              echo "   3. Connect iPhone and select your device as run target"
-              echo "   4. Press Run to install directly"
-            exit 1
-          }
-
-          if [ ! -d "./export" ] || [ -z "$(ls ./export/*.ipa 2>/dev/null)" ]; then
-            echo "❌ ERROR: IPA file not found after export!"
-            echo "   IPA export requires paid Apple Developer account."
+          set -euo pipefail
+          APPS_DIR="$GITHUB_WORKSPACE/build/NovaGate.xcarchive/Products/Applications"
+          APP="$(find "$APPS_DIR" -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$APP" ]; then
+            echo "ERROR: no .app found inside the xcarchive."
             exit 1
           fi
+          echo "App bundle: $APP"
 
-          echo "✅ IPA exported successfully!"
-          ls -la ./export/*.ipa
+          EXEC_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          test -f "$APP/$EXEC_NAME"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist"
+          lipo -info "$APP/$EXEC_NAME"
+
+          if codesign -dv "$APP" >/dev/null 2>&1; then
+            echo "Note: app bundle already carries a signature."
+          else
+            echo "App bundle is unsigned (expected; Sideloadly will sign it)."
+          fi
+
+          rm -rf "$GITHUB_WORKSPACE/build/ipa"
+          mkdir -p "$GITHUB_WORKSPACE/build/ipa/Payload"
+          cp -R "$APP" "$GITHUB_WORKSPACE/build/ipa/Payload/"
+
+          IPA="$GITHUB_WORKSPACE/build/NovaGate-unsigned.ipa"
+          rm -f "$IPA"
+          ( cd "$GITHUB_WORKSPACE/build/ipa" && zip -qry "$IPA" Payload )
+          test -f "$IPA"
+          unzip -l "$IPA"
+          echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
 
       - name: Upload IPA artifact
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: nova-gate-ios-ipa
-          path: build/ios_export/export/*.ipa
+          name: NovaGate-unsigned-ipa
+          path: build/NovaGate-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Build Summary
+      - name: Write build summary
         run: |
-          echo ""
-          echo "========================================"
-          echo "NOVAGATE iOS BUILD RESULT"
-          echo "========================================"
-          echo "Project: NovaGate"
-          echo "Godot: 4.7"
-          echo "Target: iOS"
-          echo ""
-          echo "⚠️  IMPORTANT:"
-          echo "  - IPA export requires PAID Apple Developer account ($99/year)."
-          echo "  - Free Apple account: Direct device install via Xcode only."
-          echo "  - IPA export is NOT available with free account."
-          echo ""
-          echo "  📱 To install on your iPhone with FREE account:"
-          echo "   1. Download the .xcarchive artifact from this workflow run"
-          echo "   2. Open in Xcode on macOS"
-          echo "   3. Connect iPhone via USB and select it as run target"
-          echo "   4. Click Run to install directly to your iPhone"
-          echo ""
-          echo "   OR use Sideloadly (Windows/Mac) with your Apple ID"
-          echo "   - Sideloadly can install IPA without paid developer account"
-          echo "   - Sideloadly uses your Apple ID to sign temporarily"
-          echo "========================================"
+          set -euo pipefail
+          SIZE="$(du -h "$IPA_PATH" | cut -f 1)"
+          {
+            echo "## NovaGate iOS build"
+            echo ""
+            echo "- Godot: \`${GODOT_TAG}\`"
+            echo "- Xcode scheme: \`${SCHEME}\`"
+            echo "- IPA: \`build/NovaGate-unsigned.ipa\` (${SIZE})"
+            echo "- Code signing: disabled (\`CODE_SIGNING_ALLOWED=NO\`)"
+            echo ""
+            echo "Install with Sideloadly using your free Apple ID."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Build finished: $IPA_PATH ($SIZE)"

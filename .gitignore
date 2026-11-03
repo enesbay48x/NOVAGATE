@@ -18,3 +18,16 @@ __pycache__/
 *.pyo
 .env
 *.log
+
+# Godot import cache ve derleme ciktilari (repoya girmez)
+.godot/
+build/
+export/
+*.xcarchive
+*.ipa
+
+# yerel calisma kopyalari / gecici ciktilar
+Yeni klasör/
+andr/
+android_build/
+
