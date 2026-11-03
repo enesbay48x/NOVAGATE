@@ -1,0 +1,25 @@
+[Unit]
+Description=NOVAGATE oyun sunucusu (Godot 4 headless, ENet UDP 7777)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=novagate
+Group=novagate
+WorkingDirectory=/opt/novagate
+# Headless dedicated sunucu: Godot 4.7.2 linux x86_64
+ExecStart=/opt/godot/godot --headless --path /opt/novagate -- --server --port=7777
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=0
+KillSignal=SIGINT
+TimeoutStopSec=15
+LimitNOFILE=65536
+Environment=LANG=C.UTF-8
+# Journald'a log; dakikalik ozet dahil. Log rotasyonu journald yapar (SystemMaxUse).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

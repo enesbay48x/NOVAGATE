@@ -12,7 +12,7 @@ func _ready():
 		"user_id": "test_kullanici_123",
 		"faction": "MMO"
 	}
-	var json_string = JSON.stringify(data)
+	var json_string: String = JSON.stringify(data)
 	var headers = ["Content-Type: application/json"]
 	
 	var error = http.request(url, headers, HTTPClient.METHOD_POST, json_string)
@@ -22,9 +22,8 @@ func _ready():
 func _on_request_completed(result, response_code, headers, body):
 	print("Sunucudan Yanıt Geldi!")
 	print("Durum Kodu: ", response_code)
-	var json = JSON.new()
-	var parse_error = json.parse(body.get_string_from_utf8())
-	if parse_error == OK:
-		print("Gelen Mesaj: ", json.data)
+	var data = JSON.parse_string(body.get_string_from_utf8())
+	if data != null:
+		print("Gelen Mesaj: ", data)
 	else:
 		print("Gelen Ham Veri: ", body.get_string_from_utf8())

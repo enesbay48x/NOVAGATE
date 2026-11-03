@@ -1,159 +1,142 @@
 # =============================================================================
-# NOVAGATE DEPLOY SCRIPT
-# Yerel proje klasöründeki güncel dosyaları AWS EC2 sunucusuna yükler,
-# derleme denetimi yapar, servisleri yeniden başlatır ve test çalıştırır.
+# NOVAGATE DEPLOY SCRIPT (v2)
+# Yerel proje -> AWS EC2 (Godot sunucusu + Python servisleri).
+#
+# ESKI SURUMDEKI HATALAR (bu yuzden sunucu hic guncellenmemis olabilir):
+#   1) $FILES dizisinin sonunda fazladan virgul vardi -> PowerShell "Missing expression after ','" ile
+#      betigi hic baslatmiyordu.
+#   2) SSH/SCP komutlari tek bir metin olarak "& $full" ile calistiriliyordu -> PowerShell tum metni
+#      programin ADI sanir, ssh hic calismaz.
+#   3) Sadece 6 dosya yukleniyordu. net.gd (RPC tanimlari), safe_zone.gd, skill_tree.gd, auction.gd,
+#      project.godot gibi dosyalar eski kaldigi icin istemci ile sunucu ayni RPC listesine sahip degildi.
+#      Godot RPC'leri isimle degil SIRALI numarayla eslestirir; liste farkliysa NPC/kutu/kapi/odul
+#      mesajlari sessizce kaybolur veya yanlis fonksiyona gider.
+#   4) "Basarili" karari yalnizca Python token testine bakiyordu; Godot sunucusu acilmamis olsa bile
+#      DEPLOY BASARILI yaziyordu.
 # =============================================================================
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"   # yerel programlarin stderr'i betigi durdurmasin; cikis kodlarina bakilir
 
 # --- Ayarlar ---
-$SSH_KEY   = "C:\Users\Pc\.ssh\novagate_vds_ed25519"
-$SSH_USER  = "ubuntu"
-$SSH_HOST  = "18.117.15.199"
-$SSH       = "ssh -i `"$SSH_KEY`" -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new `"$SSH_USER`@`$SSH_HOST`"
-$SCP       = "scp -i `"$SSH_KEY`" -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+$SSH_KEY  = "C:\Users\Pc\.ssh\novagate_vds_ed25519"
+$SSH_USER = "ubuntu"
+$SSH_HOST = "18.117.15.199"
+$TARGET   = "${SSH_USER}@${SSH_HOST}"
+$SSH_OPTS = @("-i", $SSH_KEY, "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new")
 
-$SERVER_DIR = "/opt/novagate/server"
 $PROJECT_DIR = "/opt/novagate"
-
-$BACKUP_TS = Get-Date -Format "yyyyMMdd_HHmmss"
-
-# Yüklemek istediğimiz dosyalar (yerel -> sunucu)
-$FILES = @(
-    @{ Local = "server/auth_service.py"; Remote = "$SERVER_DIR/auth_service.py" },
-    @{ Local = "server/server_db.py";    Remote = "$SERVER_DIR/server_db.py" },
-    @{ Local = "net_server.gd";          Remote = "/opt/novagate/net_server.gd" },
-    @{ Local = "main.gd";                Remote = "/opt/novagate/main.gd" },
-    @{ Local = "net_game.gd";            Remote = "/opt/novagate/net_game.gd" },
-    @{ Local = "data.gd";                Remote = "/opt/novagate/data.gd" },
-)
-
-# Test betiği
+$STAGE_DIR   = "/tmp/novagate_upload"
+$BACKUP_TS   = Get-Date -Format "yyyyMMdd_HHmmss"
+$BACKUP_DIR  = "/tmp/novagate_backup_$BACKUP_TS"
 $TEST_SCRIPT = "test_register_and_login.py"
 
-# =============================================================================
-function SSH-Exec([string]$cmd) {
-    $full = "$SSH `"$cmd`""
-    & $full 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "SSH komut basarisiz: $cmd"
+function SSH-Exec([string]$cmd, [switch]$AllowFail) {
+    $out = & ssh @SSH_OPTS $TARGET $cmd 2>&1
+    $code = $LASTEXITCODE
+    if ($code -ne 0 -and -not $AllowFail) {
+        throw "SSH komutu basarisiz (kod $code): $cmd`n$($out -join "`n")"
     }
+    return ($out -join "`n")
 }
 
 function SCP-Upload([string]$local, [string]$remote) {
-    $full = "$SCP `"$local`" `"$SSH_USER`@`$SSH_HOST`:$remote`""
-    & $full 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "SCP yukleme basarisiz: $local -> $remote"
+    & scp @SSH_OPTS $local "${TARGET}:$remote" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "SCP yukleme basarisiz: $local -> $remote" }
+}
+
+# --- Yuklenecek dosyalar (proje kokune gore GORECE yollar) ---
+# Kokteki tum .gd dosyalari (sunucu ayni projeyi calistirir: main.gd bile parse edilir) + project.godot
+# + iki Python servis dosyasi. Test/arac/yedek dosyalari haric.
+$EXCLUDE = @("net_server_from_server.gd", "_probe_mp.gd", "_load_client.gd")
+$files = @()
+foreach ($g in Get-ChildItem -Path . -Filter "*.gd" -File) {
+    if ($EXCLUDE -contains $g.Name) { continue }
+    if ($g.Name -like "test_*") { continue }
+    $files += $g.Name
+}
+$files += "project.godot"
+$files += "server/auth_service.py"
+$files += "server/server_db.py"
+
+foreach ($f in $files) {
+    if (-not (Test-Path $f)) { Write-Host "EKSIK DOSYA: $f" -ForegroundColor Red; exit 1 }
+}
+if (-not ($files -contains "net.gd")) { Write-Host "net.gd listede yok, durduruldu." -ForegroundColor Red; exit 1 }
+
+Write-Host "=== NOVAGATE DEPLOY BASLADI: $BACKUP_TS  ($($files.Count) dosya) ===" -ForegroundColor Cyan
+
+try {
+    # --- 1. Yerel Python denetimi ---
+    Write-Host "[1/6] Yerel Python dosyalari denetleniyor..." -ForegroundColor Yellow
+    foreach ($f in ($files | Where-Object { $_ -like "*.py" })) {
+        & python -m py_compile $f 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "PY_COMPILE HATA: $f" }
+        Write-Host "  OK: $f"
     }
-}
 
-# =============================================================================
-Write-Host "=== NOVAGATE DEPLOY BASLADI: $BACKUP_TS ===" -ForegroundColor Cyan
+    # --- 2. Sunucudaki dosyalari yedekle ---
+    Write-Host "[2/6] Sunucudaki mevcut dosyalar yedekleniyor: $BACKUP_DIR" -ForegroundColor Yellow
+    $list = ($files | ForEach-Object { "'$_'" }) -join " "
+    SSH-Exec ("sudo mkdir -p '$BACKUP_DIR' && cd '$PROJECT_DIR' && for f in $list; do if [ -f " + '"$f"' + " ]; then sudo cp --parents " + '"$f"' + " '$BACKUP_DIR'/; fi; done; true") | Out-Null
 
-# --- 1. Sunucudaki dosyaların zaman damgalı yedeği al ---
-Write-Host "[1/7] Sunucudaki dosyalar yedekleniyor..." -ForegroundColor Yellow
-$backupDir = "/tmp/novagate_backup_$BACKUP_TS"
-SSH-Exec "mkdir -p `"$backupDir`""
-foreach ($f in $FILES) {
-    $remote = $f.Remote
-    SSH-Exec "test -f `"$remote`" && sudo cp `"$remote`" `"$backupDir`/" || echo "HIÇ: $remote""
-}
-Write-Host "  Yedek dizin: $backupDir" -ForegroundColor Green
-
-# --- 2. Yerel Python dosyalarını denetle ---
-Write-Host "[2/7] Yerel Python dosyaları denetleniyor..." -ForegroundColor Yellow
-$pyFiles = Get-ChildItem "server\*.py" -ErrorAction SilentlyContinue
-foreach ($f in $pyFiles) {
-    & python -m py_compile $f.FullName 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "PY_COMPILE HATA: $($f.FullName)"
-    } else {
-        Write-Host "  OK: $($f.Name)"
+    # --- 3. Yukle (once /tmp'ye, sonra sudo ile yerine) ---
+    Write-Host "[3/6] Dosyalar yukleniyor..." -ForegroundColor Yellow
+    SSH-Exec "rm -rf '$STAGE_DIR' && mkdir -p '$STAGE_DIR/server'" | Out-Null
+    foreach ($f in $files) {
+        SCP-Upload $f "$STAGE_DIR/$f"
     }
-}
+    SSH-Exec "sudo cp -r '$STAGE_DIR'/. '$PROJECT_DIR'/ && sudo chown -R novagate:novagate '$PROJECT_DIR' && rm -rf '$STAGE_DIR'" | Out-Null
+    Write-Host "  Yuklendi."
 
-# --- 3. Yerel .gd dosyalarını denetle (Godot varsa) ---
-Write-Host "[3/7] Yerel .gd dosyaları denetleniyor..." -ForegroundColor Yellow
-$gdFiles = Get-ChildItem "*.gd" -ErrorAction SilentlyContinue
-$godotExe = Get-Command godot -ErrorAction SilentlyContinue
-if ($godotExe) {
-    foreach ($f in $gdFiles) {
-        Write-Host "  Denetleniyor: $($f.Name)" -ForegroundColor Gray
-        & $godotExe --headless --check-only --script $f.FullName 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "GD_SCRIPT HATA: $($f.FullName)"
-        } else {
-            Write-Host "  OK: $($f.Name)"
-        }
+    # --- 4. Sunucuda Python derleme denetimi ---
+    Write-Host "[4/6] Sunucuda Python denetimi..." -ForegroundColor Yellow
+    foreach ($f in ($files | Where-Object { $_ -like "*.py" })) {
+        SSH-Exec "sudo -u novagate python3 -m py_compile '$PROJECT_DIR/$f'" | Out-Null
+        Write-Host "  OK: $f"
     }
-} else {
-    foreach ($f in $gdFiles) {
-        Write-Host "  SKIP (Godot yok yerelde): $($f.Name)" -ForegroundColor DarkGray
+
+    # --- 5. Servisleri yeniden baslat ---
+    Write-Host "[5/6] Servisler yeniden baslatiliyor..." -ForegroundColor Yellow
+    SSH-Exec "sudo systemctl restart novagate-db" | Out-Null
+    Start-Sleep -Seconds 3
+    SSH-Exec "sudo systemctl restart novagate-auth" -AllowFail | Out-Null
+    SSH-Exec "sudo systemctl restart novagate-server" | Out-Null
+    Start-Sleep -Seconds 8
+
+    $authSt = (SSH-Exec "sudo systemctl is-active novagate-auth" -AllowFail).Trim()
+    $dbSt   = (SSH-Exec "sudo systemctl is-active novagate-db" -AllowFail).Trim()
+    $srvSt  = (SSH-Exec "sudo systemctl is-active novagate-server" -AllowFail).Trim()
+    Write-Host "  novagate-auth:   $authSt"
+    Write-Host "  novagate-db:     $dbSt"
+    Write-Host "  novagate-server: $srvSt"
+    if ($dbSt -ne "active" -or $srvSt -ne "active") { throw "Servis calismiyor (db=$dbSt, server=$srvSt)" }
+
+    # Godot sunucusunun gunlugunde script hatasi var mi? (eksik dosya / parse hatasi burada gorunur)
+    $log = SSH-Exec "sudo journalctl -u novagate-server --since '3 minutes ago' --no-pager -n 200" -AllowFail
+    if ($log -match "SCRIPT ERROR|Parse Error|Failed to load script|Could not parse|Could not resolve|Cannot open file") {
+        Write-Host $log
+        throw "Godot sunucu gunlugunda script hatasi var."
     }
-}
-
-# --- 4. Dosyaları sunucuya yükle ---
-Write-Host "[4/7] Dosyalar sunucuya yukleniyor..." -ForegroundColor Yellow
-foreach ($f in $FILES) {
-    Write-Host "  Yukleniyor: $($f.Local) -> $($f.Remote)"
-    SCP-Upload $f.Local $f.Remote
-    # Sahiplik ayarla
-    SSH-Exec "sudo chown novagate:novagate `"$($f.Remote)`""
-}
-
-# --- 5. Sunucuda Python derleme denetimi ---
-Write-Host "[5/7] Sunucuda Python derleme denetimi..." -ForegroundColor Yellow
-foreach ($f in $FILES) {
-    if ($f.Local -like "*.py") {
-        SSH-Exec "sudo -u novagate python3 -m py_compile `"$($f.Remote)`""
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "REMOTE PY_COMPILE HATA: $($f.Remote)"
-        } else {
-            Write-Host "  OK: $($f.Remote)"
-        }
+    if ($log -notmatch "NOVAGATE SUNUCUSU calisiyor") {
+        Write-Host "  UYARI: 'NOVAGATE SUNUCUSU calisiyor' satiri gunlukte gorunmedi. Elle bak: sudo journalctl -u novagate-server -n 100" -ForegroundColor DarkYellow
     }
-}
 
-# --- 6. Sunucuda .gd dosyalarını denetle (Godot varsa) ---
-Write-Host "[6/7] Sunucuda .gd dosyaları denetleniyor..." -ForegroundColor Yellow
-SSH-Exec "if command -v godot >/dev/null 2>&1; then for f in /opt/novagate/net_server.gd /opt/novagate/main.gd /opt/novagate/net_game.gd /opt/novagate/data.gd; do godot --headless --check-only --script `"$f`" 2>&1; if [ $? -ne 0 ]; then echo \"GD_SCRIPT HATA: $f\"; fi; done; else echo 'Godot yok sunucuda, .gd denetimi atlaniyor.'; fi"
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "REMOTE GD_CHECK HATA"
-}
+    # --- 6. Token testi ---
+    Write-Host "[6/6] Test calistiriliyor..." -ForegroundColor Yellow
+    SCP-Upload $TEST_SCRIPT "/tmp/$TEST_SCRIPT"
+    $testResult = SSH-Exec "sudo -u novagate python3 /tmp/$TEST_SCRIPT 2>&1" -AllowFail
+    Write-Host $testResult
+    if ($testResult -notmatch "SUCCESS: Token verified") { throw "Token testi basarisiz." }
 
-# --- 7. Servisleri yeniden baslat ---
-Write-Host "[7/7] Servisler yeniden baslatiliyor..." -ForegroundColor Yellow
-SSH-Exec "sudo systemctl restart novagate-db"
-Start-Sleep -Seconds 3
-SSH-Exec "sudo systemctl restart novagate-server"
-Start-Sleep -Seconds 5
-
-# Servis durumunu kontrol et
-$authStatus = SSH-Exec "sudo systemctl is-active novagate-auth 2>&1"
-$dbStatus   = SSH-Exec "sudo systemctl is-active novagate-db 2>&1"
-$srvStatus  = SSH-Exec "sudo systemctl is-active novagate-server 2>&1"
-Write-Host "  novagate-auth:  $authStatus" -ForegroundColor Gray
-Write-Host "  novagate-db:    $dbStatus" -ForegroundColor Gray
-Write-Host "  novagate-server:$srvStatus" -ForegroundColor Gray
-
-# --- 8. Test calistir ---
-Write-Host "[8/7] Test calistiriliyor..." -ForegroundColor Yellow
-SCP-Upload $TEST_SCRIPT "/tmp/$TEST_SCRIPT"
-$testResult = SSH-Exec "sudo -u novagate python3 /tmp/$TEST_SCRIPT 2>&1"
-Write-Host $testResult
-
-if ($testResult -match "SUCCESS: Token verified") {
     Write-Host "=== DEPLOY BASARILI ===" -ForegroundColor Green
     exit 0
-} else {
-    Write-Host "=== DEPLOY BASARISIZ - Yedeke donuluyor ===" -ForegroundColor Red
-    foreach ($f in $FILES) {
-        SSH-Exec "sudo cp `"$backupDir/$(Split-Path $f.Remote -Leaf)`" `"$($f.Remote)`""
-        SSH-Exec "sudo chown novagate:novagate `"$($f.Remote)`""
-    }
-    SSH-Exec "sudo systemctl restart novagate-db"
-    SSH-Exec "sudo systemctl restart novagate-server"
-    Write-Host "Yedekten geri yuklendi." -ForegroundColor Yellow
+}
+catch {
+    Write-Host "HATA: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "=== DEPLOY BASARISIZ - yedege donuluyor ===" -ForegroundColor Red
+    SSH-Exec "if [ -d '$BACKUP_DIR' ]; then sudo cp -a '$BACKUP_DIR'/. '$PROJECT_DIR'/ && sudo chown -R novagate:novagate '$PROJECT_DIR'; fi" -AllowFail | Out-Null
+    SSH-Exec "sudo systemctl restart novagate-db" -AllowFail | Out-Null
+    SSH-Exec "sudo systemctl restart novagate-server" -AllowFail | Out-Null
+    Write-Host "Yedekten geri yuklendi (yedek: $BACKUP_DIR)." -ForegroundColor Yellow
     exit 1
 }

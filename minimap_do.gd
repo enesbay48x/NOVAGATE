@@ -144,9 +144,18 @@ func _draw() -> void:
 		n_en += 1
 		var ep := _g2m(e.node.position)
 		var col := Color(1.0, 0.25, 0.25)
-		if e.aggro:
-			col = Color(1.0, 0.55, 0.1)
+		if e.aggro and not bool(e.get("player", false)):
+			col = Color(1.0, 0.55, 0.1)   # NPC saldirgan = turuncu; dusman OYUNCU her zaman kirmizi
 		draw_rect(Rect2(ep - Vector2(1.5, 1.5), Vector2(3, 3)), col)
+	# Ayni sirketten yakindaki oyuncular: BEYAZ
+	if Net.online and Net.gm != null:
+		for fe in Net.gm.players.values():
+			if not bool(fe.get("friendly", false)) or not is_instance_valid(fe.node):
+				continue
+			if Vector2(fe.node.position.x - pp.x, fe.node.position.z - pp.z).length() > lim:
+				continue
+			var fp := _g2m(fe.node.position)
+			draw_rect(Rect2(fp - Vector2(2.0, 2.0), Vector2(4, 4)), Color(1, 1, 1))
 
 	# Grup arkadaslari: gorus menzili siniri YOK, haritanin her yerinde gorunur (yesil)
 	if Net.online and Net.gm != null:

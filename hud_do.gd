@@ -223,6 +223,9 @@ class DOBar extends Control:
 	var _track: StyleBoxTexture = null
 	var _fill: StyleBoxTexture = null
 	var _font: SystemFont
+	var smooth_up := false   # dolarken bar yumusakca yukselir (tamir animasyonu); dusus anlik
+	var rep := false          # tamir aktif: yesil parlama + kucuk "+" simgesi
+	var shown := 1.0
 
 	func setup(kind: String) -> void:
 		_font = SystemFont.new()
@@ -231,6 +234,7 @@ class DOBar extends Control:
 		_track = _sb("res://assets/hud/bar/track.png", 12, 8)
 		_fill = _sb("res://assets/hud/bar/fill_%s.png" % kind, 8, 5)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		set_process(false)   # yalnizca tamir animasyonu sirasinda calisir (FPS etkisi yok)
 
 	func _sb(path: String, mh: int, mv: int) -> StyleBoxTexture:
 		if not ResourceLoader.exists(path):
@@ -247,7 +251,24 @@ class DOBar extends Control:
 		if absf(v - value) > 0.0005 or t != text:
 			value = v
 			text = t
+			if not smooth_up or v < shown:
+				shown = v
 			queue_redraw()
+		set_process(smooth_up and (rep or shown < value - 0.001))
+
+	func set_rep(on: bool) -> void:
+		if on != rep:
+			rep = on
+			queue_redraw()
+		set_process(smooth_up and (rep or shown < value - 0.001))
+
+	func _process(dt: float) -> void:
+		if shown < value:
+			shown = minf(value, shown + dt * 0.9)
+		if not rep and shown >= value - 0.001:
+			shown = value
+			set_process(false)
+		queue_redraw()
 
 	func _draw() -> void:
 		var s := size
@@ -255,11 +276,20 @@ class DOBar extends Control:
 			draw_style_box(_track, Rect2(Vector2.ZERO, s))
 		else:
 			draw_rect(Rect2(Vector2.ZERO, s), Color(0.02, 0.04, 0.06))
-		var w := (s.x - 6.0) * clampf(value, 0.0, 1.0)
+		var w := (s.x - 6.0) * clampf(shown if smooth_up else value, 0.0, 1.0)
 		if w >= 10.0 and _fill != null:
 			draw_style_box(_fill, Rect2(3.0, 3.0, w, s.y - 6.0))
 		elif w > 0.0:
 			draw_rect(Rect2(3.0, 3.0, w, s.y - 6.0), Color(0.3, 0.7, 0.3))
+		if smooth_up and (rep or shown < value - 0.001):
+			var pul := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.012)
+			if w > 0.0:
+				draw_rect(Rect2(3.0, 3.0, w, s.y - 6.0), Color(0.6, 1.0, 0.65, 0.12 + 0.18 * pul))
+			# kucuk tamir simgesi (+): barin sag ucunda
+			var c := Vector2(s.x - 11.0, s.y * 0.5)
+			var ic := Color(0.45, 1.0, 0.55, 0.65 + 0.35 * pul)
+			draw_rect(Rect2(c.x - 4.0, c.y - 1.0, 8.0, 2.0), ic)
+			draw_rect(Rect2(c.x - 1.0, c.y - 4.0, 2.0, 8.0), ic)
 		var fs := 10
 		var p := Vector2(0, s.y * 0.5 + fs * 0.38)
 		draw_string_outline(_font, p, text, HORIZONTAL_ALIGNMENT_CENTER, s.x, fs, 3, Color(0, 0, 0, 0.9))
@@ -517,7 +547,6 @@ func build() -> void:
 	theme = th
 	_build_user()
 	_build_tracker()
-	_build_target()
 	_build_minimap()
 	_build_chat()
 	_build_contacts()
@@ -608,6 +637,7 @@ func _build_user() -> void:
 	u_lv = _lbl(b, Vector2(60, 16), 10, C_TITLE, 200.0)
 	u_sh = _bar(b, Vector2(12, 36), Vector2(268, 18), "blue")
 	u_hp = _bar(b, Vector2(12, 58), Vector2(268, 18), "green")
+	u_hp.smooth_up = true
 	u_ep = _stat(b, 12, 82, "EP", Color(1, 1, 1))
 	u_ep.size.x = 200.0
 	u_hon = _stat(b, 12, 98, "Honor", Color(1.0, 0.63, 0.24))
@@ -629,17 +659,6 @@ func _build_tracker() -> void:
 	hit.modulate = Color(1, 1, 1, 0.0)
 	hit.pressed.connect(toggle_quests)
 	b.add_child(hit)
-
-
-func _build_target() -> void:
-	target_win = _win("Hedef", Vector2(292, 122))
-	var b := target_win.body
-	t_name = _lbl(b, Vector2(12, 0), 12, Color(1.0, 0.62, 0.52), 170.0, true)
-	t_dist = _lbl(b, Vector2(150, 2), 10, C_TEXT, 130.0)
-	t_dist.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	t_sh = _bar(b, Vector2(12, 22), Vector2(268, 18), "blue")
-	t_hp = _bar(b, Vector2(12, 44), Vector2(268, 18), "red")
-	target_win.visible = false
 
 
 func _build_minimap() -> void:
@@ -684,18 +703,15 @@ func _build_menu() -> void:
 	# DarkOrbit ust menu: sol ust 11 dugme, sag ust 3 dugme
 	top_left = Control.new()
 	top_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top_left.size = Vector2(11 * 39, 38)
+	top_left.size = Vector2(8 * 39, 38)
 	add_child(top_left)
 	var defs := [
 		["log", "Sistem mesajlari", _open_log, null],
 		["user", "Bilgi penceresi", toggle_info, user_win],
 		["ship", "Hangar / Kontrol paneli  [B]", game.toggle_base, null],
-		["ship_warp", "Kapidan atla  [J]", game._try_jump, null],
 		["group", "Arkadaslar  [F]", toggle_contacts, contacts_win],
 		["minimap", "Minimap", toggle_minimap, minimap_win],
-		["spacemap", "Galaksi haritasi  [M]", game.toggle_galaxy, null],
 		["quests", "Gorevler  [Q]", toggle_quests, quests_win],
-		["refinement", "Konfigurasyon degistir  [C]", _switch_cfg, null],
 		["chat", "Sohbet  [Enter]", toggle_chat, chat_win],
 		["pet", "Gorev takibi", toggle_tracker, tracker_win],
 	]
@@ -1601,7 +1617,6 @@ func _layout() -> void:
 	var ty := 58.0
 	_place(user_win, Vector2(10, ty))
 	_place(tracker_win, Vector2(10, ty + user_win.size.y + 6))
-	_place(target_win, Vector2(vs.x * 0.5 - 146.0, 8))
 	_place(minimap_win, Vector2(vs.x - minimap_win.size.x - 8.0, ty))
 	abar.position = Vector2(minf(vs.x * 0.392, vs.x - abar.size.x - 8.0), vs.y - abar.size.y - 14.0)
 	_place(chat_win, Vector2(10, vs.y - chat_win.size.y - 22.0))
@@ -1718,19 +1733,13 @@ func refresh(def: Dictionary, mhp: float, po: Vector3) -> void:
 	u_lv.text = "Seviye %d%s" % [lv, "     [ATES ACIK]" if game.fire else ""]
 	u_sh.set_val(game.P.sh / maxf(game.max_sh(), 1.0), "%s / %s" % [game._n(game.P.sh), game._n(game.max_sh())])
 	u_hp.set_val(game.P.hp / mhp, "%s / %s" % [game._n(game.P.hp), game._n(mhp)])
+	u_hp.set_rep(game.repairing)
 	var nxt := 10000.0 * pow(2.0, float(lv - 1))
 	u_ep.text = game._n(xp) if lv >= 30 else "%s / %s" % [game._n(xp), game._n(nxt)]
 	u_hon.text = game._n(SV.hon)
 	u_uri.text = game._n(SV.uri)
 	u_cr.text = game._n(SV.cr)
 	u_cfg.text = game.loadout_text()
-	var tg = game.target
-	target_win.visible = tg != null
-	if tg != null:
-		t_name.text = str(tg.name)
-		t_dist.text = "mesafe %d" % int(tg.node.position.distance_to(po) / DOData.S)
-		t_sh.set_val(tg.sh / maxf(tg.msh, 1.0), "%s / %s" % [game._n(tg.sh), game._n(tg.msh)])
-		t_hp.set_val(tg.hp / maxf(tg.mx, 1.0), "%s / %s" % [game._n(tg.hp), game._n(tg.mx)])
 	if not _quick_loaded:
 		_load_quick()
 	var sig := cur_cat + "|" + ",".join(PackedStringArray(SV.get("forms", [])))

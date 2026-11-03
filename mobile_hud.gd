@@ -242,6 +242,10 @@ class MBtn extends MCtl:
 				draw_arc(c + Vector2(0.0, r * 0.46), r * 0.40, PI * 1.12, PI * 1.88, 16, col, w, true)
 				draw_arc(c + Vector2(-r * 0.46, r * 0.26), r * 0.24, PI * 1.10, PI * 1.60, 8, col, w, true)
 				draw_arc(c + Vector2(r * 0.46, r * 0.26), r * 0.24, PI * 1.40, PI * 1.90, 8, col, w, true)
+			"info":
+				draw_arc(c, r * 0.46, 0.0, TAU, 40, col, w, true)
+				draw_circle(c + Vector2(0.0, -r * 0.24), r * 0.07, col)
+				draw_line(c + Vector2(0.0, -r * 0.06), c + Vector2(0.0, r * 0.26), col, w * 1.2, true)
 			"chat":
 				draw_rect(Rect2(c + Vector2(-r * 0.46, -r * 0.38), Vector2(r * 0.92, r * 0.58)), col, false, w)
 				draw_polyline(PackedVector2Array([c + Vector2(-r * 0.20, r * 0.20), c + Vector2(-r * 0.32, r * 0.46), c + Vector2(r * 0.04, r * 0.20)]), col, w, true)
@@ -398,9 +402,18 @@ class MMini extends MCtl:
 				if ed.length() > rad_u:
 					continue
 				var col := Color(1.0, 0.25, 0.25, a)
-				if bool(e.get("aggro", false)):
-					col = Color(1.0, 0.55, 0.10, a)
+				if bool(e.get("aggro", false)) and not bool(e.get("player", false)):
+					col = Color(1.0, 0.55, 0.10, a)   # dusman oyuncu her zaman kirmizi
 				draw_circle(c + ed * k, 2.4, col)
+			# ayni sirketten yakindaki oyuncular: beyaz
+			if Net.online and Net.gm != null:
+				for fe in Net.gm.players.values():
+					if not bool(fe.get("friendly", false)) or not is_instance_valid(fe.node):
+						continue
+					var fd := Vector2(fe.node.position.x - pp.x, fe.node.position.z - pp.z)
+					if fd.length() > rad_u:
+						continue
+					draw_circle(c + fd * k, 2.6, Color(1, 1, 1, a))
 			# grup arkadaslari: menzil siniri yok; uzaktakiler radarin kenarina yapisir
 			if Net.online and Net.gm != null:
 				for ge in Net.gm.group_ents():
@@ -508,9 +521,17 @@ class MMapView extends Control:
 				continue
 			n_en += 1
 			var col := Color(1.0, 0.25, 0.25)
-			if bool(e.get("aggro", false)):
+			if bool(e.get("aggro", false)) and not bool(e.get("player", false)):
 				col = Color(1.0, 0.55, 0.10)
 			draw_circle(_w2m(e.node.position, rc, mw, mh, sc), 3.2, col)
+		# ayni sirketten yakindaki oyuncular: beyaz
+		if Net.online and Net.gm != null:
+			for fe in Net.gm.players.values():
+				if not bool(fe.get("friendly", false)) or not is_instance_valid(fe.node):
+					continue
+				if has_pl and Vector2(float(fe.node.position.x) - pl3.x, float(fe.node.position.z) - pl3.z).length() > vlim:
+					continue
+				draw_circle(_w2m(fe.node.position, rc, mw, mh, sc), 3.4, Color(1, 1, 1))
 		# grup arkadaslari (yesil, isimli)
 		if Net.online and Net.gm != null:
 			for ge in Net.gm.group_ents():
@@ -674,6 +695,7 @@ func _make_controls() -> void:
 	_add_btn("hudedit", "", 60.0, {}).glyph = "layout"
 	_add_btn("chat", "", 60.0, {}).glyph = "chat"
 	_add_btn("grp", "", 60.0, {}).glyph = "group"
+	_add_btn("info", "", 60.0, {}).glyph = "info"   # bilgi penceresi (oyuncu bilgisi) ac/kapat
 	minimap_btn = MMini.new()
 	minimap_btn.cid = "minimap"
 	minimap_btn.ui = self
@@ -838,6 +860,8 @@ func _default_center(id: String, sr: Rect2) -> Vector2:
 			return mm_c + Vector2(-248.0, -40.0)
 		"grp":
 			return mm_c + Vector2(-112.0, 36.0)
+		"info":
+			return mm_c + Vector2(-180.0, 36.0)
 	return Vector2(cx, (t + b) * 0.5)
 
 
@@ -947,6 +971,8 @@ func _name_of(id: String) -> String:
 			return "HUD düzeni"
 		"grp":
 			return "Grup"
+		"info":
+			return "Bilgi"
 		"chat":
 			return "Chat"
 	if id in LASERS:
@@ -1220,6 +1246,8 @@ func _btn_action(id: String) -> void:
 			call_deferred("_open_game_center")
 		"hudedit":
 			call_deferred("_open_hud_edit")
+		"info":
+			hud.toggle_info()
 		"grp":
 			hud.toggle_group()
 		"chat":
@@ -1754,6 +1782,8 @@ func _refresh() -> void:
 				b.set_state("", bool(game.fire), true, 0.0)
 			"menu", "hudedit":
 				b.set_state("", false, true, 0.0)
+			"info":
+				b.set_state("", bool(hud.user_win.visible), true, 0.0)
 			"grp":
 				b.set_state("", bool(hud.group_win.visible), true, 0.0)
 			"chat":

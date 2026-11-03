@@ -1,0 +1,72 @@
+import urllib.request
+import urllib.parse
+import json
+import socket
+import ssl
+import sys
+import time
+
+ctx = ssl._create_unverified_context()
+
+username = "testplayer" + str(int(time.time()))[-6:]
+print("Using username:", username)
+
+# Step 1: Register a new test account via HTTPS
+reg_url = "https://127.0.0.1:8444/register"
+reg_data = json.dumps({
+    "username": username,
+    "password": "testpass123",
+    "faction": 2,
+    "callsign": "TestPilot"
+}).encode()
+
+try:
+    req = urllib.request.Request(reg_url, data=reg_data, headers={"Content-Type": "application/json"})
+    resp = urllib.request.urlopen(req, context=ctx)
+    body = json.loads(resp.read().decode())
+    print("Register response:", body)
+    if not body.get("ok"):
+        print("REGISTER FAILED:", body.get("error"))
+        sys.exit(1)
+    account_id = body["account_id"]
+    print("Registered account_id:", account_id)
+except Exception as e:
+    print("HTTPS register error:", e)
+    sys.exit(1)
+
+# Step 2: Login via HTTPS to get session token
+login_url = "https://127.0.0.1:8444/login"
+login_data = json.dumps({"username": username, "password": "testpass123"}).encode()
+try:
+    req = urllib.request.Request(login_url, data=login_data, headers={"Content-Type": "application/json"})
+    resp = urllib.request.urlopen(req, context=ctx)
+    body = json.loads(resp.read().decode())
+    print("Login response:", body)
+    if not body.get("ok"):
+        print("LOGIN FAILED:", body.get("error"))
+        sys.exit(1)
+    token = body["session_token"]
+    print("Token received (first 60 chars):", token[:60] + "...")
+except Exception as e:
+    print("HTTPS login error:", e)
+    sys.exit(1)
+
+# Step 3: Verify token via DB service (TCP/JSON on 54321)
+msg = json.dumps({"method": "verify_and_consume_token", "session_token": token, "instance_id": "test_client"}) + "\n"
+try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    sock.connect(("127.0.0.1", 54321))
+    sock.sendall(msg.encode())
+    resp_data = sock.recv(4096)
+    sock.close()
+    resp = json.loads(resp_data.decode().strip())
+    print("DB verify response:", resp)
+    if resp.get("ok"):
+        print("SUCCESS: Token verified! account_id =", resp.get("account_id"))
+    else:
+        print("FAILED: Token verification rejected:", resp.get("error"))
+        sys.exit(1)
+except Exception as e:
+    print("DB verify error:", e)
+    sys.exit(1)

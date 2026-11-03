@@ -1,0 +1,156 @@
+--- main.gd.kapi_oncesi_yedek	2026-11-02 00:57:59.895353162 +0000
++++ main.gd	2026-11-02 00:58:00.051857766 +0000
+@@ -111,6 +111,14 @@
+ var save_t := 0.0
+ var jump_t := -1.0
+ var jump_to = null
++const JUMP_TOTAL := 2.0         # atlama geri sayimi (sn)
++const JUMP_PULL := 1.2          # son kac saniyede gemi kapinin merkezine cekilir
++var jump_flash = null           # tam ekran flas (ColorRect)
++var jump_flash_a := 0.0
++var jump_arrive_t := -1.0       # varis animasyonu sayaci (-1 = yok)
++var jump_arrive_from := Vector3.ZERO
++var jump_arrive_to := Vector3.ZERO
++var jump_ring_cd := 0.0
+ var toasts: Array = []
+ const SafeZone := preload("res://safe_zone.gd")
+ var in_safe := false          # GERCEK koruma aktif mi (guvenli bolge / gecici gecis korumasi); prot_kind != 0 ile ayni
+@@ -3210,7 +3218,7 @@
+ 		if p.get("wormhole", false):
+ 			g = Node3D.new()   # Solucan deligi gorunmezdir
+ 		else:
+-			g = make_ship("jumpgate-regular", 14.0, Color.WHITE)
++			g = JumpGate.new().setup(Color("#36D5FF"))   # kod ile cizilen, animasyonlu NOVAGATE kapisi (jumpgate.gd)
+ 		g.position = w2g(p.x, p.y)
+ 		world.add_child(g)
+ 		if not p.get("wormhole", false):
+@@ -4171,7 +4179,10 @@
+ 					toast("Atlama engellendi: " + why)
+ 					return
+ 			jump_to = p
+-			jump_t = 2.0
++			jump_t = JUMP_TOTAL
++			jump_arrive_t = -1.0
++			if is_instance_valid(p.node) and p.node.has_method("burst"):
++				p.node.burst(0.35)   # kapi uyanir
+ 			toast("Atlama basladi: " + ("Solucan deligi" if str(p.to) == "random" else str(p.to)))
+ 			return
+ 
+@@ -4188,10 +4199,101 @@
+ 	do_jump_to(dest_name)
+ 
+ 
++# ---- KAPI ATLAMA EFEKTLERI ----
++# Geri sayim: kapi sarj olur (hizlanir, parlar), gemi kapinin merkezine cekilir ve kuculur, son anda ekran beyaza doner.
++# Varis: yeni haritada ekran beyazdan acilir, gemi karsi kapidan kuculmus halde cikip normal boyuna doner.
++func _update_jump_fx(dt: float) -> void:
++	if P == null or not is_instance_valid(P.node):
++		return
++	var pn: Node3D = P.node
++	var waiting: bool = clock < jump_wait_until
++	if jump_t >= 0.0 and jump_to != null:
++		var k: float = clampf(1.0 - jump_t / JUMP_TOTAL, 0.0, 1.0)
++		var gp: Vector3 = jump_to.pos
++		var gn = jump_to.get("node")
++		if gn != null and is_instance_valid(gn) and gn.has_method("set_charge"):
++			gn.set_charge(k)
++		# kapiya dogru kuculen enerji halkalari (kapi gemiyi emiyor hissi)
++		jump_ring_cd -= dt
++		if jump_ring_cd <= 0.0:
++			jump_ring_cd = lerpf(0.34, 0.12, k)
++			_fx_ring(Vector3(gp.x, 0.25, gp.z), Color(0.5, 0.9, 1.0), 16.0, 3.0, 0.55, 0.4 + 0.4 * k)
++		if jump_t < JUMP_PULL:
++			var u: float = 1.0 - jump_t / JUMP_PULL
++			dest = null
++			holding = false
++			spd_cur = 0.0
++			var pull: float = 1.0 - exp(-dt * (2.5 + 10.0 * u))
++			pn.position = pn.position.lerp(Vector3(gp.x, pn.position.y, gp.z), pull)
++			var sk: float = clampf(jump_t / 0.5, 0.0, 1.0)
++			pn.scale = Vector3.ONE * lerpf(0.12, 1.0, sk * sk * (3.0 - 2.0 * sk))
++		jump_flash_a = maxf(jump_flash_a, 1.0 - clampf(jump_t / 0.4, 0.0, 1.0))
++	elif jump_arrive_t >= 0.0:
++		jump_arrive_t += dt
++		var a: float = clampf(jump_arrive_t / 0.75, 0.0, 1.0)
++		var e: float = 1.0 - pow(1.0 - a, 3.0)
++		pn.position = jump_arrive_from.lerp(jump_arrive_to, e)
++		pn.scale = Vector3.ONE * lerpf(0.15, 1.0, e)
++		jump_flash_a = maxf(0.0, 1.0 - jump_arrive_t / 0.9)
++		if a >= 1.0:
++			jump_arrive_t = -1.0
++			pn.scale = Vector3.ONE
++	elif not waiting:
++		# iptal / reddedildi / normal durum: boyut ve flas yumusakca normale doner
++		if pn.scale.x < 0.999:
++			pn.scale = pn.scale.lerp(Vector3.ONE, minf(1.0, dt * 8.0))
++			if pn.scale.x > 0.995:
++				pn.scale = Vector3.ONE
++		jump_flash_a = maxf(0.0, jump_flash_a - dt * 3.0)
++	_jump_flash_apply()
++
++
++func _jump_flash_apply() -> void:
++	if dohud == null:
++		return
++	if jump_flash == null or not is_instance_valid(jump_flash):
++		if jump_flash_a <= 0.001:
++			return
++		jump_flash = ColorRect.new()
++		jump_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
++		jump_flash.z_index = 200
++		jump_flash.color = Color(0.82, 0.96, 1.0, 0.0)
++		dohud.add_child(jump_flash)
++	var a: float = clampf(jump_flash_a, 0.0, 1.0)
++	jump_flash.position = Vector2.ZERO
++	jump_flash.size = get_viewport().get_visible_rect().size
++	jump_flash.color = Color(0.82, 0.96, 1.0, a * a)
++	jump_flash.visible = a > 0.003
++
++
++# Yeni harita yuklendikten hemen sonra: karsi kapiyi patlat, gemiyi kapinin icinden baslat.
++func _jump_arrive_fx(from_name: String) -> void:
++	if P == null or not is_instance_valid(P.node):
++		return
++	var gpos: Vector3 = P.node.position
++	for p in portals:
++		if str(p.to) == from_name:
++			gpos = p.pos
++			if is_instance_valid(p.node) and p.node.has_method("burst"):
++				p.node.burst(1.0)
++			break
++	jump_arrive_from = Vector3(gpos.x, P.node.position.y, gpos.z)
++	jump_arrive_to = P.node.position
++	jump_arrive_t = 0.0
++	jump_flash_a = 1.0
++	P.node.position = jump_arrive_from
++	P.node.scale = Vector3.ONE * 0.15
++	_fx_ring(Vector3(gpos.x, 0.3, gpos.z), Color(0.6, 0.95, 1.0), 3.0, 16.0, 0.7, 0.9)
++	_fx_ring(Vector3(gpos.x, 0.3, gpos.z), Color(1.0, 1.0, 1.0), 1.5, 9.0, 0.5, 0.7)
++	spark_burst(Vector3(gpos.x, 0.8, gpos.z), Color(0.6, 0.95, 1.0), 30, 16.0)
++
++
+ func do_jump_to(dest_name: String) -> void:
+ 	jump_wait_until = -1.0
+ 	if not maps.has(dest_name):
+ 		return
++	var from_name := cur
++	jump_flash_a = 1.0   # ekran beyaza doner; yeni harita yuklenirken kesme gorunmez
+ 	var tm = maps[dest_name]
+ 	var arrive := w2g(tm.w / 2.0, tm.h / 2.0)
+ 	var found := false
+@@ -4204,6 +4306,7 @@
+ 	if not found and tm.base != null:
+ 		arrive = w2g(tm.base.x, tm.base.y) + Vector3(10, 0, 10)
+ 	load_map(dest_name, arrive)
++	_jump_arrive_fx(from_name)
+ 	if not net_on:
+ 		# Gecici gecis korumasi (dusman haritasi, ayarlanabilir; varsayilan 0 = kapali). Guvenli bolgeden AYRI yonetilir.
+ 		var asec := SafeZone.arrival_seconds(tm, int(SV.faction))
+@@ -5068,6 +5171,7 @@
+ 	dt = minf(dt, 0.05)
+ 	clock += dt
+ 	if running:
++		_update_jump_fx(dt)
+ 		_update_game(dt)
+ 	else:
+ 		cam.look_at_from_position(Vector3(0, 80, 80), Vector3.ZERO, Vector3.UP)

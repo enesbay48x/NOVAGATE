@@ -457,6 +457,10 @@ func _price_txt(s: Dictionary) -> String:
 
 
 func _ship_tex(id: String) -> Texture2D:
+	# Market ve hangar: oyundaki guncel 3D modelden canli onizleme; olmazsa eski PNG ikon.
+	var t: Texture2D = game.ship_preview_tex(id)
+	if t != null:
+		return t
 	return game._tex("res://assets/items/%s.png" % DOData.ship_icon(id, int(game.SV.faction)))
 
 
@@ -914,6 +918,8 @@ func _refresh_shop() -> void:
 		"ships":
 			var grid := _shop_grid()
 			for s in DOData.SHIPS:
+				if str(s.id) in DOData.MARKET_HIDDEN:
+					continue   # bigboy / aegis / citadel marketten kaldirildi
 				var owned: bool = s.id in game.SV.owned
 				var lines := "Can %s   Hız %d\nLazer %d   Jeneratör %d   Droid %d" % [game._n(s.hp), s.spd, s.las, s.gen, DOData.drone_slots(s)]
 				var badge := ""
@@ -961,7 +967,7 @@ func _refresh_shop() -> void:
 				var info := VBoxContainer.new()
 				info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 				info.add_child(_mk("%s  (hasar x%s)" % [str(a.name), str(a.mult)], 15, GOLD))
-				info.add_child(_mk("Elinde: %s     Fiyat: %s Kredi / 1.000" % [game._n(game.SV.ammo[a.id]), game._n(a.price)], 12, TEXT2))
+				info.add_child(_mk("Elinde: %s     Fiyat: %s Kredi / 1.000" % [int(game.SV.ammo.get(a.id, 0)), game._n(a.price)], 12, TEXT2))
 				h.add_child(info)
 				for n in [1000, 10000, 50000]:
 					var cost := int(a.price * n / 1000)

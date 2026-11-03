@@ -1,0 +1,44 @@
+name: iOS Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Godot 4.7.2 macOS editor
+        run: |
+          curl -L -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/4.7.2/Godot_v4.7.2-stable_macos.universal.zip"
+          unzip -o -q godot.zip -d /Applications
+          mv "/Applications/Godot_v4.7.2-stable_macos.universal.app" /Applications/Godot.app
+
+      - name: Install iOS export templates
+        run: |
+          curl -L -o ios_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.7.2/ios_export_templates_4.7.2.tpz"
+          mkdir -p "$HOME/Library/Application Support/Godot/export_templates/4.7.2"
+          cp ios_templates.tpz "$HOME/Library/Application Support/Godot/export_templates/4.7.2/"
+
+      - name: Export iOS Xcode project
+        run: |
+          /Applications/Godot.app/Contents/MacOS/Godot --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
+
+      - name: Build unsigned .ipa with xcodebuild
+        run: |
+          cd export/ios
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO -derivedDataPath xcode-build
+          mkdir -p Payload
+          cp -R "xcode-build/Build/Products/Release-iphoneos/NOVAGATE.app" Payload/
+          zip -r ../../NOVAGATE.ipa Payload/
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVAGATE-ipa
+          path: NOVAGATE.ipa
+          retention-days: 7

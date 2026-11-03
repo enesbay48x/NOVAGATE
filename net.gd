@@ -508,6 +508,20 @@ func s_attach_result(ok: bool, msg: String, account_id: int, callsign: String, f
 		game._on_auth_result(false, msg)
 
 
+# Sunucu oyuncuyu atarken (ban vb.) gonderir. Bu RPC eskiden tanimli degildi: sunucu cagirinca hata veriyordu.
+@rpc("authority", "call_remote", "reliable")
+func s_disconnect(reason: String) -> void:
+	if is_server:
+		return
+	last_error = reason
+	online = false
+	if multiplayer.multiplayer_peer != null:
+		multiplayer.multiplayer_peer.close()
+		multiplayer.multiplayer_peer = null
+	if game != null and is_instance_valid(game):
+		game.net_lost()
+
+
 @rpc("authority", "call_remote", "reliable")
 func s_join_result(ok: bool, msg: String) -> void:
 	_join_msg = msg

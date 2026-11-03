@@ -55,10 +55,10 @@ func _init(g = null) -> void:
 
 # Animasyonlari arka planda yukle (ilk kullanimda takilma olmasin).
 func preload_anims() -> void:
-	for id in IDS:
-		var p: String = ANIM_DIR + str(DEFS[id].anim) + ".tres"
-		if ResourceLoader.exists(p):
-			ResourceLoader.load_threaded_request(p)
+	# 4.7.x'te buyuk SpriteFrames'lerin load_threaded_* yuklemesi boot'ta periyodik olarak
+	# "Parse Error" (uid cozumleme yariemasali) uretiyor. Thread'li yuklemeyi tamamen
+	# kapatiyoruz; _get_frames ilk kullanimda load() ile zaten yukluyor.
+	pass
 
 
 # ------------------------------------------------------------ kayit (SV)
@@ -395,15 +395,7 @@ func _anim_frames(id: String) -> SpriteFrames:
 	if _frames_cache.has(id):
 		return _frames_cache[id]
 	var p: String = ANIM_DIR + str(DEFS[id].anim) + ".tres"
-	var sf: SpriteFrames = null
-	if ResourceLoader.exists(p):
-		var st := ResourceLoader.load_threaded_get_status(p)
-		if st == ResourceLoader.THREAD_LOAD_INVALID_RESOURCE:
-			sf = load(p) as SpriteFrames
-		else:
-			sf = ResourceLoader.load_threaded_get(p) as SpriteFrames
-		if sf == null:
-			sf = load(p) as SpriteFrames
+	var sf: SpriteFrames = load(p) as SpriteFrames
 	_frames_cache[id] = sf
 	return sf
 

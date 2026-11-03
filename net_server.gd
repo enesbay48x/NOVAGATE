@@ -1251,6 +1251,9 @@ func tick(dt: float) -> void:
 			npc_n += (worlds[wn].npcs as Dictionary).size()
 		print("[SUNUCU] Oyuncu: %d | Aktif harita: %d | NPC: %d" % [players.size(), worlds.size(), npc_n])
 	npc_override_t += dt
+	ban_tick_t += dt        # [ZAMANLAYICI-FIX] her karede artar (eskiden 5 sn'lik blogun icindeydi)
+	balance_tick_t += dt
+	pos_save_t += dt
 	if npc_override_t >= 5.0:
 		npc_override_t = 0.0
 		var resp: Dictionary = db_send("get_npc_overrides", {})
@@ -1265,42 +1268,39 @@ func tick(dt: float) -> void:
 				while npcs.size() > max_npc:
 					var first_uid: Variant = npcs.keys()[0]
 					npcs.erase(first_uid)
-		# Cele online oyuncularin ban durumunu kontrol et, banliysa kick et
-		ban_tick_t += dt
-		if ban_tick_t >= 5.0:
-			ban_tick_t = 0.0
-			for pid in players.keys().duplicate():
-				var p: Dictionary = players[pid]
-				var st: Dictionary = db_send("get_account_status", {"account_id": int(p.account_id)})
-				if st.has("ok") and st["ok"] and st.get("ban_active", false):
-					print("[SUNUCU] Banli oyuncu tick ile kick: account_id=%d" % p.account_id)
-					net.callv("rpc_id", [int(pid), "s_disconnect", "Hesap yasakli: " + str(st.get("ban_reason", "bilinmeyen"))])
-					players.erase(int(pid))
-		# Online oyuncularin cr/uri bakiyesini DB'den senkronize et (admin panelinden gelen degisiklikler icin)
-		balance_tick_t += dt
-		if balance_tick_t >= 30.0:
-			balance_tick_t = 0.0
-			for pid in players.keys().duplicate():
-				var p: Dictionary = players[pid]
-				var bal: Dictionary = db_send("get_player_balance", {"account_id": int(p.account_id)})
-				if bal.has("ok") and bal["ok"]:
-					p["_sv_cr"] = int(bal["cr"])
-					p["_sv_uri"] = int(bal["uri"])
-		# Her oyuncunun konumunu periyodik olarak kaydet (~20 saniyede bir)
-		pos_save_t += dt
-		if pos_save_t >= 20.0:
-			pos_save_t = 0.0
-			for pid in players.keys().duplicate():
-				var p: Dictionary = players[pid]
-				if p.has("account_id") and str(p.map) != "":
-					var pos: Vector3 = p.pos
-					if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
-						db_send("save_player_position", {
-							"account_id": int(p.account_id),
-							"map_name": str(p.map),
-							"px": float(pos.x),
-							"pz": float(pos.z),
-						})
+	# Cele online oyuncularin ban durumunu kontrol et, banliysa kick et
+	if ban_tick_t >= 5.0:
+		ban_tick_t = 0.0
+		for pid in players.keys().duplicate():
+			var p: Dictionary = players[pid]
+			var st: Dictionary = db_send("get_account_status", {"account_id": int(p.account_id)})
+			if st.has("ok") and st["ok"] and st.get("ban_active", false):
+				print("[SUNUCU] Banli oyuncu tick ile kick: account_id=%d" % p.account_id)
+				net.callv("rpc_id", [int(pid), "s_disconnect", "Hesap yasakli: " + str(st.get("ban_reason", "bilinmeyen"))])
+				players.erase(int(pid))
+	# Online oyuncularin cr/uri bakiyesini DB'den senkronize et (admin panelinden gelen degisiklikler icin)
+	if balance_tick_t >= 30.0:
+		balance_tick_t = 0.0
+		for pid in players.keys().duplicate():
+			var p: Dictionary = players[pid]
+			var bal: Dictionary = db_send("get_player_balance", {"account_id": int(p.account_id)})
+			if bal.has("ok") and bal["ok"]:
+				p["_sv_cr"] = int(bal["cr"])
+				p["_sv_uri"] = int(bal["uri"])
+	# Her oyuncunun konumunu periyodik olarak kaydet (~20 saniyede bir)
+	if pos_save_t >= 20.0:
+		pos_save_t = 0.0
+		for pid in players.keys().duplicate():
+			var p: Dictionary = players[pid]
+			if p.has("account_id") and str(p.map) != "":
+				var pos: Vector3 = p.pos
+				if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+					db_send("save_player_position", {
+						"account_id": int(p.account_id),
+						"map_name": str(p.map),
+						"px": float(pos.x),
+						"pz": float(pos.z),
+					})
 
 
 func _tick_respawn(w: Dictionary, dt: float) -> void:

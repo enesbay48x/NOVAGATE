@@ -7,8 +7,10 @@ extends RefCounted
 const BOLTS_FEW := 2
 const BOLTS_MANY := 4
 const MANY_FROM := 7          # bu kadar veya daha fazla lazer varsa 4'lu atis
-const RING_COUNT := 3
+const RING_COUNT := 7
 const RING_TIME := 0.6
+const RING_START_SCALE := 6.0   # tum NPC'lerde ayni baslangic boyutu (torus dis capi = 0.5 * olcek)
+const RING_END_SCALE := 1.0
 
 
 # Gorunen atis listesini 1 / 2 / 4 atisa indirir. vis: hasara gore buyukten kucuge sirali lazer idleri.
@@ -47,7 +49,9 @@ static func mark_parallel(g, off: Vector3) -> void:
 
 
 # SAB: dusmandan oyuncuya kuculerek giden halkalar. Salvo basina bir kez (0.4 sn kilidi).
-static func sab_ring(g, e, _amount: float) -> void:
+# Halka boyutu NPC'ye gore DEGISMEZ: hepsi ayni sabit baslangic boyutundan baslar (RING_START_SCALE).
+# amount > 0: tam efekt (3 halka, parlak). amount <= 0 (hedefin kalkani bitti): sonuk, tek halka, oyuncuya enerji gelmez.
+static func sab_ring(g, e, amount: float) -> void:
 	if g.world == null or g.P == null or not is_instance_valid(e.node) or not is_instance_valid(g.P.node):
 		return
 	if not g.is_inside_tree():
@@ -57,8 +61,10 @@ static func sab_ring(g, e, _amount: float) -> void:
 		return
 	g.set_meta("sab_t", now)
 	var src: Node3D = e.node
-	var r0: float = float(src.get_meta("r", 3.0)) * 1.3
-	for k in RING_COUNT:
+	var full: bool = amount > 0.0
+	var count: int = RING_COUNT if full else 1
+	var amul: float = 1.0 if full else 0.35
+	for k in count:
 		var mt := StandardMaterial3D.new()
 		mt.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		mt.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -73,16 +79,16 @@ static func sab_ring(g, e, _amount: float) -> void:
 		ring.mesh = tm
 		ring.material_override = mt
 		ring.position = src.position + Vector3(0.0, 0.5, 0.0)
-		ring.scale = Vector3.ONE * r0 * 2.0
+		ring.scale = Vector3.ONE * RING_START_SCALE
 		g.world.add_child(ring)
 		var tw: Tween = g.create_tween()
 		if k > 0:
-			tw.tween_interval(0.12 * float(k))
-		tw.tween_method(func(t: float) -> void: _ring_step(g, ring, mt, src, r0, t), 0.0, 1.0, RING_TIME)
-		tw.tween_callback(func() -> void: _ring_end(g, ring, k))
+			tw.tween_interval(0.06 * float(k))
+		tw.tween_method(func(t: float) -> void: _ring_step(g, ring, mt, src, amul, t), 0.0, 1.0, RING_TIME)
+		tw.tween_callback(func() -> void: _ring_end(g, ring, k, count, full))
 
 
-static func _ring_step(g, ring: MeshInstance3D, mt: StandardMaterial3D, src: Node3D, r0: float, t: float) -> void:
+static func _ring_step(g, ring: MeshInstance3D, mt: StandardMaterial3D, src: Node3D, amul: float, t: float) -> void:
 	if not is_instance_valid(ring) or g.P == null or not is_instance_valid(g.P.node):
 		return
 	var from := ring.position
@@ -91,12 +97,16 @@ static func _ring_step(g, ring: MeshInstance3D, mt: StandardMaterial3D, src: Nod
 	var to: Vector3 = g.P.node.position + Vector3(0.0, 0.5, 0.0)
 	var e := t * t * (3.0 - 2.0 * t)
 	ring.position = from.lerp(to, e)
-	ring.scale = Vector3.ONE * lerpf(r0 * 2.0, 0.7, e)
-	mt.albedo_color.a = 0.85 * sin(clampf(t, 0.0, 1.0) * PI) + 0.1
+	# Halka DIKEY durur: duzlemi yere dik, ekseni dusmandan oyuncuya giden yonde (yatay yatmaz)
+	var d: Vector3 = to - from
+	d.y = 0.0
+	if d.length() > 0.01:
+		ring.quaternion = Quaternion(Vector3.UP, d.normalized())
+	ring.scale = Vector3.ONE * lerpf(RING_START_SCALE, RING_END_SCALE, e)
+	mt.albedo_color.a = (0.85 * sin(clampf(t, 0.0, 1.0) * PI) + 0.1) * amul
 
 
-static func _ring_end(g, ring: MeshInstance3D, k: int) -> void:
+static func _ring_end(g, ring: MeshInstance3D, k: int, count: int, full: bool) -> void:
 	if is_instance_valid(ring):
 		ring.queue_free()
-	if k == RING_COUNT - 1 and g.P != null and is_instance_valid(g.P.node) and g.extras != null:
-		g.extras.hit_fx()
+	# SAB halkalari bitince oyuncu uzerinde ozel efekt yok

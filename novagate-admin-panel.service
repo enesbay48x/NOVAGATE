@@ -1,0 +1,16 @@
+[Unit]
+Description=NOVAGATE Admin Control Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=novagate
+Group=novagate
+WorkingDirectory=/opt/novagate/admin
+ExecStart=/opt/novagate/admin/venv/bin/python /opt/novagate/admin/admin_panel.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
