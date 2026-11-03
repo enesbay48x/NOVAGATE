@@ -23,15 +23,12 @@ jobs:
           mkdir -p "$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable"
           cp ios_templates.tpz "$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable/"
 
-      - name: Debug: list Godot app
-        run: |
-          ls -la /Applications/ | grep -i godot || true
-          find /Applications -name "Godot" -type f 2>/dev/null || true
-          find /Applications -name "*.app" -maxdepth 1 2>/dev/null | grep -i godot || true
-
       - name: Export iOS Xcode project
         run: |
-          GODOT_BIN=$(find /Applications -name "Godot" -type f -executable 2>/dev/null | head -1)
+          GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
+          if [ -z "$GODOT_BIN" ]; then
+            GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
+          fi
           echo "Using Godot binary: $GODOT_BIN"
           "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
 
