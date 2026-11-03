@@ -1,40 +1,20 @@
-# Godot 4 önbelleği (CI'da yeniden oluşturulur)
-.godot/
-
-# Derleme / export çıktıları
-build/
-andr/
-android/build/
-android_build/
-*.tmp
-
-# Eski proje kopyası (775 MB yedek klasör)
-Yeni\ klasör/
-
-# Manuel yedek dosyaları (kıymetli değil, diskte duruyor)
+# NovaGate hassas dosyalar - asla repoya eklenemez
+admin_password.txt
+*.pem
+*.pem.*
+.hmac_key
+.backup_key
+*.db
+*.db.*
+backups/
+*.eski_yedek
 *.yedek
 *.bak
 *.bak2
-*.ates_yedek
-*.boyut_yedek
-*.guard_yedek
-*.harita_yedek
-*.lazer_yedek
-*.suru_yedek
-*.halka_yedek
-*.halka2_yedek
-*.arayuz_yedek
-*.arkaplan_yedek
-*.asteroit_yedek
-*.menzil_yedek
-*.nebula_yedek
-*.novagate_yedek
-*.mobil_yedek
-*.ios_oncesi_yedek
-
-# Sistem dosyaları
-Thumbs.db
-.DS_Store
-
-# Gecici iOS ikonlar (sadece CI'de uretilir, depoya girmez)
-icons/
+*_yedek
+opencode.json
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log

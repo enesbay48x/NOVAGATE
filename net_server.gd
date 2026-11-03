@@ -9,6 +9,14 @@ const DOData := preload("res://data.gd")
 const Auction := preload("res://auction.gd")
 const SafeZone := preload("res://safe_zone.gd")
 
+# ---- SUNUCU DB KOPRUSU (TCP/JSON, 127.0.0.1:54321) ---------------------------
+const DB_HOST := "127.0.0.1"
+const DB_PORT := 54321
+const DB_TIMEOUT_MS := 3000    # db_send zaman asimi (ms)
+var db_tcp: StreamPeerTCP
+var db_connected: bool = false
+var db_instance_id: String = ""
+
 var ghosts: Dictionary = {}     # oyuncu adi -> kopma aninda kilit/catisma sayaclari (cikip girerek sifirlanmasin)
 var safe_t: float = 0.0
 var prot_sync_t: float = 0.0
@@ -27,10 +35,15 @@ var next_gid: int = 1
 const GROUP_MAX := 5            # grup en fazla 5 kisi
 const INVITE_SEC := 30.0
 var clock: float = 0.0
-const FIRE_BURST := 2.0   # oyuncu salvo dogrulamasinda ag gecikmesi icin izin verilen birikmis salvo sayisi
+const FIRE_BURST := 2.0   # oyuncu salvo dogrulamisinda ag gecikmesi icin izin verilen birikmis salvo sayisi
 var psnap_t: float = 0.0
 var nsnap_t: float = 0.0
 var stat_t: float = 0.0
+var npc_override_t: float = 0.0   # son npc_overrides okuma zamani
+var ban_tick_t: float = 0.0   # ban kick tick sayaci
+var balance_tick_t: float = 0.0   # online oyuncu bakiye senkronizasyon sayaci
+var pos_save_t: float = 0.0   # oyuncu konumu periyodik kayit sayaci
+var npc_overrides: Dictionary = {}   # map_id -> npc_count (admin panelden)
 
 const PSNAP_DT := 0.066         # oyuncu konum yayini (~15 Hz)
 const NSNAP_DT := 0.1           # NPC konum yayini (10 Hz)
@@ -42,6 +55,79 @@ func _init(n: Node) -> void:
 	maps = DOData.make_maps()
 	print("[SUNUCU] %d harita yuklendi." % maps.size())
 	auc = Auction.new(net, self)
+	db_connect()
+
+
+func db_connect() -> void:
+	"""
+	server_db.py ulasilabilir mi yoklar. server_db her baglantida TEK istek isleyip baglantiyi kapatir,
+	bu yuzden kalici baglanti tutulmaz; db_send her istek icin yeni baglanti acar.
+	"""
+	db_instance_id = str(Time.get_unix_time_from_system())
+	var r: Dictionary = db_send("ping", {})
+	db_connected = str(r.get("error", "")) != "db_baglanti_yok"
+	if db_connected:
+		print("[SUNUCU] DB koprusu baglandi: %s:%d" % [DB_HOST, DB_PORT])
+	else:
+		print("[SUNUCU] DB baglantisi kurulamadi: %s:%d" % [DB_HOST, DB_PORT])
+
+
+func db_send(method: String, payload: Dictionary) -> Dictionary:
+	"""
+	server_db'ye JSON mesaj gonderir ve cevabi dondurur (bloklayan, kisa zaman asimli).
+	Protokol: tek satir JSON + "\\n" gonder, tek satir JSON + "\\n" cevap al, baglanti kapanir.
+	"""
+	var request: Dictionary = {"method": method}
+	for key in payload.keys():
+		request[key] = payload[key]
+	var msg: String = JSON.stringify(request) + "\n"
+	var tcp := StreamPeerTCP.new()
+	if tcp.connect_to_host(DB_HOST, DB_PORT) != OK:
+		return {"ok": false, "error": "db_baglanti_yok"}
+	var deadline: int = Time.get_ticks_msec() + DB_TIMEOUT_MS
+	# Baglanti kurulana kadar bekle
+	while true:
+		tcp.poll()
+		var st: int = tcp.get_status()
+		if st == StreamPeerTCP.STATUS_CONNECTED:
+			break
+		if st == StreamPeerTCP.STATUS_ERROR or st == StreamPeerTCP.STATUS_NONE or Time.get_ticks_msec() > deadline:
+			tcp.disconnect_from_host()
+			return {"ok": false, "error": "db_baglanti_yok"}
+		OS.delay_msec(1)
+	tcp.put_data(msg.to_utf8_buffer())
+	# Cevabi satir sonuna (\n) kadar oku
+	var buf := PackedByteArray()
+	while Time.get_ticks_msec() <= deadline:
+		tcp.poll()
+		var n: int = tcp.get_available_bytes()
+		if n > 0:
+			var r: Array = tcp.get_data(n)
+			if int(r[0]) == OK:
+				buf.append_array(r[1])
+				if buf.has(10):
+					break
+		elif tcp.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+			break   # karsi taraf baglantiyi kapatti
+		else:
+			OS.delay_msec(1)
+	tcp.disconnect_from_host()
+	var parsed: Variant = JSON.parse_string(buf.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return {"ok": false, "error": "db_gecersiz_yanit"}
+	return parsed
+
+
+func _hash_sha256(text: String) -> String:
+	"""
+	Godot 4.7.2 HashingContext ile SHA-256 hash hesaplar.
+	Token hash'ini saklamak icin kullanilir (HMAC token dogrulamasi degistirilmez).
+	"""
+	var ctx: HashingContext = HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA256)
+	ctx.update(text.to_utf8_buffer())
+	var hash_bytes: PackedByteArray = ctx.finish()
+	return hash_bytes.hex_encode()
 
 
 func w2g(x: float, y: float) -> Vector3:
@@ -70,11 +156,102 @@ func _players_in(map_name: String) -> Array:
 	return out
 
 
+# ------------------------------------------------------------------ TOKEN KIMLIK DOGRULAMA
+func on_attach_token(peer_id: int, token: String) -> Array:
+	"""
+	ISTEMCI TARAFINDAN GELSEN DE TUM DOGRULAMA SUNUCU TARAFINDAN YAPILIR.
+	Token'i server_db.py'ye gonderir, dogrulama basariliysa
+	peer_id <-> account_id eslemesi olusturulur ve oyuncu verileri yuklenir.
+	Donder: [ok: bool, msg: String, account_id: int, callsign: String, faction: int, player_state_json: String]
+	"""
+	print("[SUNUCU] on_attach_token cagrildi: peer_id=%d, token_prefix=%s" % [peer_id, token.substr(0, 20)])
+	# 1. Token'i server_db'ye gonder (verify_and_consume_token)
+	var resp: Dictionary = db_send("verify_and_consume_token", {
+		"session_token": token,
+		"instance_id": db_instance_id,
+	})
+	if not resp.has("ok") or resp["ok"] == false:
+		print("[SUNUCU] Token dogrulanamadi: account_id=%d, resp=%s" % [peer_id, str(resp)])
+		return [false, "Gecersiz veya sus mustum token", 0, "", 0, ""]
+	var acct_id: int = int(resp["account_id"])
+	print("[SUNUCU] Token dogrulandi: peer_id=%d, account_id=%d" % [peer_id, acct_id])
+
+	# 1.5. Ban kontrolu (hesap yasakliysa giris engellenir)
+	var ban_status: Dictionary = db_send("get_account_status", {
+		"account_id": acct_id,
+	})
+	if ban_status.has("ok") and ban_status["ok"] and ban_status.get("ban_active", false):
+		print("[SUNUCU] Banli hesap giris engellendi: account_id=%d" % acct_id)
+		return [false, "Hesap yasakli: " + str(ban_status.get("ban_reason", "bilinmeyen")), 0, "", 0, ""]
+
+	# 2. Session lock al (eski oturumu temizle, yeni kilitle)
+	var lock_resp: Dictionary = db_send("acquire_session_lock", {
+		"account_id": acct_id,
+		"session_token_hash": _hash_sha256(token),
+		"instance_id": db_instance_id,
+	})
+	# [KILIT-FIX] bos cevap = DB hatasi (gercek kilit degil)
+	if lock_resp.is_empty() or not lock_resp.has("ok"):
+		print("[SUNUCU] Session lock: DB cevap vermedi: account_id=%d" % acct_id)
+		return [false, "Veritabani hatasi, lutfen tekrar dene", 0, "", 0, ""]
+	if lock_resp["ok"] == false:
+		print("[SUNUCU] Session lock reddedildi: account_id=%d" % acct_id)
+		return [false, "Hesap baska bir oturumda calisiyor", 0, "", 0, ""]
+	print("[SUNUCU] Session lock alindi: account_id=%d" % acct_id)
+
+	# 3. Oyuncu durumunu veritabanindan yukle
+	var state_resp: Dictionary = db_send("load_player_state", {
+		"account_id": acct_id,
+	})
+	if not state_resp.has("ok") or state_resp["ok"] == false:
+		print("[SUNUCU] Player state yuklenemedi: account_id=%d" % acct_id)
+		return [false, "Oyuncu verisi yuklenemedi", 0, "", 0, ""]
+	print("[SUNUCU] Player state yuklendi: account_id=%d" % acct_id)
+
+	var ps: Dictionary = state_resp["player_state"]
+
+	# 4. players dict'e ekle (account_id ile izole)
+	players[peer_id] = {
+		"id": peer_id,
+		"account_id": acct_id,
+		"name": str(ps.get("callsign", "Gezgin")),
+		"faction": int(ps.get("faction", 1)),
+		"ship": str(ps.get("ship", "phoenix")),
+		"map": "",
+		"pos": Vector3.ZERO, "yaw": 0.0,
+		"hp": float(ps.get("cr", 0)),  # gecici, on_node ile duzeltilecek
+		"mhp": 1.0, "sh": 0.0, "msh": 0.0, "spd": 0.0,
+		"in_safe": false, "ut": false, "chat_t": 0.0, "form": "std", "drn": [],
+		"zone": 0, "prot": 0, "lock_t": -1.0e9, "arr_t": -1.0e9, "combat_t": -1.0e9, "last_dmg_t": -1.0e9,
+		"jump_to": "", "jump_dl": -1.0, "respawn_ok": false, "group": 0,
+		# Sunucu tarafige ait oyuncu verisi (istemciye gosterilmez)
+		"_sv_cr": int(ps.get("cr", 0)),
+		"_sv_uri": int(ps.get("uri", 0)),
+		"_sv_xp": float(ps.get("xp", 0.0)),
+		"_sv_hon": float(ps.get("hon", 0.0)),
+		"_sv_settings": str(ps.get("settings", "{}")),
+		"_sv_inventory": {},  # doldurulabilir
+		"_sv_admin": int(ps.get("is_admin", 0)),   # admin yetkisi (sunucu tarafige)
+	}
+
+	print("[SUNUCU] Token dogrulandi: peer=%d, account_id=%d, callsign=%s" % [peer_id, acct_id, str(ps.get("callsign", "Gezgin"))])
+
+	# 5. Basarili sonuc dondur
+	print("[SUNUCU] s_attach_result gonderiliyor: peer=%d" % peer_id)
+	return [true, "Kimlik dogrulandi", acct_id,
+		str(ps.get("callsign", "Gezgin")),
+		int(ps.get("faction", 1)),
+		JSON.stringify(ps)]
+
+
 # ------------------------------------------------------------------ baglanti olaylari
 func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> Array:
 	# [ok: bool, mesaj: String]
 	if proto != net.PROTO:
 		return [false, "Surum uyusmuyor (sunucu: %d, istemci: %d)." % [net.PROTO, proto]]
+	# Kimlik dogrulamasi zorunlu: account_id yoksa kabul edilmez
+	if not players.has(peer) or not players[peer].has("account_id"):
+		return [false, "Kimlik dogrulanmamis erisim. Once token gonderin."]
 	nm = nm.strip_edges()
 	if nm.length() < 1 or nm.length() > 16:
 		return [false, "Gecersiz oyuncu adi."]
@@ -83,7 +260,9 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 			return [false, "Bu isimle bir oyuncu zaten bagli."]
 	if players.size() >= net.MAX_PEERS:
 		return [false, "Sunucu dolu."]
-	players[peer] = {"id": peer, "name": nm, "faction": clampi(faction, 1, 3), "ship": ship, "map": "",
+	# Mevcut account_id'yi koru, diger alanlari guncelle
+	var acct_id: int = int(players[peer].account_id)
+	players[peer] = {"id": peer, "account_id": acct_id, "name": nm, "faction": clampi(faction, 1, 3), "ship": ship, "map": "",
 		"pos": Vector3.ZERO, "yaw": 0.0, "hp": 1.0, "mhp": 1.0, "sh": 0.0, "msh": 0.0, "spd": 0.0,
 		"in_safe": false, "ut": false, "chat_t": 0.0, "form": "std", "drn": [],
 		# koruma / catisma durumu (hepsi sunucu saatiyle; birbirinden ayri)
@@ -97,6 +276,13 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 		players[peer].arr_t = float(gh.arr_t)
 	print("[SUNUCU] %s katildi (id %d, sirket %d). Oyuncu sayisi: %d" % [nm, peer, faction, players.size()])
 	_system_chat("%s sunucuya katildi." % nm)
+	# Ban kontrolu (on_join): yasakliysa kick et
+	var join_ban: Dictionary = db_send("get_account_status", {"account_id": int(players[peer].account_id)})
+	if join_ban.has("ok") and join_ban["ok"] and join_ban.get("ban_active", false):
+		print("[SUNUCU] Banli oyuncu join aninda kick: account_id=%d" % players[peer].account_id)
+		net.callv("rpc_id", [peer, "s_disconnect", "Hesap yasakli: " + str(join_ban.get("ban_reason", "bilinmeyen"))])
+		players.erase(peer)
+		return [false, "Hesap yasakli"]
 	return [true, "Hos geldin, %s!" % nm]
 
 
@@ -123,6 +309,9 @@ func on_disconnect(peer: int) -> void:
 	if not players.has(peer):
 		return
 	var p: Dictionary = players[peer]
+	# [KILIT-FIX] oyuncu ayrilinca oturum kilidini birak
+	if p.has("account_id"):
+		db_send("release_session_lock", {"account_id": int(p["account_id"]), "instance_id": db_instance_id})
 	var old_map: String = str(p.map)
 	_remove_from_group(peer, false)
 	invites.erase(peer)
@@ -132,6 +321,16 @@ func on_disconnect(peer: int) -> void:
 	# Baglanti kopmasi saldiri kilidini / catisma sayacini SIFIRLAMAZ (yeniden baglaninca geri yuklenir).
 	if maxf(float(p.lock_t), maxf(float(p.combat_t), float(p.arr_t))) > clock:
 		ghosts[str(p.name).to_lower()] = {"lock_t": float(p.lock_t), "combat_t": float(p.combat_t), "arr_t": float(p.arr_t)}
+	# Konumu kaydet (ayrilişte)
+	if p.has("account_id") and str(p.map) != "":
+		var pos: Vector3 = p.pos
+		if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+			db_send("save_player_position", {
+				"account_id": int(p.account_id),
+				"map_name": str(p.map),
+				"px": float(pos.x),
+				"pz": float(pos.z),
+			})
 	players.erase(peer)
 	if old_map != "":
 		_bcast(old_map, "s_pleave", [peer])
@@ -163,6 +362,16 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 			return
 		jumped = token_ok
 		_bcast(old_map, "s_pleave", [peer])
+		# Harita degisirken mevcut konumu kaydet
+		if p.has("account_id") and str(p.map) != "":
+			var pos: Vector3 = p.pos
+			if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+				db_send("save_player_position", {
+					"account_id": int(p.account_id),
+					"map_name": str(p.map),
+					"px": float(pos.x),
+					"pz": float(pos.z),
+				})
 		p.map = ""
 		_maybe_free_world(old_map)
 	elif old_map == map_name:
@@ -198,7 +407,8 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 
 func _player_info(p: Dictionary) -> Array:
 	return [int(p.id), str(p.name), int(p.faction), str(p.ship), float((p.pos as Vector3).x), float((p.pos as Vector3).z),
-		float(p.yaw), float(p.hp), float(p.mhp), float(p.sh), float(p.msh), str(p.form), (p.drn as Array).duplicate()]
+		float(p.yaw), float(p.hp), float(p.mhp), float(p.sh), float(p.msh), str(p.form), (p.drn as Array).duplicate(),
+		int(p.get("_sv_admin", 0))]
 
 
 func _npc_info(e: Dictionary) -> Array:
@@ -270,8 +480,8 @@ func on_state(peer: int, x: float, z: float, yaw: float, hp: float, mhp: float, 
 	var m: Dictionary = maps[str(p.map)]
 	p.pos = Vector3(clampf(x, 0.0, float(m.w) * DOData.S), 0.0, clampf(z, 0.0, float(m.h) * DOData.S))
 	p.yaw = yaw
-	p.hp = hp
 	p.mhp = maxf(mhp, 1.0)
+	p.hp = clampf(hp, 0.0, float(p.mhp))   # tamir/rapor max HP'yi asamaz
 	p.sh = sh
 	p.msh = maxf(msh, 0.0)
 	p.spd = spd
@@ -416,6 +626,13 @@ func on_chat(peer: int, text: String, ch: int = 0) -> void:
 	if not players.has(peer):
 		return
 	var p: Dictionary = players[peer]
+	# Mute kontrolu (susturulmus oyuncu sohbet atamaz)
+	var mute_status: Dictionary = db_send("get_account_status", {
+		"account_id": int(p.account_id),
+	})
+	if mute_status.has("ok") and mute_status["ok"] and mute_status.get("mute_active", false):
+		_to(peer, "s_chat", ["", 0, "Sohbet engeli durmustur.", 0])
+		return
 	text = text.strip_edges().substr(0, 120)
 	if text == "" or clock - float(p.chat_t) < 0.5:
 		return
@@ -797,6 +1014,57 @@ func tick(dt: float) -> void:
 		for wn in worlds.keys():
 			npc_n += (worlds[wn].npcs as Dictionary).size()
 		print("[SUNUCU] Oyuncu: %d | Aktif harita: %d | NPC: %d" % [players.size(), worlds.size(), npc_n])
+	npc_override_t += dt
+	if npc_override_t >= 5.0:
+		npc_override_t = 0.0
+		var resp: Dictionary = db_send("get_npc_overrides", {})
+		if resp.has("ok") and resp["ok"]:
+			npc_overrides = resp.get("overrides", {})
+		# NPC sayisini override ile sinirla (admin panelden)
+		for wn in worlds.keys():
+			var w: Dictionary = worlds[wn]
+			var max_npc: int = int(npc_overrides.get(wn, 0))
+			if max_npc > 0:
+				var npcs: Dictionary = w.npcs as Dictionary
+				while npcs.size() > max_npc:
+					var first_uid: Variant = npcs.keys()[0]
+					npcs.erase(first_uid)
+		# Cele online oyuncularin ban durumunu kontrol et, banliysa kick et
+		ban_tick_t += dt
+		if ban_tick_t >= 5.0:
+			ban_tick_t = 0.0
+			for pid in players.keys().duplicate():
+				var p: Dictionary = players[pid]
+				var st: Dictionary = db_send("get_account_status", {"account_id": int(p.account_id)})
+				if st.has("ok") and st["ok"] and st.get("ban_active", false):
+					print("[SUNUCU] Banli oyuncu tick ile kick: account_id=%d" % p.account_id)
+					net.callv("rpc_id", [int(pid), "s_disconnect", "Hesap yasakli: " + str(st.get("ban_reason", "bilinmeyen"))])
+					players.erase(int(pid))
+		# Online oyuncularin cr/uri bakiyesini DB'den senkronize et (admin panelinden gelen degisiklikler icin)
+		balance_tick_t += dt
+		if balance_tick_t >= 30.0:
+			balance_tick_t = 0.0
+			for pid in players.keys().duplicate():
+				var p: Dictionary = players[pid]
+				var bal: Dictionary = db_send("get_player_balance", {"account_id": int(p.account_id)})
+				if bal.has("ok") and bal["ok"]:
+					p["_sv_cr"] = int(bal["cr"])
+					p["_sv_uri"] = int(bal["uri"])
+		# Her oyuncunun konumunu periyodik olarak kaydet (~20 saniyede bir)
+		pos_save_t += dt
+		if pos_save_t >= 20.0:
+			pos_save_t = 0.0
+			for pid in players.keys().duplicate():
+				var p: Dictionary = players[pid]
+				if p.has("account_id") and str(p.map) != "":
+					var pos: Vector3 = p.pos
+					if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+						db_send("save_player_position", {
+							"account_id": int(p.account_id),
+							"map_name": str(p.map),
+							"px": float(pos.x),
+							"pz": float(pos.z),
+						})
 
 
 func _tick_respawn(w: Dictionary, dt: float) -> void:

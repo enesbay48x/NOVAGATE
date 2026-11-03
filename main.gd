@@ -96,6 +96,7 @@ var enemies: Array = []
 var boxes: Array = []
 var collect_box = null   # tıklanan, toplanmakta olan bonus kutu
 var collect_t := 0.0
+const BOX_COLLECT_TIME := 1.5   # toplama animasyonu suresi (sn)
 var portals: Array = []
 var base_pos = null
 var bullets: Array = []
@@ -110,6 +111,14 @@ var zoom := 1.0
 var save_t := 0.0
 var jump_t := -1.0
 var jump_to = null
+const JUMP_TOTAL := 2.0         # atlama geri sayimi (sn)
+const JUMP_PULL := 1.2          # son kac saniyede gemi kapinin merkezine cekilir
+var jump_flash = null           # tam ekran flas (ColorRect)
+var jump_flash_a := 0.0
+var jump_arrive_t := -1.0       # varis animasyonu sayaci (-1 = yok)
+var jump_arrive_from := Vector3.ZERO
+var jump_arrive_to := Vector3.ZERO
+var jump_ring_cd := 0.0
 var toasts: Array = []
 const SafeZone := preload("res://safe_zone.gd")
 var in_safe := false          # GERCEK koruma aktif mi (guvenli bolge / gecici gecis korumasi); prot_kind != 0 ile ayni
@@ -126,6 +135,12 @@ var rad_acc := 0.0
 var rad_in := false
 var rad_label: Label
 var last_hit := 0.0
+# ---- REP-4 otomatik HP tamiri (tum gemilerde varsayilan, donanim/envanter gerektirmez) ----
+const REP_DELAY := 10.0        # son hasardan bu kadar sn sonra tamir baslar
+const REP_RATE := 10000.0      # saniyede tamir edilen HP (max HP'yi asmaz)
+const REP_ATTACK_PAUSE := 1.0  # saldiri bu sureden yeni degilse tamir calisir (ates ederken durur)
+var last_attack := -1.0e9
+var repairing := false         # HUD: tamir simgesi / yukselis animasyonu
 var clock := 0.0
 var spd_cur := 0.0
 # Otomatik kamera (DarkOrbit gibi: hizlanirken uzaklasir, dururken yaklasir, hedefi cerceveler)
@@ -150,6 +165,7 @@ const AIM_TURN := 9.0         # rad/sn burnun hedefe donus hizi
 var move_yaw := 0.0           # geminin GITTIGI yon (burun yonunden ayri tutulur)
 var view_rect := Rect2()
 var tex_cache := {}
+var ship_prev_cache := {}   # market / hangar gemi onizlemeleri (SubViewport dokulari)
 var stars_on := true
 var star_a: TextureRect
 var star_b: TextureRect
@@ -205,10 +221,8 @@ var rsb_cd := 0.0           # RSB-75 yeniden kullanim beklemesi (sn)
 var rsb_prev := ""          # RSB'den onceki muhimmat: RSB atildiktan sonra otomatik buna donulur
 var extras = null           # Ozel esyalar (extras.gd): Nukleer, Koruma, EMA, Tamir, ENC
 # --- COK OYUNCULU ---
-var net_wanted: bool = false     # menude "Cok oyunculu" isaretli
+var net_wanted: bool = true      # oyun tamamen cevrimici
 var net_addr: String = ""
-var chk_online: CheckBox
-var le_server: LineEdit
 var net_on: bool:
 	get:
 		return Net.online
@@ -269,6 +283,47 @@ func hit_chance(rocket: bool) -> float:
 	if rocket:
 		return clampf(0.90 + skill_bonus("rocket_acc"), 0.0, 1.0)
 	return clampf(0.88 + skill_bonus("laser_acc"), 0.0, 1.0)
+
+
+# Market / hangar karti icin gemiyi oyundaki GUNCEL 3D modelinden (renk + ek kanatlar dahil) cizer.
+# Her gemi icin bir kez kucuk bir SubViewport kurulur ve tek kare render edilir; sonuc onbellekte tutulur.
+func ship_preview_tex(id: String) -> Texture2D:
+	if Net.is_server:
+		return null
+	if ship_prev_cache.has(id):
+		return ship_prev_cache[id]
+	var ship := make_ship(id, 6.0, ship_faction_tint())
+	if ship == null:
+		ship_prev_cache[id] = null
+		return null
+	var vp := SubViewport.new()
+	vp.size = Vector2i(256, 256)
+	vp.transparent_bg = true
+	vp.own_world_3d = true
+	vp.msaa_3d = Viewport.MSAA_2X
+	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	add_child(vp)
+	vp.add_child(ship)
+	var env := Environment.new()
+	env.background_mode = Environment.BG_CLEAR_COLOR
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.85, 0.9, 1.0)
+	env.ambient_light_energy = 0.7
+	var we := WorldEnvironment.new()
+	we.environment = env
+	vp.add_child(we)
+	var sun := DirectionalLight3D.new()
+	sun.light_energy = 1.3
+	sun.rotation_degrees = Vector3(-55.0, 35.0, 0.0)
+	vp.add_child(sun)
+	var cam := Camera3D.new()
+	cam.fov = 32.0
+	vp.add_child(cam)
+	cam.look_at_from_position(Vector3(0.0, 10.5, -6.5), Vector3.ZERO, Vector3.UP)
+	cam.current = true
+	var tex: Texture2D = vp.get_texture()
+	ship_prev_cache[id] = tex
+	return tex
 
 
 func _tex(path: String) -> Texture2D:
@@ -585,7 +640,7 @@ var STYLES := {
 	"phoenix": [Color(0.55, 0.70, 0.95), 0.65, 0.30, Color(0.25, 0.65, 1.0), 0.30],
 	"yamato": [Color(0.95, 0.75, 0.35), 0.70, 0.28, Color(1.0, 0.65, 0.2), 0.30],
 	"leonov": [Color(0.85, 0.88, 0.95), 0.60, 0.30, Color(1.0, 0.55, 0.2), 0.25],
-	"defcom": [Color(0.40, 0.65, 0.45), 0.55, 0.38, Color(0.3, 1.0, 0.5), 0.25],
+	"defcom": [Color(0.34, 0.38, 0.46), 0.60, 0.34, Color(1.0, 0.55, 0.15), 0.30],
 	"liberator": [Color(0.80, 0.35, 0.35), 0.60, 0.32, Color(1.0, 0.3, 0.3), 0.30],
 	"piranha": [Color(0.25, 0.75, 0.80), 0.60, 0.30, Color(0.2, 1.0, 0.9), 0.30],
 	"nostromo": [Color(0.68, 0.48, 0.90), 0.60, 0.30, Color(0.8, 0.4, 1.0), 0.30],
@@ -969,6 +1024,7 @@ func make_ship(n: String, size: float, tint: Color) -> Node3D:
 	holder.scale = Vector3.ONE * k
 	holder.position = -c * k
 	pivot.rotation.y = -yaw
+	ShipUpgrades.apply(n, pivot, holder, hull, engines, yaw, k, tint)   # satilan gemilere ek kanat / duman
 	root.set_meta("r", size * 0.5)
 	return root
 
@@ -1450,11 +1506,27 @@ func _lg_card(parent: Control, width: float, accent: Color) -> VBoxContainer:
 	return inner
 
 
+const MENU_BG := "res://novagate_bg.jpg"   # giris / sirket secimi arka plani
+const MENU_TOP_PAD := 130.0                # kartlari arka plandaki logonun altina iten bosluk (px)
+
+
 func _build_main_menu(layer: Control) -> void:
 	menu = ColorRect.new()
 	(menu as ColorRect).color = Color(0.0, 0.01, 0.03, 0.80)
 	menu.set_anchors_preset(Control.PRESET_FULL_RECT)
 	layer.add_child(menu)
+
+	# Giris / sirket secimi arka plani: NovaGate gorseli (ekrani kaplar, orani korunur).
+	var bg_tex: Texture2D = _tex(MENU_BG)
+	if bg_tex != null:
+		var bgr := TextureRect.new()
+		bgr.texture = bg_tex
+		bgr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		bgr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		bgr.set_anchors_preset(Control.PRESET_FULL_RECT)
+		bgr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		menu.add_child(bgr)
+		(menu as ColorRect).color = Color(0.0, 0.01, 0.03, 0.18)   # yazilar okunsun diye hafif karartma
 
 	# kenarlari karartan vinyet (merkez acik, kenarlar koyu)
 	var grad := Gradient.new()
@@ -1477,6 +1549,8 @@ func _build_main_menu(layer: Control) -> void:
 
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	if bg_tex != null:
+		center.offset_top = MENU_TOP_PAD   # kart, gorseldeki NovaGate logosunun altinda kalsin
 	menu.add_child(center)
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 18)
@@ -1485,6 +1559,7 @@ func _build_main_menu(layer: Control) -> void:
 	# --- Marka basligi ---
 	var head := VBoxContainer.new()
 	head.add_theme_constant_override("separation", 8)
+	head.visible = bg_tex == null   # arka plan gorselinde logo zaten var; yazi basligi tekrar edilmez
 	col.add_child(head)
 	var t := _lg_label("NOVAGATE", 46, LG_GOLD, 10)
 	t.add_theme_color_override("font_outline_color", Color(0.40, 0.20, 0.0, 0.85))
@@ -1530,32 +1605,6 @@ func _build_main_menu(layer: Control) -> void:
 	le_pass2.secret = true
 	blk_pass2 = _lg_field_block(inner, "ŞİFRE (TEKRAR)", le_pass2, 2)
 	blk_pass2.visible = false
-	chk_online = CheckBox.new()
-	chk_online.text = "Çok oyunculu mod (sunucuya bağlan)"
-	chk_online.add_theme_font_override("font", SCI_FONT)
-	chk_online.add_theme_font_size_override("font_size", 12)
-	for c in ["font_color", "font_focus_color"]:
-		chk_online.add_theme_color_override(c, LG_MUTED)
-	for c in ["font_hover_color", "font_pressed_color", "font_hover_pressed_color"]:
-		chk_online.add_theme_color_override(c, LG_TEXT)
-	chk_online.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	inner.add_child(chk_online)
-	le_server = LineEdit.new()
-	_lg_field(le_server, "Sunucu adresi  ·  örn. 192.168.1.20:7777")
-	le_server.visible = false
-	inner.add_child(le_server)
-	chk_online.toggled.connect(func(on: bool) -> void: le_server.visible = on)
-	var ncfg := ConfigFile.new()
-	if ncfg.load("user://novagate_net.cfg") == OK:
-		le_server.text = str(ncfg.get_value("net", "addr", ""))
-		chk_online.button_pressed = bool(ncfg.get_value("net", "on", false))
-		le_server.visible = chk_online.button_pressed
-	if Net.SERVER_ADDR != "":
-		# Sabit sunucu adresi tanimli: secenekler gizlenir, baglanti otomatik yapilir.
-		chk_online.button_pressed = true
-		chk_online.visible = false
-		le_server.text = Net.SERVER_ADDR
-		le_server.visible = false
 	lbl_auth_msg = _lg_label("", 12, LG_ERR)
 	lbl_auth_msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	lbl_auth_msg.custom_minimum_size = Vector2(0, 18)
@@ -1792,15 +1841,10 @@ func _auth_submit() -> void:
 	if nm == "" or pw == "":
 		lbl_auth_msg.text = "Kullanıcı adı ve şifre gerekli."
 		return
-	var db := _acc_load()
-	var users: Dictionary = db["users"]
-	var key := _acc_key(nm)
 	if auth_register:
+		# Kayit: yerel dogrulama + sunucuya hesap olusturma
 		if not _name_valid(nm):
 			lbl_auth_msg.text = "Kullanıcı adı 3-16 karakter olmalı (harf, rakam, _ - .)."
-			return
-		if users.has(key):
-			lbl_auth_msg.text = "Bu kullanıcı adı zaten alınmış."
 			return
 		if pw.length() < 4:
 			lbl_auth_msg.text = "Şifre en az 4 karakter olmalı."
@@ -1813,21 +1857,105 @@ func _auth_submit() -> void:
 		auth_box.visible = false
 		company_box.visible = true
 		return
-	# Giris
-	if not users.has(key):
-		lbl_auth_msg.text = "Kullanıcı adı veya şifre hatalı."
+	# Giris: TLS ile auth_service'ye gonder
+	lbl_auth_msg.text = "Sunucuya dogrulaniyor..."
+	Net.login_via_tls(nm, pw)
+
+
+# ------------------------------------------------------------------ TLS AUTH CALLBACK
+func _on_auth_result(ok: bool, msg: String, acct_id: int = 0, callsign: String = "", faction: int = 1, token: String = "") -> void:
+	"""
+	Net.login_via_tls'den gelen sonuc.
+	Basariliysa ENet sunucusuna token ile baglanir.
+	"""
+	if not ok:
+		lbl_auth_msg.text = msg
+		menu.modulate = Color(1, 1, 1, 1)
+		menu.show()
+		auth_box.visible = true
+		company_box.visible = false
 		return
-	var rec: Dictionary = users[key]
-	if _acc_hash(str(rec.get("salt", "")), pw) != str(rec.get("hash", "")):
-		lbl_auth_msg.text = "Kullanıcı adı veya şifre hatalı."
+	account_name = callsign
+	account_faction = faction
+	Net.session_token = token
+	Net.account_id = acct_id
+	# ENet sunucusuna token ile baglan
+	lbl_auth_msg.text = "Oyun sunucusuna baglaniliyor..."
+	# Giris akisinda ENet baglantisi henuz yok (kayit akisi onceden baglaniyor): once baglan.
+	if not Net.online:
+		var conn_ok: bool = await Net.connect_only(Net.SERVER_ADDR)
+		if not conn_ok:
+			lbl_auth_msg.text = "Sunucuya baglanilamadi: " + Net.last_error
+			menu.modulate = Color(1, 1, 1, 1)
+			menu.show()
+			auth_box.visible = true
+			company_box.visible = false
+			return
+	Net.attach_token(token)
+
+
+# ------------------------------------------------------------------ ENET ATTACH CALLBACK
+func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String = "", faction: int = 1, player_state_json: String = "") -> void:
+	"""
+	Net.c_attach_token'dan gelen sonuc.
+	Basariliysa SV'i sunucudan gelen verilerle doldurur ve oyunu baslatir.
+	"""
+	print("[ISTEMCI] _on_attach_result cagrildi: ok=%s, msg=%s, acct_id=%d" % [ok, msg, acct_id])
+	if not ok:
+		lbl_auth_msg.text = msg
+		menu.modulate = Color(1, 1, 1, 1)
+		menu.show()
+		auth_box.visible = true
+		company_box.visible = false
 		return
-	account_name = str(rec.get("name", nm))
-	account_faction = clampi(int(rec.get("faction", 1)), 1, 3)
-	save_path = str(rec.get("file", ""))
-	if save_path != "" and FileAccess.file_exists(save_path):
-		_start_transition(continue_game)
-	else:
-		_start_transition(new_game.bind(account_faction))
+	account_name = callsign
+	account_faction = faction
+	Net.account_id = acct_id
+
+	# SV'i sunucudan gelen verilerle doldur (istemci tarafindaki SV sadece gorunum kopyasi)
+	var ps: Dictionary = JSON.parse_string(player_state_json)
+	SV = {
+		"faction": int(ps.get("faction", faction)),
+		"is_admin": int(ps.get("is_admin", 0)),
+		"cr": int(ps.get("cr", 0)),
+		"uri": int(ps.get("uri", 0)),
+		"xp": float(ps.get("xp", 0.0)),
+		"hon": float(ps.get("hon", 0.0)),
+		"pvp_kills": int(ps.get("pvp_kills", 0)),
+		"rank_pen": float(ps.get("rank_pen", 0.0)),
+		"ship": str(ps.get("ship", "phoenix")),
+		"map": str(ps.get("map", "1-1")),
+		"px": float(ps.get("px", 0.0)),
+		"pz": float(ps.get("pz", 0.0)),
+		"kills": int(ps.get("kills", 0)),
+		"callsign": str(ps.get("callsign", callsign)),
+		"sel": str(ps.get("selected_ammo", "x1")),
+		"inv": ps.get("inv", {}),
+		"ammo": ps.get("ammo", {}),
+		"rockets": int(ps.get("rockets", 50)),
+		"owned": ps.get("owned", [str(ps.get("ship", "phoenix"))]),
+		"forms": ps.get("forms", ["std"]),
+		"loads": {},
+		"cfgi": int(ps.get("cfg_index", 0)),
+		"free": bool(ps.get("free_mode", false)),
+		"quests": {},
+		"skills": {},
+		"skill_points": int(ps.get("skill_points", 0)),
+		"maps_visited": [],
+		"route_to": str(ps.get("route_to", "")),
+		"settings": {},
+		"drone_equip": {},
+		"reg_ts": int(ps.get("reg_ts", Time.get_unix_time_from_system())),
+	}
+	# JSON alanlarini coz
+	if ps.has("settings") and typeof(ps.settings) == TYPE_STRING:
+		SV.settings = JSON.parse_string(ps.settings)
+	if ps.has("drone_equip") and typeof(ps.drone_equip) == TYPE_STRING:
+		SV.drone_equip = JSON.parse_string(ps.drone_equip)
+
+	print("[ISTEMCI] SV hazirlandi: account_id=%d, callsign=%s, ship=%s" % [acct_id, callsign, ps.get("ship", "phoenix")])
+	# Oyunu baslat (zaten ENet baglantisi var, sadece oyun baslat)
+	_start_run(false, true)
 
 
 func _company_back() -> void:
@@ -1844,26 +1972,59 @@ func _company_back() -> void:
 
 # Kayit tamamlanir: hesap ancak sirket secildikten sonra olusur ve sirket kilitlenir.
 func _on_company_chosen(f: int) -> void:
-	var db := _acc_load()
-	var users: Dictionary = db["users"]
-	var key := _acc_key(pending_name)
-	if users.has(key):
-		_company_back()
-		lbl_auth_msg.text = "Bu kullanıcı adı zaten alınmış."
-		return
-	var salt: String = Crypto.new().generate_random_bytes(12).hex_encode()
-	var file := "user://novagate_save_%s.json" % key.sha256_text().substr(0, 16)
-	users[key] = {"name": pending_name, "salt": salt, "hash": _acc_hash(salt, pending_pass), "faction": f, "file": file}
-	db["users"] = users
-	if not _acc_store(db):
-		_company_back()
-		lbl_auth_msg.text = "Hesap kaydedilemedi."
-		return
-	pending_pass = ""
-	account_name = pending_name
-	account_faction = f
-	save_path = file
-	_start_transition(new_game.bind(f))
+	# Oncece sunucuya kayit (TLS /register)
+	var reg_body: String = JSON.stringify({
+		"username": pending_name,
+		"password": pending_pass,
+		"faction": f,
+		"callsign": pending_name
+	})
+	var headers: PackedStringArray = ["Content-Type: application/json"]
+	var url := "https://%s:%d/register" % [Net.AUTH_HOST, Net.AUTH_HTTPS_PORT]
+	var req := HTTPRequest.new()
+	add_child(req)
+	if Net.tls_opts != null:
+		req.set_tls_options(Net.tls_opts)
+	var reg_pass: String = pending_pass   # kayit sonrasi girisde kullanilacak (pending_pass asagida siliniyor)
+	req.request_completed.connect(func(_result, _code, _headers, _body: PackedByteArray):
+		if _result != HTTPRequest.RESULT_SUCCESS or _code != 200:
+			lbl_auth_msg.text = "Sunucu kayit hatasi (kod %d/%d)." % [_result, _code]
+			_company_back()
+			return
+		var data: Dictionary = JSON.parse_string(_body.get_string_from_utf8())
+		if not data.has("ok") or data["ok"] == false:
+			lbl_auth_msg.text = str(data.get("error", "kayit basarisiz"))
+			_company_back()
+			return
+		# Sunucu kayit basarili: yerel dosyaya da kaydet (geri uyumluluk)
+		var db := _acc_load()
+		var users: Dictionary = db["users"]
+		var key := _acc_key(pending_name)
+		if users.has(key):
+			_company_back()
+			lbl_auth_msg.text = "Bu kullanıcı adı zaten alınmış."
+			return
+		var salt: String = Crypto.new().generate_random_bytes(12).hex_encode()
+		var file := "user://novagate_save_%s.json" % key.sha256_text().substr(0, 16)
+		users[key] = {"name": pending_name, "salt": salt, "hash": _acc_hash(salt, pending_pass), "faction": f, "file": file}
+		db["users"] = users
+		if not _acc_store(db):
+			_company_back()
+			lbl_auth_msg.text = "Hesap kaydedilemedi."
+			return
+		pending_pass = ""
+		account_name = pending_name
+		account_faction = f
+		save_path = file
+		# Kayit sonrasi once ENet baglantisi kur, sonra TLS ile giris yapip token al
+		var conn_ok: bool = await Net.connect_only(Net.SERVER_ADDR)
+		if not conn_ok:
+			lbl_auth_msg.text = "Sunucuya baglanilamadi: " + Net.last_error
+			_company_back()
+			return
+		Net.login_via_tls(pending_name, reg_pass)
+	)
+	req.request(url, headers, HTTPClient.METHOD_POST, reg_body)
 
 
 # Gemi altindaki isim plakasi: oyuncu adi + yaninda (sagda) secilen sirketin logosu.
@@ -1915,13 +2076,37 @@ func _build_plate() -> void:
 
 
 # Diger oyunculara ait 2D isim plakasi: [sirket logosu] + isim. (Kendi plakanla ayni mantik; logo_sm yoksa logo_<sirket> kullanilir.)
-func make_remote_plate(nm: String, fac: int, col: Color) -> Control:
+func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false) -> Control:
 	if plate_layer == null or not is_instance_valid(plate_layer):
 		return null
 	var box := HBoxContainer.new()
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	box.add_theme_constant_override("separation", 3)
 	box.visible = false
+	# Isim once (solda)
+	var lb := Label.new()
+	lb.text = nm
+	lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lb.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lb.add_theme_font_override("font", SCI_FONT)
+	lb.add_theme_font_size_override("font_size", 10)
+	lb.add_theme_color_override("font_color", col)
+	lb.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	lb.add_theme_constant_override("outline_size", 3)
+	# Rutbe rozeti (admin -> rank_21.png) - isimden ONCE
+	if bool(is_admin):
+		var ar := TextureRect.new()
+		ar.custom_minimum_size = Vector2(11, 11)
+		ar.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ar.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ar.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		ar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		ar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ar.texture = _tex(RankSys.ICON_PATH % RankSys.ADMIN_ICON)
+		box.add_child(ar)
+	# Isim (ortada)
+	box.add_child(lb)
+	# Sirket logosu en sagda
 	var fk: String = str(FACTION_SM_LOGO.get(fac, ""))
 	if fk != "":
 		var lt: Texture2D = _tex("res://assets/ui/logo_sm_%s.png" % fk)
@@ -1937,16 +2122,6 @@ func make_remote_plate(nm: String, fac: int, col: Color) -> Control:
 			lg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			lg.texture = lt
 			box.add_child(lg)
-	var lb := Label.new()
-	lb.text = nm
-	lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	lb.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	lb.add_theme_font_override("font", SCI_FONT)
-	lb.add_theme_font_size_override("font_size", 10)
-	lb.add_theme_color_override("font_color", col)
-	lb.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	lb.add_theme_constant_override("outline_size", 3)
-	box.add_child(lb)
 	plate_layer.add_child(box)
 	box.reset_size()
 	return box
@@ -1971,8 +2146,11 @@ func update_remote_plate(box, node: Node3D, show: bool) -> void:
 func _refresh_plate_rank() -> void:
 	if plate_rank == null or not is_instance_valid(plate_rank) or SV.is_empty():
 		return
-	var rk: Dictionary = RankSys.display(RankSys.summary(self).me)
-	plate_rank.texture = _tex(RankSys.ICON_PATH % int(rk.icon))
+	if bool(SV.get("is_admin", 0)):
+		plate_rank.texture = _tex(RankSys.ICON_PATH % RankSys.ADMIN_ICON)
+	else:
+		var rk: Dictionary = RankSys.display(RankSys.summary(self).me)
+		plate_rank.texture = _tex(RankSys.ICON_PATH % int(rk.icon))
 	plate_rank.visible = plate_rank.texture != null
 
 
@@ -2369,6 +2547,13 @@ func ensure_loadout() -> void:
 			# Yalnızca kendi indeksine göre otomatik donat: Konfi 1 önce alır,
 			# Konfi 1'e gidenler Konfi 2 için "boşta" sayılmaz.
 			auto_equip(c, i)
+	# Tek seferlik duzeltme: eski kayitlarda bos kalmis konfigurasyonu ortak esyalarla doldur.
+	if not bool(SV.get("cfg_shared_v2", false)):
+		SV["cfg_shared_v2"] = true
+		for i in ship_loads.size():
+			var c2: Dictionary = ship_loads[i]
+			if (c2.las as Array).is_empty() and (c2.gen as Array).is_empty():
+				auto_equip(c2, i)
 	_sync_drn_all()
 	_sanitize_drone_equip()
 
@@ -2389,6 +2574,10 @@ func _sync_drn_all() -> void:
 
 
 func _reserved_elsewhere(self_idx: int, key: String, id: String) -> int:
+	# DarkOrbit gibi: lazer/jenerator iki konfigurasyonda da AYNI ANDA takili olabilir (konfigler ortak esyayi kullanir).
+	# Eskiden diger konfigde takili esya burada "dolu" sayilip Konfi 2 bos kaliyordu.
+	if key == "las" or key == "gen":
+		return 0
 	var n := 0
 	for i in _ship_loads().size():
 		if i == self_idx:
@@ -2700,6 +2889,8 @@ func switch_cfg(i: int) -> void:
 	P.sh = clampf(float(cfg_shr[new_i]), 0.0, 1.0) * new_max
 	last_max_sh = new_max
 	sh_ratio = float(cfg_shr[new_i])
+	_clamp_vitals()
+	_update_drones(0.0)   # droid dizilimi/formasyon yeni konfigurasyona hemen gecsin
 	toast("Konfigürasyon %d aktif" % (i + 1))
 	save_game()
 
@@ -2796,7 +2987,7 @@ func buy_ship(id: String) -> bool:
 	for s in DOData.SHIPS:
 		if s.id == id:
 			d = s
-	if d.is_empty() or not pay(int(d.cr), int(d.uri)):
+	if d.is_empty() or id in DOData.MARKET_HIDDEN or not pay(int(d.cr), int(d.uri)):
 		return false
 	SV.owned.append(id)
 	toast("Satın alındı: " + str(d.name))
@@ -2922,7 +3113,7 @@ func select_ammo(id: String) -> void:
 		SV.sel = id
 		return
 	if rsb_cd > 0.0:
-		toast("RSB-75 hazirlaniyor (%ds), bu surede %s kullanilmaya devam eder." % [int(ceil(rsb_cd)), str(SV.sel).to_upper()])
+		toast("RSB-75 hazirlaniyor (%ds), bu surede %s kullanilmaya devam eder." % [int(ceil(rsb_cd)), str(SV.get("sel", "")).to_upper()])
 		return
 	if int(SV.ammo.get("rsb", 0)) <= 0:
 		toast("RSB-75 cephanesi yok! Mağazadan cephane al.")
@@ -3054,19 +3245,15 @@ func _make_player() -> void:
 	reset_cfg_shields()
 
 
-func _start_run(is_new: bool) -> void:
-	net_wanted = chk_online != null and chk_online.button_pressed
-	net_addr = le_server.text.strip_edges() if le_server != null else ""
-	if Net.SERVER_ADDR != "":
-		net_wanted = true
-		net_addr = Net.SERVER_ADDR
-	var ncfg := ConfigFile.new()
-	ncfg.set_value("net", "addr", net_addr)
-	ncfg.set_value("net", "on", net_wanted)
-	ncfg.save("user://novagate_net.cfg")
-	if net_wanted:
+func _start_run(is_new: bool, skip_connect: bool = false) -> void:
+	# Oyun tamamen cevrimici: giris yapilinca her zaman sabit sunucuya baglanilir.
+	print("[ISTEMCI] _start_run cagrildi: is_new=%s, skip_connect=%s" % [is_new, skip_connect])
+	net_wanted = true
+	net_addr = Net.SERVER_ADDR
+	if net_wanted and not skip_connect:
 		var ok: bool = await Net.connect_and_join(net_addr, {"name": str(SV.get("callsign", "Gezgin")),
 			"faction": int(SV.get("faction", 1)), "ship": str(SV.get("ship", "phoenix"))})
+		print("[ISTEMCI] connect_and_join sonucu: ok=%s, last_error=%s" % [ok, Net.last_error])
 		if not ok:
 			menu.modulate = Color(1, 1, 1, 1)
 			menu.show()
@@ -3105,6 +3292,7 @@ func load_map(name: String, arrive: Vector3) -> void:
 	cam_focus_ready = false
 	map_gen += 1
 	cur = name
+	repairing = false   # haritadan ayrilinca tamir sifirlanir
 	rad_in = false
 	rad_acc = 0.0
 	if rad_label != null:
@@ -3170,7 +3358,7 @@ func load_map(name: String, arrive: Vector3) -> void:
 		if p.get("wormhole", false):
 			g = Node3D.new()   # Solucan deligi gorunmezdir
 		else:
-			g = make_ship("jumpgate-regular", 14.0, Color.WHITE)
+			g = JumpGate.new().setup(Color("#36D5FF"))   # kod ile cizilen, animasyonlu NOVAGATE kapisi (jumpgate.gd)
 		g.position = w2g(p.x, p.y)
 		world.add_child(g)
 		if not p.get("wormhole", false):
@@ -3200,14 +3388,125 @@ func load_map(name: String, arrive: Vector3) -> void:
 	save_game()
 
 
-func _make_bonus_box(pos: Vector3) -> MeshInstance3D:
-	var bx := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(1.4, 1.4, 1.4)
-	bx.mesh = bm
-	bx.material_override = _unshaded(Color(1.0, 0.85, 0.2))
-	bx.position = pos
-	return bx
+# Bonus kutu: koyu metal kargo konteyneri, parlayan mavi seritler ve koselerde enerji sutunlari,
+# yerde nabiz atan halka. Govde havada hafifce salinir (animasyon _update_game icinde).
+func _make_bonus_box(pos: Vector3) -> Node3D:
+	var root := Node3D.new()
+	root.position = pos
+	var body := Node3D.new()
+	body.position.y = 0.9
+	root.add_child(body)
+	var steel := StandardMaterial3D.new()
+	steel.albedo_color = Color(0.13, 0.17, 0.23)
+	steel.metallic = 0.85
+	steel.roughness = 0.35
+	var trim := StandardMaterial3D.new()
+	trim.albedo_color = Color(0.36, 0.44, 0.54)
+	trim.metallic = 0.9
+	trim.roughness = 0.22
+	var glow := _unshaded(Color(0.3, 0.9, 1.0))
+	var parts := [
+		[Vector3(1.3, 1.3, 1.3), Vector3.ZERO, steel],                       # ana govde
+		[Vector3(1.55, 0.14, 1.55), Vector3(0, 0.68, 0), trim],              # ust plaka
+		[Vector3(1.55, 0.14, 1.55), Vector3(0, -0.68, 0), trim],             # alt plaka
+		[Vector3(0.9, 0.1, 0.05), Vector3(0, 0.12, 0.66), glow],             # yan parlak seritler
+		[Vector3(0.9, 0.1, 0.05), Vector3(0, 0.12, -0.66), glow],
+		[Vector3(0.05, 0.1, 0.9), Vector3(0.66, 0.12, 0), glow],
+		[Vector3(0.05, 0.1, 0.9), Vector3(-0.66, 0.12, 0), glow],
+		[Vector3(0.5, 0.5, 0.05), Vector3(0, -0.2, 0.66), trim],             # on panel
+		[Vector3(0.5, 0.5, 0.05), Vector3(0, -0.2, -0.66), trim],
+	]
+	for sx in [-1.0, 1.0]:
+		for sz in [-1.0, 1.0]:
+			parts.append([Vector3(0.14, 1.4, 0.14), Vector3(0.72 * sx, 0, 0.72 * sz), glow])   # kose enerji sutunlari
+	for it in parts:
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = it[0]
+		mi.mesh = bm
+		mi.position = it[1]
+		mi.material_override = it[2]
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		body.add_child(mi)
+	# yerde nabiz atan halka (isik havuzu)
+	var hm := StandardMaterial3D.new()
+	hm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	hm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	hm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	hm.albedo_color = Color(0.3, 0.85, 1.0, 0.45)
+	var tm := TorusMesh.new()
+	tm.inner_radius = 0.46
+	tm.outer_radius = 0.5
+	tm.rings = 40
+	tm.ring_segments = 6
+	var halo := MeshInstance3D.new()
+	halo.mesh = tm
+	halo.material_override = hm
+	halo.scale = Vector3.ONE * 3.0
+	halo.position.y = 0.05
+	halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(halo)
+	root.set_meta("body", body)
+	root.set_meta("halo", hm)
+	return root
+
+
+# Toplama bitisi: parlak flas, genisleyen halkalar, yukselen enerji halkalari ve kivilcim.
+func _box_collect_burst(p: Vector3) -> void:
+	var cy := Color(0.35, 0.9, 1.0)
+	_fx_sphere(p + Vector3(0, 0.8, 0), Color(0.85, 0.97, 1.0), 1.5, 7.0, 0.35, 0.8)
+	_fx_ring(p + Vector3(0, 0.1, 0), cy, 1.5, 9.0, 0.55, 0.9)
+	_fx_ring(p + Vector3(0, 0.1, 0), Color(1, 1, 1), 1.0, 6.0, 0.4, 0.7)
+	for i in 4:
+		_fx_ring(p + Vector3(0, 0.3 + 0.35 * i, 0), cy, 3.2 - 0.4 * i, 1.0, 0.45 + 0.08 * i, 0.7, Vector3(0, 5.0, 0))
+	spark_burst(p + Vector3(0, 0.8, 0), cy.lerp(Color(1, 1, 1), 0.4), 22, 12.0)
+
+
+var fx_ring_mesh: TorusMesh = null
+
+
+# Yatay, additive halka efekti (fx2 sistemine baglanir: buyur/kuculur + solar). vel verilirse yukari/asagi kayar.
+func _fx_ring(pos: Vector3, col: Color, s0: float, s1: float, life: float, a0: float, vel := Vector3.ZERO) -> void:
+	if world == null or fx2.size() > 260:
+		return
+	if fx_ring_mesh == null:
+		fx_ring_mesh = TorusMesh.new()
+		fx_ring_mesh.inner_radius = 0.46
+		fx_ring_mesh.outer_radius = 0.5
+		fx_ring_mesh.rings = 40
+		fx_ring_mesh.ring_segments = 6
+	var mt := StandardMaterial3D.new()
+	mt.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mt.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mt.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mt.albedo_color = Color(col.r, col.g, col.b, a0)
+	var mi := MeshInstance3D.new()
+	mi.mesh = fx_ring_mesh
+	mi.material_override = mt
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	world.add_child(mi)
+	mi.position = pos
+	mi.scale = Vector3.ONE * s0
+	fx2.append({"node": mi, "mat": mt, "t": 0.0, "life": life, "s0": s0, "s1": s1, "a0": a0, "vel": vel, "follow": null})
+
+
+# Kucuk parlak enerji parcacigi (hizla hareket eder, kuculerek solar).
+func _fx_mote(pos: Vector3, col: Color, size: float, life: float, vel: Vector3) -> void:
+	if world == null or fx2.size() > 260:
+		return
+	var mt := StandardMaterial3D.new()
+	mt.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mt.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mt.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mt.albedo_color = Color(col.r, col.g, col.b, 0.9)
+	var mi := MeshInstance3D.new()
+	mi.mesh = fx_sphere
+	mi.material_override = mt
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	world.add_child(mi)
+	mi.position = pos
+	mi.scale = Vector3.ONE * size
+	fx2.append({"node": mi, "mat": mt, "t": 0.0, "life": life, "s0": size, "s1": size * 0.2, "a0": 0.9, "vel": vel, "follow": null})
 
 
 # Bonus kutu odulu (tek oyunculuda toplama animasyonu bitince, cok oyunculuda sunucu onayiyla verilir).
@@ -3215,19 +3514,30 @@ func box_reward() -> void:
 	var pn: Node3D = P.node
 	var po: Vector3 = pn.position
 	var r := randf()
+	var ptxt := ""
+	var pcol := Color(1.0, 0.88, 0.4)
 	if r < 0.75:
 		var c := int(float(randi_range(500, 2000)) * (1.0 + skill_bonus("loot_box")))
 		SV.cr += c
 		toast("Bonus kutu: +%d Kredi" % c)
+		ptxt = "+%s Kredi" % _n(c)
 	elif r < 0.95:
 		var a := randi_range(200, 1000)
 		SV.ammo.x1 += a
 		toast("Bonus kutu: +%d x1 cephane" % a)
+		ptxt = "+%s x1" % _n(a)
+		pcol = Color(0.75, 0.95, 1.0)
 	else:
 		var u := int(float(randi_range(5, 40)) * (1.0 + skill_bonus("box_uri")) * (1.0 + skill_bonus("loot_box")))
 		SV.uri += u
 		toast("Bonus kutu: +%d Uridium!" % u)
-	_fx_sphere(po, Color(1.0, 0.9, 0.4), 2.0, 6.0, 0.35, 0.45, pn)
+		ptxt = "+%s Uridium" % _n(u)
+		pcol = Color(0.84, 0.63, 1.0)
+	var bp: Vector3 = po
+	if collect_box != null and is_instance_valid(collect_box.node):
+		bp = collect_box.node.position
+	_box_collect_burst(Vector3(bp.x, po.y, bp.z))
+	popup_txt(ptxt, po + Vector3(0.0, 1.5, 0.0), pcol)
 	if collect_box != null:
 		if is_instance_valid(collect_box.node):
 			collect_box.node.queue_free()
@@ -3343,7 +3653,7 @@ func _radiation_tick(dt: float, pos: Vector3) -> void:
 	rad_acc -= 1.0
 	var pct: float = lerpf(RAD_MIN_PCT, RAD_MAX_PCT, depth)
 	SV.hon = maxf(0.0, float(SV.hon) - (2.0 + 8.0 * depth))
-	hurt(max_hp() * pct)
+	hurt(max_hp() * pct, true)   # radyasyon kalkani es gecer, dogrudan cana islenir
 
 
 func _build_dust(m: Dictionary) -> void:
@@ -3897,6 +4207,9 @@ func _cancel_collect() -> void:
 		if collect_t > 0.0 and collect_box.has("p0"):
 			collect_box.node.position = collect_box.p0
 		collect_box.node.scale = Vector3.ONE
+		var cbd = collect_box.node.get_meta("body", null)
+		if cbd != null:
+			(cbd as Node3D).position.y = 0.9
 	if collect_box != null:
 		collect_box.erase("claim")
 	collect_box = null
@@ -4006,7 +4319,10 @@ func _try_jump() -> void:
 					toast("Atlama engellendi: " + why)
 					return
 			jump_to = p
-			jump_t = 2.0
+			jump_t = JUMP_TOTAL
+			jump_arrive_t = -1.0
+			if is_instance_valid(p.node) and p.node.has_method("burst"):
+				p.node.burst(0.35)   # kapi uyanir
 			toast("Atlama basladi: " + ("Solucan deligi" if str(p.to) == "random" else str(p.to)))
 			return
 
@@ -4023,10 +4339,101 @@ func do_jump(p: Dictionary) -> void:
 	do_jump_to(dest_name)
 
 
+# ---- KAPI ATLAMA EFEKTLERI ----
+# Geri sayim: kapi sarj olur (hizlanir, parlar), gemi kapinin merkezine cekilir ve kuculur, son anda ekran beyaza doner.
+# Varis: yeni haritada ekran beyazdan acilir, gemi karsi kapidan kuculmus halde cikip normal boyuna doner.
+func _update_jump_fx(dt: float) -> void:
+	if P == null or not is_instance_valid(P.node):
+		return
+	var pn: Node3D = P.node
+	var waiting: bool = clock < jump_wait_until
+	if jump_t >= 0.0 and jump_to != null:
+		var k: float = clampf(1.0 - jump_t / JUMP_TOTAL, 0.0, 1.0)
+		var gp: Vector3 = jump_to.pos
+		var gn = jump_to.get("node")
+		if gn != null and is_instance_valid(gn) and gn.has_method("set_charge"):
+			gn.set_charge(k)
+		# kapiya dogru kuculen enerji halkalari (kapi gemiyi emiyor hissi)
+		jump_ring_cd -= dt
+		if jump_ring_cd <= 0.0:
+			jump_ring_cd = lerpf(0.34, 0.12, k)
+			_fx_ring(Vector3(gp.x, 0.25, gp.z), Color(0.5, 0.9, 1.0), 16.0, 3.0, 0.55, 0.4 + 0.4 * k)
+		if jump_t < JUMP_PULL:
+			var u: float = 1.0 - jump_t / JUMP_PULL
+			dest = null
+			holding = false
+			spd_cur = 0.0
+			var pull: float = 1.0 - exp(-dt * (2.5 + 10.0 * u))
+			pn.position = pn.position.lerp(Vector3(gp.x, pn.position.y, gp.z), pull)
+			var sk: float = clampf(jump_t / 0.5, 0.0, 1.0)
+			pn.scale = Vector3.ONE * lerpf(0.12, 1.0, sk * sk * (3.0 - 2.0 * sk))
+		jump_flash_a = maxf(jump_flash_a, 1.0 - clampf(jump_t / 0.4, 0.0, 1.0))
+	elif jump_arrive_t >= 0.0:
+		jump_arrive_t += dt
+		var a: float = clampf(jump_arrive_t / 0.75, 0.0, 1.0)
+		var e: float = 1.0 - pow(1.0 - a, 3.0)
+		pn.position = jump_arrive_from.lerp(jump_arrive_to, e)
+		pn.scale = Vector3.ONE * lerpf(0.15, 1.0, e)
+		jump_flash_a = maxf(0.0, 1.0 - jump_arrive_t / 0.9)
+		if a >= 1.0:
+			jump_arrive_t = -1.0
+			pn.scale = Vector3.ONE
+	elif not waiting:
+		# iptal / reddedildi / normal durum: boyut ve flas yumusakca normale doner
+		if pn.scale.x < 0.999:
+			pn.scale = pn.scale.lerp(Vector3.ONE, minf(1.0, dt * 8.0))
+			if pn.scale.x > 0.995:
+				pn.scale = Vector3.ONE
+		jump_flash_a = maxf(0.0, jump_flash_a - dt * 3.0)
+	_jump_flash_apply()
+
+
+func _jump_flash_apply() -> void:
+	if dohud == null:
+		return
+	if jump_flash == null or not is_instance_valid(jump_flash):
+		if jump_flash_a <= 0.001:
+			return
+		jump_flash = ColorRect.new()
+		jump_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		jump_flash.z_index = 200
+		jump_flash.color = Color(0.82, 0.96, 1.0, 0.0)
+		dohud.add_child(jump_flash)
+	var a: float = clampf(jump_flash_a, 0.0, 1.0)
+	jump_flash.position = Vector2.ZERO
+	jump_flash.size = get_viewport().get_visible_rect().size
+	jump_flash.color = Color(0.82, 0.96, 1.0, a * a)
+	jump_flash.visible = a > 0.003
+
+
+# Yeni harita yuklendikten hemen sonra: karsi kapiyi patlat, gemiyi kapinin icinden baslat.
+func _jump_arrive_fx(from_name: String) -> void:
+	if P == null or not is_instance_valid(P.node):
+		return
+	var gpos: Vector3 = P.node.position
+	for p in portals:
+		if str(p.to) == from_name:
+			gpos = p.pos
+			if is_instance_valid(p.node) and p.node.has_method("burst"):
+				p.node.burst(1.0)
+			break
+	jump_arrive_from = Vector3(gpos.x, P.node.position.y, gpos.z)
+	jump_arrive_to = P.node.position
+	jump_arrive_t = 0.0
+	jump_flash_a = 1.0
+	P.node.position = jump_arrive_from
+	P.node.scale = Vector3.ONE * 0.15
+	_fx_ring(Vector3(gpos.x, 0.3, gpos.z), Color(0.6, 0.95, 1.0), 3.0, 16.0, 0.7, 0.9)
+	_fx_ring(Vector3(gpos.x, 0.3, gpos.z), Color(1.0, 1.0, 1.0), 1.5, 9.0, 0.5, 0.7)
+	spark_burst(Vector3(gpos.x, 0.8, gpos.z), Color(0.6, 0.95, 1.0), 30, 16.0)
+
+
 func do_jump_to(dest_name: String) -> void:
 	jump_wait_until = -1.0
 	if not maps.has(dest_name):
 		return
+	var from_name := cur
+	jump_flash_a = 1.0   # ekran beyaza doner; yeni harita yuklenirken kesme gorunmez
 	var tm = maps[dest_name]
 	var arrive := w2g(tm.w / 2.0, tm.h / 2.0)
 	var found := false
@@ -4039,6 +4446,7 @@ func do_jump_to(dest_name: String) -> void:
 	if not found and tm.base != null:
 		arrive = w2g(tm.base.x, tm.base.y) + Vector3(10, 0, 10)
 	load_map(dest_name, arrive)
+	_jump_arrive_fx(from_name)
 	if not net_on:
 		# Gecici gecis korumasi (dusman haritasi, ayarlanabilir; varsayilan 0 = kapali). Guvenli bolgeden AYRI yonetilir.
 		var asec := SafeZone.arrival_seconds(tm, int(SV.faction))
@@ -4049,6 +4457,8 @@ func do_jump_to(dest_name: String) -> void:
 # ---- GUVENLI BOLGE / CATISMA (kurallar: safe_zone.gd) ----
 # Oyuncu saldirdi (lazer / roket, hedef NPC de olsa oyuncu da olsa): koruma DERHAL kalkar, kilit suresince geri gelmez.
 func register_attack() -> void:
+	last_attack = clock   # REP-4: saldiri yapilirken tamir durur
+	repairing = false
 	lock_until = SafeZone.lock_after_attack(clock)
 	arrive_until = -1.0e9
 	if net_on:
@@ -4143,28 +4553,29 @@ func _bolt_style(kind: String) -> Dictionary:
 # anahtar -> [dosya, genişlik_px, yükseklik_px, dünyadaki_uzunluk, (opsiyonel) ton]
 # Oyuncu: seçili cephane (x1..x4, sab, rsb) hangi sprite'ı atacağını belirler. NPC: "n_<npc_id>".
 const LASER_SPRITES := {
-	"x1": ["skillLaser0_1", 78, 20, 4.4],                    # ince kirmizi klasik lazer
-	"x2": ["skillLaser1_1", 78, 20, 4.4],                    # mavi (DarkOrbit MCB-25)
-	"x3": ["skillLaser3_1", 78, 20, 4.4, Color(0.25, 1.0, 0.4)],  # yesil (MCB-50)
-	"x4": ["skillLaser3_1", 78, 20, 4.5, Color(1.05, 1.15, 1.25)], # beyaz-parlak genis (UCB-100)
-	"sab": ["skillLaser1_1", 78, 20, 4.4, Color(0.3, 0.9, 1.0)],  # mavi enerji (sari muhimmat tonlanmaz)
-	"rsb": ["rb214_1", 78, 18, 4.6],                         # guarli guclu simsek
-	"n_streuner": ["skillLaser6_1", 66, 20, 3.6],
-	"n_streuner_boss": ["skillLaser6_1", 66, 20, 4.4],
-	"n_saimon": ["skillLaser6_1", 66, 20, 3.8],
-	"n_mordon": ["skillLaser6_1", 66, 20, 4.0],
-	"n_lordakia": ["lordakiumShot_1", 97, 37, 4.2],
-	"n_lordakium": ["lordakiumShot_1", 97, 37, 6.0],
-	"n_devolarium": ["devolariumShot_1", 48, 48, 2.6],
-	"n_sibelon": ["sibelonShot_1", 48, 48, 3.0],
-	"n_sibelonit": ["sibelonShot_5", 48, 48, 2.6],
-	"n_kristallin": ["protegitShot_1", 23, 7, 2.4],
-	"n_boss_kristallin": ["laser_hitec_minion_1", 80, 16, 4.6],
-	"n_protegit": ["protegitShot_1", 23, 7, 2.2],
-	"n_kristallon": ["laser_hitec_mothership_1", 150, 24, 8.0],
-	"n_boss_kristallon": ["laser_hitec_mothership_1", 150, 24, 9.0],
-	"n_cubikon": ["laser_hitec_mothership_1", 150, 24, 8.0],
-	"n_pilot": ["skillLaser1_1", 78, 20, 4.4],
+	# NOVAGATE'e ozgu, prosedurel uretilmis lazer sprite'lari (assets/lasers/nv_*.png; uretici: tools/gen_lasers.py)
+	"x1": ["nv_x1", 156, 40, 4.4],       # ince kirmizi igne
+	"x2": ["nv_x2", 156, 40, 4.4],       # mavi plazma
+	"x3": ["nv_x3", 156, 40, 4.4],       # yesil cift cizgili enerji oku
+	"x4": ["nv_x4", 156, 40, 4.5],       # beyaz-buz, kalin, nabizli
+	"sab": ["nv_sab", 156, 40, 4.4],     # turkuaz dalga
+	"rsb": ["nv_rsb", 156, 36, 4.6],     # altin simsek mizragi
+	"n_streuner": ["nv_streuner", 132, 40, 3.6],
+	"n_streuner_boss": ["nv_streuner", 132, 40, 4.4],
+	"n_saimon": ["nv_streuner", 132, 40, 3.8],
+	"n_mordon": ["nv_streuner", 132, 40, 4.0],
+	"n_lordakia": ["nv_lordakia", 194, 74, 4.2],
+	"n_lordakium": ["nv_lordakia", 194, 74, 6.0],
+	"n_devolarium": ["nv_devolarium", 96, 96, 2.6],
+	"n_sibelon": ["nv_sibelon", 96, 96, 3.0],
+	"n_sibelonit": ["nv_sibelonit", 96, 96, 2.6],
+	"n_kristallin": ["nv_protegit", 46, 14, 2.4],
+	"n_boss_kristallin": ["nv_kristallin", 160, 32, 4.6],
+	"n_protegit": ["nv_protegit", 46, 14, 2.2],
+	"n_kristallon": ["nv_kristallon", 300, 48, 8.0],
+	"n_boss_kristallon": ["nv_kristallon", 300, 48, 9.0],
+	"n_cubikon": ["nv_cubikon", 300, 48, 8.0],
+	"n_pilot": ["nv_x2", 156, 40, 4.4],
 }
 var laser_sprite_cache := {}
 
@@ -4253,6 +4664,8 @@ func fire_bolt(from: Vector3, tgt, kind: String, col: Color, dmg: float, vol: Di
 		glow.material_override = _bolt_mat(col, true)
 		glow.scale = Vector3(2.7, 2.7, 1.12)
 		b.add_child(glow)
+	if sprite_key == "sab":
+		b.visible = false   # SAB: ekranda lazer cizgisi yok; sadece dusmandan gelen halkalar gorunur
 	var tp: Vector3 = from
 	var hr := 0.8
 	if tgt != null:
@@ -4290,11 +4703,11 @@ func _bolt_hit(b: Dictionary) -> void:
 		if randf() < skill_bonus("evasion"):   # Evasive Maneuvers: isabet azalir
 			popup_txt("ISKA", pos, Color(0.7, 0.85, 1.0))
 			return
-		var had_sh: bool = P.sh > 1.0
-		impact(pos, Color(1.0, 0.4, 0.3), had_sh, 1.0)
-		if had_sh:
-			extras.hit_fx()   # kalkan balonu yerine 3 sn'lik hasar efekti
+		impact(pos, Color(1.0, 0.4, 0.3), false, 1.0)   # kalkan varken ozel efekt/balon yok
 		hurt(float(b.dmg))
+		return
+	if bool(vol.get("combine", false)):
+		_combined_hit(b, pos, col, vol, e, am_id)
 		return
 	var is_rkt: bool = str(b.kind) == "rocket"
 	if (am_id != "" or is_rkt) and randf() > hit_chance(is_rkt):
@@ -4329,6 +4742,42 @@ func _bolt_hit(b: Dictionary) -> void:
 	vol.left -= 1
 	if vol.left <= 0:
 		_volley_text(vol)
+
+
+# Lazer salvosu: isinlar gorsel olarak ayri ucar ama hasar PARCA PARCA degil, salvonun TOPLAM hasari
+# olarak tek seferde uygulanir (son isin ulasinca). Iska da salvo basina tek kez belirlenir.
+func _combined_hit(b: Dictionary, pos: Vector3, col: Color, vol: Dictionary, e, am_id: String) -> void:
+	if not vol.has("miss"):
+		vol["miss"] = randf() > hit_chance(false)
+	vol.pos = pos
+	var alive: bool = e != null and e.hp > 0.0 and is_instance_valid(e.node)
+	if alive and not bool(vol.miss):
+		vol["landed"] = int(vol.get("landed", 0)) + 1
+		_ammo_impact(pos, col, am_id, float(e.sh) > 1.0)
+	else:
+		_ammo_impact(pos, col, am_id, false)
+	vol.left -= 1
+	if vol.left > 0:
+		return
+	if bool(vol.miss):
+		popup_txt("ISKA", pos, Color(0.78, 0.8, 0.85))
+		return
+	if not alive or int(vol.get("landed", 0)) <= 0:
+		return
+	var dmg: float = float(vol.total)
+	var a: float = minf(float(e.sh), dmg * 0.8)
+	e.sh -= a
+	e.hp -= dmg - a
+	vol.sh = a
+	vol.hull = dmg - a
+	extras.leech(dmg - a)   # ENC: govde hasarinin %10'u oyuncuya
+	e.aggro = true
+	e["last_hit_t"] = clock
+	if net_on:
+		Net.gm.hit_enemy(e, dmg)
+	if a > 0.0 and not bool(vol.flash):
+		vol.flash = true
+	_volley_text(vol)
 
 
 # Muhimmatin kendi isabet efekti: her cephane farkli boyut/ring/kivilcim davranisi gosterir.
@@ -4371,30 +4820,28 @@ func _sab_hit(b: Dictionary, pos: Vector3, col: Color, vol: Dictionary) -> void:
 	var e = b.tgt
 	var alive: bool = e != null and e.hp > 0.0 and is_instance_valid(e.node)
 	if not alive:
-		impact(pos, col, false, 0.5)
 		vol.left -= 1
 		if vol.left <= 0:
 			_volley_text(vol)
 		return
-	var r: float = float(e.node.get_meta("r", 3.0))
+	var ab := 0.0
 	if e.sh > 1.0 and not bool(e.get("player", false)):
 		# hedefin kalkani var: kalkani em, bize ekle (maksimumu asma)
-		var ab := minf(e.sh, float(b.dmg))
+		ab = minf(e.sh, float(b.dmg))
 		e.sh -= ab
 		P.sh = minf(max_sh(), P.sh + ab)
 		if net_on:
 			Net.gm.hit_enemy(e, ab, 1)
 		vol.sh += ab
-		e.aggro = true
-		e["last_hit_t"] = clock
 		# emilim aninda kalkan uzerinde mavi dalgalanma
 		_fx_sphere(pos, Color(0.45, 0.8, 1.0).lerp(col, 0.2), 0.5, 2.2, 0.2, 0.85)
-		if not vol.flash:
-			vol.flash = true
-			LaserFX.sab_ring(self, e, ab)   # emilen enerji oyuncuya halka serisiyle doner
-	else:
-		# kalkan bitti: emme gerceklesmez, SAB govdeye hasar vermez
-		impact(pos, col, false, 0.4)
+	# Kalkan bitmis olsa bile SAB vurur (halka serisi gelir, ab = 0 -> sonuk tek halka),
+	# ama emme olmaz ve govdeye (cana) HASAR VERMEZ.
+	e.aggro = true
+	e["last_hit_t"] = clock
+	if not vol.flash:
+		vol.flash = true
+		LaserFX.sab_ring(self, e, ab)
 	vol.left -= 1
 	if vol.left <= 0:
 		_volley_text(vol)
@@ -4529,7 +4976,7 @@ func popup_txt(text: String, pos: Vector3, col: Color) -> void:
 	pops.append({"node": l, "t": 0.0})
 
 
-func hurt(dmg: float) -> void:
+func hurt(dmg: float, pierce_shield := false) -> void:
 	if extras != null and extras.shield_active():
 		extras.shield_absorb(dmg)   # 3 Saniyelik Koruma: hasar tamamen engellenir
 		return
@@ -4537,8 +4984,9 @@ func hurt(dmg: float) -> void:
 		return   # tek oyunculu: koruma aktifken hasar yok (cok oyunculuda karari sunucu verir; s_hurt gelmisse gecerlidir)
 	if not net_on and SafeZone.npc_damage_is_combat(maps[cur]):
 		combat_until = clock + DOData.COMBAT_SEC   # catisma sayaci hasar almaktan AYRI tutulur; kapi kilidi bunu kullanir
-	last_hit = clock
-	var a := minf(P.sh, dmg * absorb())
+	last_hit = clock   # REP-4: her hasar 10 sn'lik bekleme suresini bastan baslatir
+	repairing = false
+	var a := 0.0 if pierce_shield else minf(P.sh, dmg * absorb())
 	P.sh -= a
 	P.hp -= dmg - a
 	popup_txt("-" + _n(dmg), P.node.position, Color(1.0, 0.4, 0.3) if a < dmg * 0.5 else Color(0.5, 0.8, 1.0))
@@ -4550,6 +4998,8 @@ func _die() -> void:
 	if net_on:
 		Net.gm.report_death()
 	extras.reset()
+	repairing = false
+	last_attack = -1.0e9
 	boom(P.node.position, 8.0)
 	toast("Gemin yok edildi! Ussa donuluyor...")
 	lock_until = -1.0e9      # yeniden dogus yeni bir baslangic: kilit / catisma / gecici koruma sifirlanir
@@ -4615,6 +5065,7 @@ func award_xp(amount: int) -> void:
 
 
 # ---------- Gercek lazer cikis noktalari ----------
+const SALVO_BEAMS := 2          # salvoda ayni anda gorunen azami isin sayisi (ortadaki isin yok)
 const HP_MAX_BOLTS := 10        # DarkOrbit gibi: azami 10 lazer 10 ayrici isin
 const RSB_COOLDOWN := 3.0       # RSB-75 yeniden atis beklemesi (sn) - KESINLIKLE 3 saniye
 const AMMO_BOLT_W := {          # muhimmat demet kalinligi (x1 ince, x4/rsb kalin)
@@ -4675,7 +5126,7 @@ func player_volley(po: Vector3) -> void:
 			last_nolaser = clock
 			toast("Gemide lazer yok! [B] > Teçhizat'tan lazer tak (Mağaza'dan al).")
 		return
-	var id: String = SV.sel
+	var id: String = SV.get("sel", "")
 	if id == "rsb" and rsb_cd > 0.0:
 		# RSB beklemesi sarken seciliyse bu salvo X1 ile gider; oyuncu istedigi an X4 gibi baska muhimmata gecebilir.
 		id = "x1"
@@ -4695,7 +5146,7 @@ func player_volley(po: Vector3) -> void:
 			return
 		if clock - last_nammo > 4.0:
 			last_nammo = clock
-			toast("%s cephanesi bitti, %s ile atiliyor." % [str(SV.sel).to_upper(), str(best.name)])
+			toast("%s cephanesi bitti, %s ile atiliyor." % [str(SV.get("sel", "")).to_upper(), str(best.name)])
 		id = str(best.id)
 	SV.ammo[id] -= n
 	register_attack()   # guvenli bolgeden ates acmak korumayi derhal kaldirir (hedef NPC de olsa oyuncu da olsa)
@@ -4715,10 +5166,13 @@ func player_volley(po: Vector3) -> void:
 	# DarkOrbit gibi: salvodaki her isin GEMININ KENDI lazer topundan cikar.
 	# 1 lazer = 1 isin, 5 lazer = 5 isin, 10 lazer = 10 isin (sabit kodlu degil).
 	# Salvodaki tum isinlar AYNI ANDA atilir (ayni frame'de); aralarinda bekleme YOK.
-	var nb: int = mini(n, HP_MAX_BOLTS)
+	# Salvo en fazla SALVO_BEAMS (2) isin olarak gorunur (en dis iki silah; ortadaki yok).
+	# Hasar parca parca degil, TOPLAM olarak tek vurusta uygulanir (bkz. _combined_hit).
+	var nb: int = mini(mini(n, HP_MAX_BOLTS), SALVO_BEAMS)
 	var per: float = total / float(nb)
 	var tgt = target
-	var vol := {"left": nb, "sh": 0.0, "hull": 0.0, "am": id, "flash": false, "pos": tgt.node.position}
+	var vol := {"left": nb, "sh": 0.0, "hull": 0.0, "am": id, "flash": false, "pos": tgt.node.position,
+		"combine": id != "sab", "total": total, "landed": 0}
 	var gen := map_gen
 	# salvoda her isinin KENDI cikis + isabet noktasi (yan yana, cakismayan)
 	var layout := _salvo_layout(tgt, nb)
@@ -4826,8 +5280,9 @@ func _spawn_player_bolt(j: int, kind: String, ammo_id: String, dmg: float, vol: 
 	var col: Color = acol.lerp(lcol, 0.25)   # renk buyuk olcude muhimmatin
 	var wf: float = float(AMMO_BOLT_W.get(ammo_id, 1.0))
 	fire_bolt(from_p, tgt, kind, col, dmg, vol, ammo_id, wf, off)
-	# kısa namlu flaşı: cikis noktasi gorunur ama rastgele degil
-	_fx_sphere(from_p, acol.lerp(Color(1, 1, 1), 0.45), 0.28, 1.15, 0.11, 0.9)
+	# kısa namlu flaşı: cikis noktasi gorunur ama rastgele degil (SAB'da yok)
+	if ammo_id != "sab":
+		_fx_sphere(from_p, acol.lerp(Color(1, 1, 1), 0.45), 0.28, 1.15, 0.11, 0.9)
 
 
 func _npc_bolt(e: Dictionary, j: int, dmg: float, gen: int) -> void:
@@ -4856,6 +5311,7 @@ func _process(dt: float) -> void:
 	dt = minf(dt, 0.05)
 	clock += dt
 	if running:
+		_update_jump_fx(dt)
 		_update_game(dt)
 	else:
 		cam.look_at_from_position(Vector3(0, 80, 80), Vector3.ZERO, Vector3.UP)
@@ -5020,8 +5476,7 @@ func _update_game(dt: float) -> void:
 	var goal = null
 	if dest != null:
 		goal = dest
-	elif fire and target != null and tdist > range_u * 0.85:
-		goal = target.node.position
+	# Oto yaklasma kaldirildi: hedeften uzaklasinca gemi kendiliginden geri donmez (menzil disinda sadece ates durur).
 	if goal != null:
 		var gd: Vector3 = goal - po
 		gd.y = 0.0
@@ -5060,15 +5515,26 @@ func _update_game(dt: float) -> void:
 	var mhp := max_hp()
 	var rep_k := 1.0 + skill_bonus("repair")
 	if prot_kind == SafeZone.BASE:   # hizli onarim yalnizca ust bolgesinde (kapi korumasi onarim vermez)
+		repairing = false
 		P.hp =minf(mhp, P.hp + mhp * 0.2 * rep_k * dt)
 		P.sh = minf(max_sh(), P.sh + max_sh() * 0.2 * dt)
 		var act_i := clampi(int(SV.get("cfgi", 0)), 0, cfg_shr.size() - 1)
 		for k in cfg_shr.size():
 			if k != act_i:
 				cfg_shr[k] = minf(1.0, float(cfg_shr[k]) + 0.2 * dt)
-	elif clock - last_hit > 5.0:
-		P.hp = minf(mhp, P.hp + mhp * 0.02 * rep_k * dt)
-		P.sh = minf(max_sh(), P.sh + max_sh() * 0.01 * dt)
+	else:
+		# REP-4: hasar almadan REP_DELAY sn gectiyse ve saldirmiyorsa HP REP_RATE/sn ile dolar (hareket engellemez).
+		# Tek durum degiskeni (repairing) oldugu icin ayni gemide birden fazla tamir dongusu olusamaz.
+		var idle: bool = clock - last_hit >= REP_DELAY and clock - last_attack >= REP_ATTACK_PAUSE
+		if idle and P.hp > 0.0 and P.hp < mhp:
+			repairing = true
+			P.hp = minf(mhp, P.hp + REP_RATE * dt)
+			if P.hp >= mhp:
+				repairing = false   # maksimum HP'ye ulasinca tamir durur
+		else:
+			repairing = false
+		if clock - last_hit > 5.0:
+			P.sh = minf(max_sh(), P.sh + max_sh() * 0.01 * dt)
 
 	var aggro_u: float = DOData.AGGRO_RANGE * DOData.S
 	for e in (enemies if not net_on else []):   # cok oyunculuda NPC zekasi sunucuda
@@ -5175,7 +5641,15 @@ func _update_game(dt: float) -> void:
 
 	for bx in boxes:
 		if is_instance_valid(bx.node) and not is_same(bx, collect_box):
-			bx.node.rotation.y += dt * 2.0
+			var bn: Node3D = bx.node
+			bn.rotation.y += dt * 1.1
+			var ph: float = float(bn.get_instance_id() % 17)
+			var bd = bn.get_meta("body", null)
+			if bd != null:
+				(bd as Node3D).position.y = 0.9 + 0.14 * sin(clock * 2.0 + ph)   # havada hafif salinir
+			var hmat = bn.get_meta("halo", null)
+			if hmat != null:
+				(hmat as StandardMaterial3D).albedo_color.a = 0.35 + 0.2 * sin(clock * 3.0 + ph)   # nabiz
 	if collect_box != null and (not boxes.has(collect_box) or not is_instance_valid(collect_box.node)):
 		collect_box = null
 		collect_t = 0.0
@@ -5184,12 +5658,13 @@ func _update_game(dt: float) -> void:
 		if collect_t <= 0.0:
 			# Kutuya yaklaşıyor; toplanma menziline girince animasyon başlar. Otomatik toplama YOK.
 			var dd: float = Vector2(cbn.position.x - po.x, cbn.position.z - po.z).length()
-			if dd < 3.2:
+			if dd < 1.2:
+				# Gemi kutunun tam ustunde: dur ve toplama animasyonunu baslat.
 				collect_t = 0.001
 				collect_box["p0"] = cbn.position
 				dest = null
 				holding = false
-				_fx_sphere(po, Color(1.0, 0.85, 0.3), 2.0, 4.5, 0.4, 0.35, pn)
+				_fx_ring(Vector3(cbn.position.x, 0.1, cbn.position.z), Color(0.4, 0.9, 1.0), 1.5, 6.0, 0.45, 0.8)
 			else:
 				dest = _clamp_map(cbn.position)
 		else:
@@ -5199,13 +5674,30 @@ func _update_game(dt: float) -> void:
 			else:
 				var prev_t: float = collect_t
 				collect_t += dt
-				var k: float = clampf(collect_t / 1.2, 0.0, 1.0)
-				cbn.position = p0.lerp(po + Vector3(0.0, 0.4, 0.0), k * k)
-				cbn.scale = Vector3.ONE * lerpf(1.0, 0.25, k)
-				cbn.rotation.y += dt * 12.0
-				if int(prev_t / 0.3) != int(collect_t / 0.3):
-					_fx_sphere(po, Color(1.0, 0.85, 0.3), 3.2, 2.2, 0.3, 0.3, pn)
-				if collect_t >= 1.2:
+				var k: float = clampf(collect_t / BOX_COLLECT_TIME, 0.0, 1.0)
+				# gemi kutunun uzerinde sabit kalir (yumusakca ortalanir)
+				var kc: float = 1.0 - exp(-8.0 * dt)
+				pn.position.x = lerpf(pn.position.x, p0.x, kc)
+				pn.position.z = lerpf(pn.position.z, p0.z, kc)
+				spd_cur = 0.0
+				# kutu yerinde kalir: hizlanarak doner, gemiye dogru yukselir, parlar
+				cbn.rotation.y += dt * (2.0 + 10.0 * k * k)
+				var cbd = cbn.get_meta("body", null)
+				if cbd != null:
+					(cbd as Node3D).position.y = 0.9 + 1.0 * k * k
+				var chm = cbn.get_meta("halo", null)
+				if chm != null:
+					(chm as StandardMaterial3D).albedo_color.a = 0.5 + 0.45 * k
+				# yukari yukselen enerji halkalari (kutudan gemiye)
+				if int(prev_t / 0.14) != int(collect_t / 0.14):
+					_fx_ring(Vector3(p0.x, 0.2, p0.z), Color(0.4, 0.9, 1.0), 3.4, 1.4, 0.5, 0.55, Vector3(0, 3.2, 0))
+				# kutuya dogru akan enerji parcaciklari
+				if int(prev_t / 0.045) != int(collect_t / 0.045):
+					var ang: float = randf() * TAU
+					var rr: float = randf_range(1.6, 2.8)
+					var off := Vector3(cos(ang) * rr, randf_range(0.1, 0.5), sin(ang) * rr)
+					_fx_mote(Vector3(p0.x, 0.1, p0.z) + off, Color(0.5, 0.95, 1.0), randf_range(0.18, 0.32), 0.45, Vector3(-off.x * 2.2, 2.2 + 2.0 * k, -off.z * 2.2))
+				if collect_t >= BOX_COLLECT_TIME:
 					if net_on:
 						# Cok oyunculu: kutuyu ilk alan kazanir; odul sunucu onayiyla (Net.gm.on_box_gone) verilir.
 						if not collect_box.get("claim", false):
@@ -5218,26 +5710,24 @@ func _update_game(dt: float) -> void:
 
 	var prompt := ""
 	if jump_t >= 0.0:
-		if jump_to.pos.distance_to(po) > DOData.PORTAL_RANGE * DOData.S * 1.6:
+		# J ile baslayan atlama IPTAL OLMAZ: gemi kapidan uzaklasmis olsa bile geri sayim biter,
+		# son saniyelerde gemi kapinin merkezine cekilir (bkz. _update_jump_fx) ve atlama gerceklesir.
+		jump_t -= dt
+		prompt = "Atlama: %.1f" % maxf(0.0, jump_t)
+		if jump_t <= 0.0:
+			var jt = jump_to
 			jump_t = -1.0
-			toast("Atlama iptal edildi")
-		else:
-			jump_t -= dt
-			prompt = "Atlama: %.1f" % maxf(0.0, jump_t)
-			if jump_t <= 0.0:
-				var jt = jump_to
-				jump_t = -1.0
-				if net_on:
-					# Cok oyunculu: kapi izni (yakinlik + catisma kilidi) SUNUCUDA dogrulanir; onay gelince do_jump_to calisir.
-					jump_wait_until = clock + 6.0
-					Net.send_jump(str(jt.to))
+			if net_on:
+				# Cok oyunculu: kapi izni (yakinlik + catisma kilidi) SUNUCUDA dogrulanir; onay gelince do_jump_to calisir.
+				jump_wait_until = clock + 6.0
+				Net.send_jump(str(jt.to))
+			else:
+				var why := SafeZone.jump_block_reason(maps[cur], clock, combat_until)
+				if why != "":
+					toast("Atlama engellendi: " + why)
 				else:
-					var why := SafeZone.jump_block_reason(maps[cur], clock, combat_until)
-					if why != "":
-						toast("Atlama engellendi: " + why)
-					else:
-						do_jump(jt)
-				return
+					do_jump(jt)
+			return
 	else:
 		for p in portals:
 			if po.distance_to(p.pos) < DOData.PORTAL_RANGE * DOData.S:
@@ -5389,6 +5879,7 @@ const DroneForms = preload("res://drone_forms.gd")
 
 # Droid dizilimi ofsetleri (gemi yerel uzayi, ileri = +Z). Olcek: standart dizilimin yaricapi.
 const DRONE_MIN_GAP := 3.0     # iki droid arasi asgari mesafe (dunya birimi) - ic ice girmesin
+const DRONE_SPREAD := 1.15     # tum dizilim gemiden bu oranda uzaklasir (1.0 = eski konum)
 const DRONE_MIN_SHIP := 3.4    # droidin gemiye asgari uzakligi
 
 
@@ -5424,7 +5915,7 @@ func form_offsets_for(code: String, n: int) -> Array:
 			break
 	var out: Array = []
 	for p in pts:
-		var p2: Vector2 = p
+		var p2: Vector2 = (p as Vector2) * DRONE_SPREAD
 		out.append(Vector3(p2.x, y0, p2.y))
 	return out
 
