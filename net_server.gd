@@ -459,19 +459,21 @@ func on_ship(peer: int, ship: String) -> void:
 		_bcast(str(p.map), "s_pjoin", [_player_info(p)], peer)
 
 	# Muhimmat secimi: savasta degistirme yasak (istemciye guvenilmez).
-	func on_select_ammo(peer: int, ammo: String) -> void:
-		if not players.has(peer):
-			return
-		var p: Dictionary = players[peer]
-		# Savasta/kilitli muhimmat degistirilemez
-		if float(p.combat_t) > clock or float(p.lock_t) > clock:
-			print("[SELECT AMMO] account_id=%d muhimmat degistirme REDDEDILDI (savasta/kilitli)" % int(p.account_id))
-			net.callv("rpc_id", [peer, "s_select_ammo_result", false, str(p.get("sel", "x1")), "Savasta muhimmat degistirilemez"])
-			return
-		# Muhimmat secimini guncelle
-		p.sel = ammo
-		print("[SELECT AMMO] account_id=%d muhimmat=%s" % [int(p.account_id), ammo])
-		net.callv("rpc_id", [peer, "s_select_ammo_result", true, ammo, ""])
+func on_select_ammo(peer: int, ammo: String) -> void:
+	if not players.has(peer):
+		return
+	var p: Dictionary = players[peer]
+	# Savasta/kilitli muhimmat degistirilemez
+	if float(p.combat_t) > clock or float(p.lock_t) > clock:
+		print("[SELECT AMMO] account_id=%d muhimmat degistirme REDDEDILDI (savasta/kilitli)" % int(p.account_id))
+		net.callv("rpc_id", [peer, "s_select_ammo_result", false, str(p.get("sel", "x1")), "Savasta muhimmat degistirilemez"])
+		return
+	# Muhimmat secimini guncelle
+	p.sel = ammo
+	print("[SELECT AMMO] account_id=%d muhimmat=%s" % [int(p.account_id), ammo])
+	net.callv("rpc_id", [peer, "s_select_ammo_result", true, ammo, ""])
+
+
 
 
 
