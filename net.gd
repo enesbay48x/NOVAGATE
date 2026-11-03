@@ -329,6 +329,11 @@ func send_box_take(id: int) -> void:
 		rpc_id(1, "c_box_take", id)
 
 
+func send_purchase_item(item_id: String, qty: int, tx_id: String) -> void:
+	if online:
+		rpc_id(1, "c_purchase_item", item_id, qty, tx_id)
+
+
 # ch: 0 genel, 1 sirket, 2 grup
 func send_chat(text: String, ch: int = 0) -> void:
 	if online:
@@ -711,3 +716,17 @@ func s_auc_resolve(known: Array, unknown: Array) -> void:
 func s_auc_msg(text: String) -> void:
 	if gm != null and online and gm.auc != null:
 		gm.auc.on_msg(text)
+
+
+# ================================================================== MARKET ALIMI (client -> sunucu)
+@rpc("any_peer", "call_remote", "reliable")
+func c_purchase_item(item_id: String, quantity: int, tx_id: String) -> void:
+	if is_server and srv != null:
+		srv.on_purchase_item(multiplayer.get_remote_sender_id(), item_id, quantity, tx_id)
+
+
+# ================================================================== MARKET ALIMI SONUCI (sunucu -> client)
+@rpc("authority", "call_remote", "reliable")
+func s_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new_uri: int) -> void:
+	if gm != null and online:
+		gm.on_purchase_result(ok, error, tx_id, new_cr, new_uri)

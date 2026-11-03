@@ -603,3 +603,12 @@ func on_chat(nm: String, faction: int, text: String, ch: int = 0) -> void:
 func _chat_line(bb: String) -> void:
 	if g.dohud != null:
 		g.dohud._log_general(bb)
+
+# ------------------------------------------------------------------ market alimi sonucu (sunucu -> istemci)
+func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new_uri: int) -> void:
+	if ok:
+		SV.cr = new_cr
+		SV.uri = new_uri
+		g.save_game()
+	else:
+		g.toast("Alim basarisiz: " + error)

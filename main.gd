@@ -3050,6 +3050,12 @@ func buy_item(id: String, qty: int) -> bool:
 	inv_dict(id)[id] = inv_count(id) + qty
 	toast("Satın alındı: %s x%d" % [str(d.name), qty])
 	save_game()
+	# Sunucuya da bildir (kalicilik icin)
+	if net.online:
+		var tx_id: String = "buy:" + str(Time.get_unix_time_from_system()) + ":" + str(randi())
+		net.send_purchase_item(id, qty, tx_id)
+		# Bekleyen alim kaydi (sunucu hatasi durumunda geri almak icin)
+		SV["_pending_purchase"] = {"id": id, "qty": qty, "cr": int(d.cr) * qty, "uri": int(d.uri) * qty, "tx_id": tx_id}
 	return true
 
 
@@ -5205,6 +5211,35 @@ func apply_pvp_reward(_victim: int, info: Dictionary = {}) -> void:
 		SV.pvp_kills = int(SV.get("pvp_kills", 0)) + 1
 		SV.hon = float(SV.get("hon", 0.0)) + 100.0 * (1.0 + skill_bonus("honor"))
 	toast("Oyuncu yok edildi! +100 Honor")
+
+
+# Sunucu tarafindan market alimi sonucu (c_purchase_item tarafige gonderilen istek)
+func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new_uri: int) -> void:
+	if ok:
+		SV.cr = new_cr
+		SV.uri = new_uri
+		SV.erase("pending_purchase")
+		save_game()
+	else:
+		# Sunucu reddetti: yerel olarak geri al (para iade, esi geri cikar)
+		var pending: Dictionary = SV.get("pending_purchase", {})
+		if pending.has("id") and pending.has("qty"):
+			var pid: String = str(pending.id)
+			var pqty: int = int(pending.qty)
+			var pcr: int = int(pending.cr)
+			var puri: int = int(pending.uri)
+			# Para iade
+			SV.cr = int(SV.cr) + pcr
+			SV.uri = int(SV.uri) + puri
+			# Esi geri cikar
+			var cur_qty: int = inv_count(pid)
+			if cur_qty >= pqty:
+				inv_dict(pid)[pid] = cur_qty - pqty
+			else:
+				inv_dict(pid)[pid] = 0
+			SV.erase("pending_purchase")
+			save_game()
+		toast("Alim basarisiz: " + error)
 
 
 # ---------- Gercek lazer cikis noktalari ----------

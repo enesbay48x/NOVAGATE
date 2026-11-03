@@ -1758,3 +1758,30 @@ func _update_guard(w: Dictionary, e: Dictionary, dt: float) -> void:
 	else:
 		_face(e, to_slot, dt)
 	_clamp_pos(w, e)
+# ------------------------------------------------------------------ MARKET ALIMI (istemciden gelen istek)
+func on_purchase_item(peer: int, item_id: String, quantity: int, tx_id: String) -> void:
+	if not players.has(peer):
+		return
+	var p: Dictionary = players[peer]
+	var acct_id: int = int(p.get("account_id", 0))
+	if acct_id <= 0:
+		net.callv("rpc_id", [peer, "s_purchase_result", false, "no_account", tx_id, 0, 0])
+		return
+	var resp: Dictionary = db_send("purchase_item", {
+		"account_id": acct_id,
+		"item_id": item_id,
+		"quantity": quantity,
+		"tx_id": tx_id,
+		"price_cr": 0,
+		"price_uri": 0,
+	})
+	if resp.has("ok") and resp.get("ok", false):
+		# Bellekteki sunucu kopyasini guncelle
+		p["_sv_cr"] = int(resp.get("new_cr", p.get("_sv_cr", 0)))
+		p["_sv_uri"] = int(resp.get("new_uri", p.get("_sv_uri", 0)))
+		# Mermi/envanter odulunu istemciye bildir
+		net.callv("rpc_id", [peer, "s_purchase_result", true, "", tx_id, int(resp.get("new_cr", 0)), int(resp.get("new_uri", 0))])
+	else:
+		var err: String = str(resp.get("error", "bilinmeyen hata"))
+		print("[SUNUCU] market alimi basarisiz: account_id=%d, item=%s, hata=%s" % [acct_id, item_id, err])
+		net.callv("rpc_id", [peer, "s_purchase_result", false, err, tx_id, 0, 0])
