@@ -30,8 +30,12 @@ logging.basicConfig(
 log = logging.getLogger("server_db")
 
 HOST = "127.0.0.1"
-PORT = 54321
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "novagate_game.db")
+PORT = int(os.environ.get("NOVAGATE_DB_PORT", "54321"))
+# Test/ops icin veritabani yolu ortam degiskeniyle degistirilebilir.
+# Tanimli degilse uretimdeki varsayilan yol kullanilir (mevcut davranis korunur).
+DB_PATH = os.environ.get("NOVAGATE_DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "novagate_game.db"
+)
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
 BACKUP_RETENTION_DAYS = 7
 BACKUP_INTERVAL_SECONDS = 3600  # 1 saat
@@ -85,6 +89,7 @@ def init_db() -> None:
                 pz REAL NOT NULL DEFAULT 0.0,
                 kills INTEGER NOT NULL DEFAULT 0,
                 skill_points INTEGER NOT NULL DEFAULT 0,
+                sep INTEGER NOT NULL DEFAULT 0,
                 settings TEXT NOT NULL DEFAULT '{}',
                 drone_equip TEXT NOT NULL DEFAULT '{}',
                 reg_ts INTEGER NOT NULL,
@@ -213,6 +218,8 @@ def init_db() -> None:
         for col_sql in [
             "ALTER TABLE accounts ADD COLUMN is_admin INTEGER DEFAULT 0",
             "ALTER TABLE accounts ADD COLUMN ban_reason TEXT DEFAULT NULL",
+            # Seprom (bonus/NPC odulu) mevcut player_data tablosuna eklenir; eski veriler korunur.
+            "ALTER TABLE player_data ADD COLUMN sep INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 conn.execute(col_sql)
@@ -400,6 +407,31 @@ def load_player_state(account_id: int) -> dict | None:
         drones_rows = conn.execute("SELECT drone_id, equipped FROM player_drones WHERE account_id = ?", (account_id,)).fetchall()
         drone_equip = {r["drone_id"]: bool(r["equipped"]) for r in drones_rows}
 
+        forms_rows = conn.execute("SELECT form_id FROM player_forms WHERE account_id = ?", (account_id,)).fetchall()
+        forms = [r["form_id"] for r in forms_rows]
+
+        loads_rows = conn.execute("SELECT load_key, load_data FROM player_loads WHERE account_id = ?", (account_id,)).fetchall()
+        loads = {}
+        for r in loads_rows:
+            try:
+                loads[r["load_key"]] = json.loads(r["load_data"])
+            except Exception:
+                loads[r["load_key"]] = {}
+
+        quest_rows = conn.execute("SELECT quest_id, quest_data FROM player_quests WHERE account_id = ?", (account_id,)).fetchall()
+        quests = {}
+        for r in quest_rows:
+            try:
+                quests[r["quest_id"]] = json.loads(r["quest_data"])
+            except Exception:
+                quests[r["quest_id"]] = {}
+
+        skill_rows = conn.execute("SELECT skill_id, rank FROM player_skills WHERE account_id = ?", (account_id,)).fetchall()
+        skills = {r["skill_id"]: int(r["rank"]) for r in skill_rows}
+
+        map_rows = conn.execute("SELECT map_name FROM player_maps_visited WHERE account_id = ?", (account_id,)).fetchall()
+        maps_visited = [r["map_name"] for r in map_rows]
+
         prefs = conn.execute("SELECT * FROM player_prefs WHERE account_id = ?", (account_id,)).fetchone()
         stats = conn.execute("SELECT rockets FROM player_stats_ext WHERE account_id = ?", (account_id,)).fetchone()
 
@@ -412,6 +444,7 @@ def load_player_state(account_id: int) -> dict | None:
             "uri": pd["uri"],
             "xp": pd["xp"],
             "hon": pd["hon"],
+            "sep": pd["sep"] if "sep" in pd.keys() else 0,
             "pvp_kills": pd["pvp_kills"],
             "rank_pen": pd["rank_pen"],
             "ship": pd["ship"],
@@ -427,11 +460,11 @@ def load_player_state(account_id: int) -> dict | None:
             "ammo": ammo,
             "rockets": stats["rockets"] if stats else 0,
             "owned": owned,
-            "forms": [],  # player_forms'den doldurulabilir
-            "loads": {},  # player_loads'den JSON
-            "quests": {},  # player_quests'den JSON
-            "skills": {},  # player_skills'den JSON
-            "maps_visited": [],  # player_maps_visited'den
+            "forms": forms,
+            "loads": loads,
+            "quests": quests,
+            "skills": skills,
+            "maps_visited": maps_visited,
             "selected_ammo": prefs["selected_ammo"] if prefs else "x1",
             "cfg_index": prefs["cfg_index"] if prefs else 0,
             "free_mode": bool(prefs["free_mode"]) if prefs else False,
@@ -525,6 +558,202 @@ def purchase_item(account_id: int, item_id: str, quantity: int, tx_id: str,
         except Exception:
             pass
         log.error("purchase_item hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# ODUL ISLEMI (ATOMIC, IDEMPOTENT): bonus kutusu / NPC / PvP
+# ---------------------------------------------------------------------------
+# Ayni event_id ikinci kez gelirse odul TEKRAR EKLENMEZ; ilk islemin sonucu dondurulur.
+MAX_REWARD_CR = 50_000_000
+MAX_REWARD_URI = 5_000_000
+MAX_REWARD_XP = 50_000_000
+MAX_REWARD_HON = 5_000_000
+MAX_REWARD_SEP = 50_000_000
+MAX_REWARD_KILLS = 10_000
+MAX_REWARD_ITEMS = 1_000_000
+
+
+def _reward_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _reward_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def grant_reward(account_id: int, event_id: str, source: str,
+                 cr: int = 0, uri: int = 0, xp: float = 0.0, hon: float = 0.0,
+                 kills: int = 0, sep: int = 0, pvp_kills: int = 0,
+                 ammo: dict | None = None, items: dict | None = None,
+                 meta: dict | None = None) -> dict:
+    """
+    Sunucu tarafindan hesaplanan odulu oyuncu hesabina ATOMIK olarak yazar.
+
+    - cr/uri/xp/hon/kills/sep/pvp_kills player_data'ya eklenir (negatif deger RED).
+    - ammo/items envanter tablolarina UPSERT ile eklenir.
+    - Ayni (account_id, event_id) daha once yazildiysa hicbir sey degismez; ilk
+      cevap "duplicate": true ile geri dondurulur. Bu, ayni kutu/NPC olumunun
+      birden fazla odul vermesini engeller.
+    - Butun yazimlar tek BEGIN IMMEDIATE islemindedir; hata olursa ROLLBACK.
+    """
+    event_id = str(event_id or "").strip()
+    source = str(source or "reward").strip()[:40]
+    if not event_id or len(event_id) > 200:
+        return {"ok": False, "error": "invalid_event_id"}
+    account_id = _reward_int(account_id)
+    if account_id <= 0:
+        return {"ok": False, "error": "invalid_account"}
+
+    cr = _reward_int(cr)
+    uri = _reward_int(uri)
+    kills = _reward_int(kills)
+    sep = _reward_int(sep)
+    pvp_kills = _reward_int(pvp_kills)
+    xp = _reward_float(xp)
+    hon = _reward_float(hon)
+
+    if any(v < 0 for v in (cr, uri, xp, hon, kills, sep, pvp_kills)):
+        return {"ok": False, "error": "negative_reward"}
+    if (cr > MAX_REWARD_CR or uri > MAX_REWARD_URI or xp > MAX_REWARD_XP
+            or hon > MAX_REWARD_HON or sep > MAX_REWARD_SEP
+            or kills > MAX_REWARD_KILLS or pvp_kills > MAX_REWARD_KILLS):
+        return {"ok": False, "error": "reward_too_large"}
+
+    clean_ammo: dict[str, int] = {}
+    for k, v in (ammo or {}).items():
+        key = str(k)[:64]
+        qty = _reward_int(v)
+        if key and qty > 0:
+            clean_ammo[key] = min(qty, MAX_REWARD_ITEMS)
+
+    clean_items: dict[str, int] = {}
+    for k, v in (items or {}).items():
+        key = str(k)[:64]
+        qty = _reward_int(v)
+        if key and qty > 0:
+            clean_items[key] = min(qty, MAX_REWARD_ITEMS)
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        # 1) Idempotency: ayni olay daha once yazildi mi?
+        existing = conn.execute(
+            "SELECT response_payload FROM transactions WHERE account_id = ? AND tx_id = ?",
+            (account_id, event_id),
+        ).fetchone()
+        if existing:
+            conn.execute("ROLLBACK")
+            try:
+                resp = json.loads(existing["response_payload"])
+            except Exception:
+                resp = {"ok": True, "event_id": event_id}
+            resp["duplicate"] = True
+            return resp
+
+        pd = conn.execute(
+            "SELECT cr, uri, xp, hon, kills, pvp_kills, COALESCE(sep, 0) AS sep "
+            "FROM player_data WHERE account_id = ?",
+            (account_id,),
+        ).fetchone()
+        if not pd:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "account_not_found"}
+
+        # 2) Ekonomi / profil sayaclari
+        conn.execute(
+            "UPDATE player_data SET cr = cr + ?, uri = uri + ?, xp = xp + ?, "
+            "hon = hon + ?, kills = kills + ?, pvp_kills = pvp_kills + ?, "
+            "sep = COALESCE(sep, 0) + ?, updated_at = ? WHERE account_id = ?",
+            (cr, uri, xp, hon, kills, pvp_kills, sep, now_ts(), account_id),
+        )
+
+        # 3) Mermi / envanter odulleri (varsa)
+        for ammo_id, qty in clean_ammo.items():
+            conn.execute(
+                "INSERT INTO ammo (account_id, ammo_id, quantity) VALUES (?, ?, ?) "
+                "ON CONFLICT(account_id, ammo_id) DO UPDATE SET quantity = quantity + excluded.quantity",
+                (account_id, ammo_id, qty),
+            )
+        for item_id, qty in clean_items.items():
+            conn.execute(
+                "INSERT INTO inventory (account_id, item_id, quantity) VALUES (?, ?, ?) "
+                "ON CONFLICT(account_id, item_id) DO UPDATE SET quantity = quantity + excluded.quantity",
+                (account_id, item_id, qty),
+            )
+
+        # 4) Guncel degerleri oku (istemciye sunucu dogrulamali deger olarak gonderilir)
+        new_pd = conn.execute(
+            "SELECT cr, uri, xp, hon, kills, pvp_kills, COALESCE(sep, 0) AS sep "
+            "FROM player_data WHERE account_id = ?",
+            (account_id,),
+        ).fetchone()
+
+        response_payload = json.dumps({
+            "ok": True,
+            "event_id": event_id,
+            "source": source,
+            "reward_cr": cr,
+            "reward_uri": uri,
+            "reward_xp": xp,
+            "reward_hon": hon,
+            "reward_sep": sep,
+            "reward_kills": kills,
+            "reward_pvp_kills": pvp_kills,
+            "ammo": clean_ammo,
+            "items": clean_items,
+            "new_cr": int(new_pd["cr"]),
+            "new_uri": int(new_pd["uri"]),
+            "new_xp": float(new_pd["xp"]),
+            "new_hon": float(new_pd["hon"]),
+            "new_sep": int(new_pd["sep"]),
+            "new_kills": int(new_pd["kills"]),
+            "new_pvp_kills": int(new_pd["pvp_kills"]),
+        })
+
+        item_id = None
+        item_qty = 0
+        if clean_items:
+            item_id = next(iter(clean_items))
+            item_qty = sum(clean_items.values())
+        elif clean_ammo:
+            item_id = next(iter(clean_ammo))
+            item_qty = sum(clean_ammo.values())
+
+        conn.execute(
+            "INSERT INTO transactions (account_id, tx_id, type, amount_cr, amount_uri, "
+            "item_id, item_qty, status, request_payload, response_payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'committed', ?, ?, ?)",
+            (account_id, event_id, source, cr, uri, item_id, item_qty,
+             json.dumps(meta or {}), response_payload, now_ts()),
+        )
+
+        conn.execute("COMMIT")
+        return json.loads(response_payload)
+    except sqlite3.OperationalError as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        if "locked" in str(e).lower() or "busy" in str(e).lower():
+            return {"ok": False, "error": "busy_retry"}
+        log.error("grant_reward operational error: %s", e)
+        return {"ok": False, "error": "internal"}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("grant_reward hata: %s", e)
         return {"ok": False, "error": "internal"}
     finally:
         conn.close()
@@ -988,6 +1217,22 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 msg.get("tx_id", ""),
                 int(msg.get("price_cr", 0)),   # sunucu tarafinda hesaplanmis fiyat
                 int(msg.get("price_uri", 0)),
+            )
+        elif method == "grant_reward":
+            resp = grant_reward(
+                int(msg.get("account_id", 0)),
+                str(msg.get("event_id", "")),
+                str(msg.get("source", "reward")),
+                cr=msg.get("cr", 0),
+                uri=msg.get("uri", 0),
+                xp=msg.get("xp", 0),
+                hon=msg.get("hon", 0),
+                kills=msg.get("kills", 0),
+                sep=msg.get("sep", 0),
+                pvp_kills=msg.get("pvp_kills", 0),
+                ammo=msg.get("ammo", {}) if isinstance(msg.get("ammo", {}), dict) else {},
+                items=msg.get("items", {}) if isinstance(msg.get("items", {}), dict) else {},
+                meta=msg.get("meta", {}) if isinstance(msg.get("meta", {}), dict) else {},
             )
         elif method == "acquire_session_lock":
             resp = {"ok": acquire_session_lock(

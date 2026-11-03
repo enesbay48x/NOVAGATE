@@ -8,6 +8,7 @@ extends RefCounted
 const DOData := preload("res://data.gd")
 const Auction := preload("res://auction.gd")
 const SafeZone := preload("res://safe_zone.gd")
+const SkillTree := preload("res://skill_tree.gd")
 
 # ---- SUNUCU DB KOPRUSU (TCP/JSON, 127.0.0.1:54321) ---------------------------
 const DB_HOST := "127.0.0.1"
@@ -44,6 +45,9 @@ var ban_tick_t: float = 0.0   # ban kick tick sayaci
 var balance_tick_t: float = 0.0   # online oyuncu bakiye senkronizasyon sayaci
 var pos_save_t: float = 0.0   # oyuncu konumu periyodik kayit sayaci
 var npc_overrides: Dictionary = {}   # map_id -> npc_count (admin panelden)
+var reward_run_id: String = ""        # her sunucu acilisinda benzersiz odul olay kimligi
+var next_box_id: int = 1              # kutular dunya yeniden kurulsa da tekrar etmeyen kimlik
+var next_pvp_seq: int = 1             # PvP odul olay sayaci
 
 const PSNAP_DT := 0.066         # oyuncu konum yayini (~15 Hz)
 const NSNAP_DT := 0.1           # NPC konum yayini (10 Hz)
@@ -55,6 +59,8 @@ func _init(n: Node) -> void:
 	maps = DOData.make_maps()
 	print("[SUNUCU] %d harita yuklendi." % maps.size())
 	auc = Auction.new(net, self)
+	# Odul idempotency anahtari: yeniden baslatmada eski olaylarla cakismaz.
+	reward_run_id = "%d-%d" % [int(Time.get_unix_time_from_system()), randi()]
 	db_connect()
 
 
@@ -156,6 +162,55 @@ func _players_in(map_name: String) -> Array:
 	return out
 
 
+# ------------------------------------------------------------------ SUNUCU TARAFI ODUL KAYDI
+# Odul, istemciye bildirilmeden ONCE veritabanina atomik olarak yazilir. Ayni
+# event_id tekrar gelirse DB odulu ikinci kez vermez (idempotent).
+func _grant_reward(p: Dictionary, event_id: String, source: String,
+		cr: int = 0, uri: int = 0, xp: float = 0.0, hon: float = 0.0,
+		kills: int = 0, sep: int = 0, pvp_kills: int = 0,
+		ammo: Dictionary = {}, items: Dictionary = {}, meta: Dictionary = {}) -> Dictionary:
+	var acct_id: int = int(p.get("account_id", 0))
+	if acct_id <= 0:
+		return {"ok": false, "error": "no_account"}
+	var payload: Dictionary = {
+		"account_id": acct_id,
+		"event_id": event_id,
+		"source": source,
+		"cr": cr,
+		"uri": uri,
+		"xp": xp,
+		"hon": hon,
+		"kills": kills,
+		"sep": sep,
+		"pvp_kills": pvp_kills,
+		"ammo": ammo,
+		"items": items,
+		"meta": meta,
+	}
+	var res: Dictionary = db_send("grant_reward", payload)
+	# Kisa DB mesguliyetinde tekrar dene; basarisizsa istemciye odul bildirilmez.
+	var tries: int = 0
+	while (not res.has("ok") or res.get("ok", false) == false) and tries < 2:
+		var err: String = str(res.get("error", ""))
+		if err != "busy_retry" and err != "db_baglanti_yok" and err != "db_gecersiz_yanit" and err != "internal":
+			break
+		tries += 1
+		OS.delay_msec(25)
+		res = db_send("grant_reward", payload)
+	if not res.has("ok") or res.get("ok", false) == false:
+		print("[SUNUCU] ODUL KAYDEDILEMEDI: event=%s account=%d hata=%s" % [event_id, acct_id, str(res.get("error", "?"))])
+		return res
+	# Bellekteki sunucu kopyasini DB'nin kesin degerleriyle guncelle.
+	p["_sv_cr"] = int(res.get("new_cr", p.get("_sv_cr", 0)))
+	p["_sv_uri"] = int(res.get("new_uri", p.get("_sv_uri", 0)))
+	p["_sv_xp"] = float(res.get("new_xp", p.get("_sv_xp", 0.0)))
+	p["_sv_hon"] = float(res.get("new_hon", p.get("_sv_hon", 0.0)))
+	p["_sv_sep"] = int(res.get("new_sep", p.get("_sv_sep", 0)))
+	p["_sv_kills"] = int(res.get("new_kills", p.get("_sv_kills", 0)))
+	p["_sv_pvp_kills"] = int(res.get("new_pvp_kills", p.get("_sv_pvp_kills", 0)))
+	return res
+
+
 # ------------------------------------------------------------------ TOKEN KIMLIK DOGRULAMA
 func on_attach_token(peer_id: int, token: String) -> Array:
 	"""
@@ -229,8 +284,11 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_sv_uri": int(ps.get("uri", 0)),
 		"_sv_xp": float(ps.get("xp", 0.0)),
 		"_sv_hon": float(ps.get("hon", 0.0)),
+		"_sv_sep": int(ps.get("sep", 0)),
+		"_sv_kills": int(ps.get("kills", 0)),
+		"_sv_pvp_kills": int(ps.get("pvp_kills", 0)),
 		"_sv_settings": str(ps.get("settings", "{}")),
-		"_sv_inventory": {},  # doldurulabilir
+		"_sv_inventory": ps.get("inv", {}),  # doldurulabilir
 		"_sv_admin": int(ps.get("is_admin", 0)),   # admin yetkisi (sunucu tarafige)
 	}
 
@@ -262,12 +320,18 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 		return [false, "Sunucu dolu."]
 	# Mevcut account_id'yi koru, diger alanlari guncelle
 	var acct_id: int = int(players[peer].account_id)
+	var old_p: Dictionary = players[peer]
 	players[peer] = {"id": peer, "account_id": acct_id, "name": nm, "faction": clampi(faction, 1, 3), "ship": ship, "map": "",
 		"pos": Vector3.ZERO, "yaw": 0.0, "hp": 1.0, "mhp": 1.0, "sh": 0.0, "msh": 0.0, "spd": 0.0,
 		"in_safe": false, "ut": false, "chat_t": 0.0, "form": "std", "drn": [],
 		# koruma / catisma durumu (hepsi sunucu saatiyle; birbirinden ayri)
 		"zone": 0, "prot": 0, "lock_t": -1.0e9, "arr_t": -1.0e9, "combat_t": -1.0e9, "last_dmg_t": -1.0e9,
 		"jump_to": "", "jump_dl": -1.0, "respawn_ok": false, "group": 0}
+	# Token asamasinda yuklenen sunucu ekonomi/profil kopyasini KORU (odul kaybi olmasin).
+	for _k in ["_sv_cr", "_sv_uri", "_sv_xp", "_sv_hon", "_sv_sep", "_sv_kills",
+			"_sv_pvp_kills", "_sv_settings", "_sv_inventory", "_sv_admin"]:
+		if old_p.has(_k):
+			players[peer][_k] = old_p[_k]
 	if ghosts.has(nm.to_lower()):
 		var gh: Dictionary = ghosts[nm.to_lower()]
 		ghosts.erase(nm.to_lower())
@@ -627,7 +691,13 @@ func on_died(victim: int, killer: int) -> void:
 		var k: Dictionary = players[killer]
 		print("[SUNUCU] %s -> %s (PvP)" % [str(k.name), str(v.name)])
 		_bcast(map_name, "s_kill", ["%s, %s oyuncusunu yok etti!" % [str(k.name), str(v.name)]])
-		_to(killer, "s_pvp_reward", [victim])
+		# PvP odulu de DB'ye yazilir; ayni olum olayi tekrar islenemez.
+		var event_id: String = "pvp:%s:%d:%d:%d" % [reward_run_id, next_pvp_seq, int(k.get("account_id", 0)), victim]
+		next_pvp_seq += 1
+		var pvp_res: Dictionary = _grant_reward(k, event_id, "reward_pvp",
+			0, 0, 0.0, 100.0, 0, 0, 1, {}, {}, {"victim": int(v.get("account_id", 0)), "map": map_name})
+		if pvp_res.has("ok") and pvp_res.get("ok", false):
+			_to(killer, "s_pvp_reward", [victim, pvp_res])
 	else:
 		_bcast(map_name, "s_kill", ["%s yok edildi." % str(v.name)])
 
@@ -796,7 +866,7 @@ func _get_world(map_name: String) -> Dictionary:
 		return worlds[map_name]
 	var m: Dictionary = maps[map_name]
 	var w: Dictionary = {"name": map_name, "m": m, "npcs": {}, "respawn": [], "base": null, "portals": [], "portal_defs": [],
-		"boxes": {}, "box_next": 1, "box_resp": []}
+		"boxes": {}, "box_resp": []}
 	if m.base != null:
 		w.base = w2g(float(m.base.x), float(m.base.y))
 	for pt in m.portals:
@@ -827,8 +897,10 @@ func _spawn_world_boxes(w: Dictionary) -> void:
 
 
 func _add_box(w: Dictionary, pos: Vector3) -> int:
-	var id: int = int(w.box_next)
-	w.box_next = id + 1
+	# Kimlik GLOBAL sayactan gelir: harita/dunya yeniden kurulsa da ayni kutu
+	# kimligi tekrar kullanilmaz (ayni kutudan iki kez odul verilmesini engeller).
+	var id: int = next_box_id
+	next_box_id += 1
 	(w.boxes as Dictionary)[id] = pos
 	return id
 
@@ -841,7 +913,23 @@ func _box_list(w: Dictionary) -> Array:
 	return out
 
 
+# Kutu odulu SUNUCUDA belirlenir (istemci rastgele odul uretemez).
+func _roll_box_reward() -> Dictionary:
+	var cr: int = 0
+	var uri: int = 0
+	var ammo: Dictionary = {}
+	var r: float = randf()
+	if r < 0.75:
+		cr = randi_range(500, 2000)
+	elif r < 0.95:
+		ammo["x1"] = randi_range(200, 1000)
+	else:
+		uri = randi_range(5, 40)
+	return {"cr": cr, "uri": uri, "ammo": ammo, "items": {}}
+
+
 # Oyuncu kutuyu almak istedi: ilk gelen alir, kutu herkesten silinir.
+# Odul DB'ye yazilamazsa kutu SILINMEZ; istemciye -2 ile "tekrar dene" bildirilir.
 func on_box_take(peer: int, id: int) -> void:
 	if not players.has(peer):
 		return
@@ -858,8 +946,23 @@ func on_box_take(peer: int, id: int) -> void:
 	if Vector2(pp.x - pos.x, pp.z - pos.z).length() > BOX_TAKE_RANGE:
 		_to(peer, "s_box_gone", [id, -1])  # cok uzak: odul yok, kutu kalir
 		return
+	var acct_id: int = int(p.get("account_id", 0))
+	if acct_id <= 0:
+		_to(peer, "s_box_gone", [id, -2])
+		return
+	var reward: Dictionary = _roll_box_reward()
+	var event_id: String = "box:%s:%d:%d" % [reward_run_id, id, acct_id]
+	var res: Dictionary = _grant_reward(p, event_id, "reward_box",
+		int(reward.cr), int(reward.uri), 0.0, 0.0, 0, 0, 0,
+		reward.ammo, reward.items, {"map": map_name, "box_id": id})
+	if not res.has("ok") or res.get("ok", false) == false:
+		_to(peer, "s_box_gone", [id, -2])   # odul yazilamadi: kutu yerinde kalsin
+		return
+	# DB yazimi basarili: kutu artik alinmis sayilir.
 	(w.boxes as Dictionary).erase(id)
 	(w.box_resp as Array).append(BOX_RESPAWN)
+	# Odul verisi ONCE sahibine gider, sonra herkese kutu kaldirma bildirimi.
+	_to(peer, "s_box_reward", [id, res])
 	_bcast(map_name, "s_box_gone", [id, peer])
 
 
@@ -960,6 +1063,10 @@ func _spawn_and_announce(w: Dictionary, id: String, pos: Vector3, zone: int) -> 
 
 
 func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
+	# Ayni NPC olumu iki kez islenemez (odul/cift kayit korumasi).
+	if bool(e.get("dead", false)):
+		return
+	e["dead"] = true
 	e.hp = 0.0
 	(w.npcs as Dictionary).erase(e.uid)
 	# --- Cubikon hasar-oranli odul (B) ---
@@ -976,7 +1083,9 @@ func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 			if players.has(int(m)) and str(players[int(m)].map) == str(w.name):
 				mates.append(int(m))
 		share_n = maxi(mates.size(), 1)
-	# --- Normal NPC odul: sunucu hesaplar, s_npc_reward ile gonder (C) ---
+	# NPC'yi butun istemcilerden kaldir (olum sunucu tarafindan bildirilir).
+	_bcast(str(w.name), "s_npc_dead", [int(e.uid), killer, silent, share_n])
+	# --- Normal NPC odul: sunucu hesaplar, DB'ye yazar, sonra istemciye bildirir (C) ---
 	if not silent and killer != 0 and players.has(killer) and str(players[killer].map) == str(w.name):
 		var d: Dictionary = e.d
 		var cr: int = int(d.cr)
@@ -988,13 +1097,33 @@ func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 		var per_uri: int = int(uri / share_n)
 		var per_xp: int = int(xp / share_n)
 		var per_hon: int = int(hon / share_n)
+		var per_sep: int = int(round(float(per_uri) * float(SkillTree.SEPROM_PER_URI)))
 		# Odulu alacaklar: killer + grupdaki digerleri
 		var receivers: Array = [killer]
 		for m in mates:
 			if int(m) != killer:
 				receivers.append(int(m))
 		for r in receivers:
-			_to(int(r), "s_npc_reward", [str(e.uid), per_cr, per_uri, per_xp, per_hon])
+			var rp: Dictionary = players[int(r)]
+			var acct_id: int = int(rp.get("account_id", 0))
+			if acct_id <= 0:
+				continue
+			var event_id: String = "npc:%s:%d:%d" % [reward_run_id, int(e.uid), acct_id]
+			var res: Dictionary = _grant_reward(rp, event_id, "reward_npc",
+				per_cr, per_uri, float(per_xp), float(per_hon), 1, per_sep, 0,
+				{}, {}, {"map": str(w.name), "npc": str(e.id), "uid": int(e.uid)})
+			if res.has("ok") and res.get("ok", false):
+				_to(int(r), "s_npc_reward", [{
+					"npc_id": str(e.id),
+					"uid": int(e.uid),
+					"cr": per_cr,
+					"uri": per_uri,
+					"xp": per_xp,
+					"hon": per_hon,
+					"sep": per_sep,
+					"kills": 1,
+					"state": res,
+				}])
 	if silent or int(e.guard_home) != 0:
 		return
 	var at: Variant = null
@@ -1045,18 +1174,37 @@ func _cubikon_reward(w: Dictionary, e: Dictionary) -> void:
 			if not pays.has(m):
 				pays[m] = 0.0
 			pays[m] += per_member
-	# Odemeyi gonder
+	# Odemeyi SUNUCUDA hesapla, DB'ye yaz, sonra bildir
 	for pid in pays.keys():
 		var pct: float = pays[pid]
 		if pct <= 0.0:
 			continue
 		var p: Dictionary = players[pid]
 		if not p: continue
+		var acct_id: int = int(p.get("account_id", 0))
+		if acct_id <= 0:
+			continue
 		var cr: int = roundi(float(DOData.NPCS["cubikon"].cr) * pct)
 		var uri: int = roundi(float(DOData.NPCS["cubikon"].uri) * pct)
 		var xp: int = roundi(float(DOData.CUBIKON_XP) * pct)
 		var hon: int = roundi(float(DOData.NPCS["cubikon"].hon) * pct)
-		_to(int(pid), "s_npc_reward", [str(e.uid), cr, uri, xp, hon])
+		var sep: int = int(round(float(uri) * float(SkillTree.SEPROM_PER_URI)))
+		var event_id: String = "npc:%s:%d:%d" % [reward_run_id, int(e.uid), acct_id]
+		var res: Dictionary = _grant_reward(p, event_id, "reward_npc",
+			cr, uri, float(xp), float(hon), 1, sep, 0,
+			{}, {}, {"map": str(w.name), "npc": "cubikon", "uid": int(e.uid), "share": pct})
+		if res.has("ok") and res.get("ok", false):
+			_to(int(pid), "s_npc_reward", [{
+				"npc_id": "cubikon",
+				"uid": int(e.uid),
+				"cr": cr,
+				"uri": uri,
+				"xp": xp,
+				"hon": hon,
+				"sep": sep,
+				"kills": 1,
+				"state": res,
+			}])
 
 
 # ------------------------------------------------------------------ ana dongu

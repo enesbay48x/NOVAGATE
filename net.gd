@@ -551,6 +551,13 @@ func s_box_gone(id: int, taker: int) -> void:
 		gm.on_box_gone(id, taker)
 
 
+# Sunucunun DB'ye yazdigi kutu odulu (tek dogru kaynak).
+@rpc("authority", "call_remote", "reliable")
+func s_box_reward(id: int, info: Dictionary) -> void:
+	if gm != null and online:
+		gm.on_box_reward(id, info)
+
+
 @rpc("authority", "call_remote", "reliable")
 func s_pjoin(info: Array) -> void:
 	if gm != null and online:
@@ -591,6 +598,13 @@ func s_npc_spawn(info: Array) -> void:
 func s_npc_dead(uid: int, killer: int, silent: bool, share_n: int) -> void:
 	if gm != null and online:
 		gm.on_npc_dead(uid, killer, silent, share_n)
+
+
+# Sunucunun DB'ye yazdigi NPC odulu (cr/uri/xp/hon/sep + kesin yeni bakiyeler).
+@rpc("authority", "call_remote", "reliable")
+func s_npc_reward(info: Dictionary) -> void:
+	if gm != null and online:
+		gm.on_npc_reward(info)
 
 
 # Gruptaki oyuncu NPC'yi oldurmediyse bile odulun payini alir (share_n = oduller kac kisiye bolundu)
@@ -638,9 +652,9 @@ func s_kill(text: String) -> void:
 
 
 @rpc("authority", "call_remote", "reliable")
-func s_pvp_reward(victim: int) -> void:
+func s_pvp_reward(victim: int, info: Dictionary = {}) -> void:
 	if gm != null and online:
-		gm.on_pvp_reward(victim)
+		gm.on_pvp_reward(victim, info)
 
 
 @rpc("authority", "call_remote", "reliable")

@@ -1921,6 +1921,7 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 		"uri": int(ps.get("uri", 0)),
 		"xp": float(ps.get("xp", 0.0)),
 		"hon": float(ps.get("hon", 0.0)),
+		"seprom": int(ps.get("sep", 0)),
 		"pvp_kills": int(ps.get("pvp_kills", 0)),
 		"rank_pen": float(ps.get("rank_pen", 0.0)),
 		"ship": str(ps.get("ship", "phoenix")),
@@ -1935,23 +1936,38 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 		"rockets": int(ps.get("rockets", 50)),
 		"owned": ps.get("owned", [str(ps.get("ship", "phoenix"))]),
 		"forms": ps.get("forms", ["std"]),
-		"loads": {},
+		"loads": ps.get("loads", {}),
 		"cfgi": int(ps.get("cfg_index", 0)),
 		"free": bool(ps.get("free_mode", false)),
-		"quests": {},
-		"skills": {},
+		"quests": ps.get("quests", {}),
+		"skills": ps.get("skills", {}),
 		"skill_points": int(ps.get("skill_points", 0)),
-		"maps_visited": [],
+		"maps_visited": ps.get("maps_visited", []),
 		"route_to": str(ps.get("route_to", "")),
-		"settings": {},
-		"drone_equip": {},
+		"settings": ps.get("settings", {}),
+		"drone_equip": ps.get("drone_equip", {}),
 		"reg_ts": int(ps.get("reg_ts", Time.get_unix_time_from_system())),
 	}
-	# JSON alanlarini coz
-	if ps.has("settings") and typeof(ps.settings) == TYPE_STRING:
-		SV.settings = JSON.parse_string(ps.settings)
-	if ps.has("drone_equip") and typeof(ps.drone_equip) == TYPE_STRING:
-		SV.drone_equip = JSON.parse_string(ps.drone_equip)
+	# JSON alanlarini coz (sunucu bazi alanlari string, bazilarini sozluk dondurebilir)
+	if typeof(SV.settings) == TYPE_STRING:
+		SV.settings = JSON.parse_string(SV.settings)
+	if typeof(SV.drone_equip) == TYPE_STRING:
+		SV.drone_equip = JSON.parse_string(SV.drone_equip)
+	if typeof(SV.settings) != TYPE_DICTIONARY:
+		SV.settings = {}
+	if typeof(SV.drone_equip) != TYPE_DICTIONARY:
+		SV.drone_equip = {}
+	SV.forms = Array(SV.get("forms", ["std"]))
+	if SV.forms.is_empty():
+		SV.forms = ["std"]
+	if typeof(SV.loads) != TYPE_DICTIONARY:
+		SV.loads = {}
+	if typeof(SV.quests) != TYPE_DICTIONARY:
+		SV.quests = {}
+	if typeof(SV.skills) != TYPE_DICTIONARY:
+		SV.skills = {}
+	if typeof(SV.maps_visited) != TYPE_ARRAY:
+		SV.maps_visited = []
 
 	print("[ISTEMCI] SV hazirlandi: account_id=%d, callsign=%s, ship=%s" % [acct_id, callsign, ps.get("ship", "phoenix")])
 	# Oyunu baslat (zaten ENet baglantisi var, sadece oyun baslat)
@@ -5086,6 +5102,112 @@ func give_reward_cr_uri_xp_hon(cr: int, uri: int, xp: int, hon: int, npc_id: Str
 				state["progress"] = mini(int(state.get("progress", 0)) + 1, int(quest.target))
 				SV.quests[str(quest.id)] = state
 	toast("%s+%d XP  +%d Kredi  +%d Şeref  +%d Uridium  +%d Seprom" % ["", xp, cr, int(round(hon)), uri, sep])
+
+
+# ------------------------------------------------------------------ SUNUCU DOGRULAMALI ODULLER
+# Sunucu odulu DB'ye yazdiktan sonra kesin bakiyeleri (new_*) gonderir. Istemci
+# bu degerleri AYNEN uygular; boylece ekranda gorunen ile kayitli veri aynidir.
+func _apply_server_economy(st: Dictionary) -> void:
+	if st.is_empty():
+		return
+	if st.has("new_cr"):
+		SV.cr = int(st.new_cr)
+	if st.has("new_uri"):
+		SV.uri = int(st.new_uri)
+	if st.has("new_xp"):
+		SV.xp = float(st.new_xp)
+	if st.has("new_hon"):
+		SV.hon = float(st.new_hon)
+	if st.has("new_sep"):
+		SV.seprom = int(st.new_sep)
+	if st.has("new_kills"):
+		SV.kills = int(st.new_kills)
+	if st.has("new_pvp_kills"):
+		SV.pvp_kills = int(st.new_pvp_kills)
+
+
+func apply_npc_reward(info: Dictionary) -> void:
+	var npc_id: String = str(info.get("npc_id", ""))
+	var cr: int = int(info.get("cr", 0))
+	var uri: int = int(info.get("uri", 0))
+	var xp: int = int(info.get("xp", 0))
+	var hon: float = float(info.get("hon", 0.0))
+	var sep: int = int(info.get("sep", 0))
+	var before_level: int = DOData.level_of(float(SV.xp))
+	var st: Dictionary = info.get("state", {})
+	if not st.is_empty():
+		_apply_server_economy(st)
+	else:
+		SV.cr += cr
+		SV.uri += uri
+		SV.xp += xp
+		SV.hon += hon
+		SV.seprom = int(SV.get("seprom", 0)) + sep
+		SV.kills += 1
+	var after_level: int = DOData.level_of(float(SV.xp))
+	if after_level > before_level:
+		toast("Seviye %d!" % after_level)
+	# Quest ilerlemesi (odul miktarindan bagimsiz; NPC kimligi ile)
+	if npc_id != "":
+		for quest in QUESTS:
+			if str(quest.npc) == npc_id:
+				var state: Dictionary = SV.quests.get(str(quest.id), {})
+				state["progress"] = mini(int(state.get("progress", 0)) + 1, int(quest.target))
+				SV.quests[str(quest.id)] = state
+	toast("+%d XP  +%d Kredi  +%d Şeref  +%d Uridium  +%d Seprom" % [xp, cr, int(round(hon)), uri, sep])
+
+
+func apply_box_reward(id: int, info: Dictionary) -> void:
+	var cr: int = int(info.get("reward_cr", info.get("cr", 0)))
+	var uri: int = int(info.get("reward_uri", info.get("uri", 0)))
+	var ammo: Dictionary = info.get("ammo", {}) if typeof(info.get("ammo", {})) == TYPE_DICTIONARY else {}
+	var items: Dictionary = info.get("items", {}) if typeof(info.get("items", {})) == TYPE_DICTIONARY else {}
+	var ptxt := ""
+	var pcol := Color(1.0, 0.88, 0.4)
+	if cr > 0:
+		ptxt = "+%s Kredi" % _n(cr)
+	elif uri > 0:
+		ptxt = "+%s Uridium" % _n(uri)
+		pcol = Color(0.84, 0.63, 1.0)
+	elif ammo.has("x1"):
+		ptxt = "+%s x1" % _n(int(ammo["x1"]))
+		pcol = Color(0.75, 0.95, 1.0)
+	# Sunucunun kesin bakiyelerini uygula
+	_apply_server_economy(info)
+	# Mermi / envanter odullerini istemciye yansit (DB'de zaten kalici)
+	if not SV.has("ammo") or typeof(SV.ammo) != TYPE_DICTIONARY:
+		SV.ammo = {}
+	for aid in ammo.keys():
+		SV.ammo[str(aid)] = int(SV.ammo.get(str(aid), 0)) + int(ammo[aid])
+	if not SV.has("inv") or typeof(SV.inv) != TYPE_DICTIONARY:
+		SV.inv = {}
+	for iid in items.keys():
+		SV.inv[str(iid)] = int(SV.inv.get(str(iid), 0)) + int(items[iid])
+	# Efekt + bildirim (kutu konumu hala listede olabilir)
+	var po: Vector3 = P.node.position if P != null else Vector3.ZERO
+	var bp: Vector3 = po
+	for b in boxes:
+		if int(b.get("id", -1)) == id and is_instance_valid(b.node):
+			bp = (b.node as Node3D).position
+			break
+	_box_collect_burst(Vector3(bp.x, po.y, bp.z))
+	if ptxt != "":
+		popup_txt(ptxt, po + Vector3(0.0, 1.5, 0.0), pcol)
+	if cr > 0:
+		toast("Bonus kutu: +%d Kredi" % cr)
+	elif uri > 0:
+		toast("Bonus kutu: +%d Uridium!" % uri)
+	elif ammo.has("x1"):
+		toast("Bonus kutu: +%d x1 cephane" % int(ammo["x1"]))
+
+
+func apply_pvp_reward(_victim: int, info: Dictionary = {}) -> void:
+	if not info.is_empty() and info.has("new_hon"):
+		_apply_server_economy(info)
+	else:
+		SV.pvp_kills = int(SV.get("pvp_kills", 0)) + 1
+		SV.hon = float(SV.get("hon", 0.0)) + 100.0 * (1.0 + skill_bonus("honor"))
+	toast("Oyuncu yok edildi! +100 Honor")
 
 
 # ---------- Gercek lazer cikis noktalari ----------

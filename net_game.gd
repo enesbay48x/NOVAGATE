@@ -150,7 +150,7 @@ func _make_box(id: int, x: float, z: float) -> void:
 	g.boxes.append({"node": bx, "id": id})
 
 
-# taker: kutuyu alan oyuncu (kendimiz ise odul ver). 0 = kutu yok/baskasi almis, -1 = cok uzaktik (kutu duruyor).
+# taker: kutuyu alan oyuncu (kendimiz ise odul sunucudan s_box_reward ile gelir). 0 = kutu yok/baskasi almis, -1 = cok uzaktik (kutu duruyor), -2 = odul kaydedilemedi (kutu duruyor).
 func on_box_gone(id: int, taker: int) -> void:
 	var ent = null
 	for b in g.boxes:
@@ -164,17 +164,42 @@ func on_box_gone(id: int, taker: int) -> void:
 			g._cancel_collect()
 		g.toast("Kutu çok uzakta, tekrar yaklaş.")
 		return
-	var mine: bool = taker == net.my_id and is_same(ent, g.collect_box)
-	if mine:
-		g.box_reward()
-	else:
+	if taker == -2:
 		if is_same(ent, g.collect_box):
-			g.toast("Bu kutuyu başka bir oyuncu aldı.")
-			g.collect_box = null
-			g.collect_t = 0.0
+			g._cancel_collect()
+		g.toast("Kutu ödülü kaydedilemedi, tekrar dene.")
+		return
+	var mine: bool = taker == net.my_id
+	if mine:
+		# Odul istemcide rastgele uretilmez; sunucu s_box_reward gonderene kadar bekle.
+		# (s_box_reward normalde bu bildirimden once gelir ve kutuyu kaldirir.)
+		return
+	if is_same(ent, g.collect_box):
+		g.toast("Bu kutuyu başka bir oyuncu aldı.")
+		g.collect_box = null
+		g.collect_t = 0.0
+	if is_instance_valid(ent.node):
+		ent.node.queue_free()
+	g.boxes.erase(ent)
+
+
+# Sunucunun DB'ye yazdigi kutu odulu. Kutuyu ve toplama durumunu burada kapatiriz.
+func on_box_reward(id: int, info: Dictionary) -> void:
+	var ent = null
+	for b in g.boxes:
+		if int(b.get("id", -1)) == id:
+			ent = b
+			break
+	if ent != null:
+		ent["rewarded"] = true
+	g.apply_box_reward(id, info)
+	if ent != null:
 		if is_instance_valid(ent.node):
 			ent.node.queue_free()
 		g.boxes.erase(ent)
+	if g.collect_box != null and int(g.collect_box.get("id", -1)) == id:
+		g.collect_box = null
+		g.collect_t = 0.0
 
 
 # ------------------------------------------------------------------ NPC kuklalari
@@ -222,11 +247,15 @@ func on_npc_dead(uid: int, killer: int, silent: bool, share_n: int = 1) -> void:
 		g.boom(e.node.position, float(e.node.get_meta("r", 3.0)) * 1.6)
 	_drop_entry(e)
 
-# Sunucu tarafindan gelen odul: [npc_id, cr, uri, xp, hon]
-@rpc("any_peer", "call_remote", "reliable")
-func on_npc_reward(npc_id: String, cr: int, uri: int, xp: int, hon: int) -> void:
-	g.give_reward_cr_uri_xp_hon(cr, uri, xp, hon, npc_id)
+# Sunucu tarafindan DB'ye yazilan NPC odulu: {npc_id, cr, uri, xp, hon, sep, kills, state}
+func on_npc_reward(info: Dictionary) -> void:
+	g.apply_npc_reward(info)
 	g.save_game()
+
+
+# Geriye uyumluluk: eski sunucu s_npc_share gonderirse hata vermesin.
+func on_npc_share(_npc_id: String, _share_n: int) -> void:
+	pass
 
 
 func _drop_entry(e) -> void:
@@ -546,10 +575,8 @@ func on_kill_msg(text: String) -> void:
 	_chat_line("[color=#ffb347]%s[/color]" % text.replace("[", "[lb]"))
 
 
-func on_pvp_reward(victim: int) -> void:
-	g.SV.pvp_kills = int(g.SV.get("pvp_kills", 0)) + 1
-	g.SV.hon = float(g.SV.get("hon", 0.0)) + 100.0 * (1.0 + g.skill_bonus("honor"))
-	g.toast("Oyuncu yok edildi! +100 Honor")
+func on_pvp_reward(victim: int, info: Dictionary = {}) -> void:
+	g.apply_pvp_reward(victim, info)
 	g.save_game()
 
 
