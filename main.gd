@@ -2171,7 +2171,10 @@ func update_remote_plate(box, node: Node3D, show: bool) -> void:
 func _refresh_plate_rank() -> void:
 	if plate_rank == null or not is_instance_valid(plate_rank) or SV.is_empty():
 		return
-	if bool(SV.get("is_admin", 0)):
+	# Online modda rütbe tek kaynak: sunucunun gonderdigi _sv_rank (yerelden hesaplanmaz).
+	if SV.has("_sv_rank") and int(SV._sv_rank) > 0:
+		plate_rank.texture = _tex(RankSys.ICON_PATH % int(SV._sv_rank))
+	elif bool(SV.get("is_admin", 0)):
 		plate_rank.texture = _tex(RankSys.ICON_PATH % RankSys.ADMIN_ICON)
 	else:
 		var rk: Dictionary = RankSys.display(RankSys.summary(self).me)

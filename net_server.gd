@@ -524,8 +524,15 @@ func _calculate_ranks() -> void:
 		var entries: Array = []
 		for pid in members:
 			var p: Dictionary = players[pid]
+			var acct_id: int = int(p.get("account_id", -1))
 			if bool(p.get("_sv_admin", 0)):
+				var old_rank: int = int(p.get("_sv_rank", 0))
 				p["_sv_rank"] = 21   # admin: rank_21.png
+				if 21 != old_rank and str(p.map) != "":
+					# Admin rozeti: kendine ve haritadaki digerlere gonder (mevcut s_pjoin RPC'si, yeni RPC yok).
+					_to(int(pid), "s_pjoin", [_player_info(p)])
+					_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
+				print("[RANK DEBUG] account_id=%d faction=%d admin -> rank=21 (rank_21.png), old=%d" % [acct_id, f, old_rank])
 				continue
 			var sv: Dictionary = {
 				"xp": float(p.get("_sv_xp", 0.0)),
@@ -539,7 +546,7 @@ func _calculate_ranks() -> void:
 				"settings": p.get("_sv_settings", "{}"),
 			}
 			var pts: Dictionary = RankSys.points(sv, now)
-			entries.append({"pid": pid, "pts": float(pts.total)})
+			entries.append({"pid": pid, "pts": float(pts.total), "acct_id": acct_id})
 		# Puanla sirala (yukselen)
 		entries.sort_custom(func(a, b): return float(a.pts) > float(b.pts))
 		# Sira no ver ve rutbe indeksi hesapla
@@ -552,9 +559,11 @@ func _calculate_ranks() -> void:
 			var p: Dictionary = players[e.pid]
 			var old_rank: int = int(p.get("_sv_rank", 0))
 			p["_sv_rank"] = rank_num
+			print("[RANK DEBUG] account_id=%d faction=%d pos=%d/%d pts=%.2f idx=%d rank=%d, old=%d" % [e.acct_id, f, pos, counts, float(e.pts), idx, rank_num, old_rank])
 			if rank_num != old_rank and str(p.map) != "":
-				# Rozette degisiklik var: haritadaki diger oyuncularin plakalarini guncelle (mevcut s_pjoin RPC'si, yeni RPC yok).
+				# Rozette degisiklik var: digerlerine ve kendine gonder (mevcut s_pjoin RPC'si, yeni RPC yok).
 				_bcast(str(p.map), "s_pjoin", [_player_info(p)], e.pid)
+				_to(int(e.pid), "s_pjoin", [_player_info(p)])
 
 
 
