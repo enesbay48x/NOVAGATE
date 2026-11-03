@@ -20,8 +20,11 @@ jobs:
       - name: Install iOS export templates
         run: |
           curl -L -o ios_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_export_templates.tpz"
-          mkdir -p "$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable"
-          unzip -o -q ios_templates.tpz -d "$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable"
+          TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable"
+          mkdir -p "$TEMPL_DIR"
+          unzip -o -q ios_templates.tpz -d "$TEMPL_DIR"
+          echo "=== Extracted template contents ==="
+          find "$TEMPL_DIR" -type f | sort
 
       - name: Export iOS Xcode project
         run: |
