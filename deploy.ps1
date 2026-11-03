@@ -99,9 +99,20 @@ try {
     Write-Host "[5/6] Servisler yeniden baslatiliyor..." -ForegroundColor Yellow
     SSH-Exec "sudo systemctl restart novagate-db" | Out-Null
     Start-Sleep -Seconds 3
-    SSH-Exec "sudo systemctl restart novagate-auth" -AllowFail | Out-Null
+    SSH-Exec "sudo systemctl restart novagate-auth" | Out-Null
     SSH-Exec "sudo systemctl restart novagate-server" | Out-Null
-    Start-Sleep -Seconds 8
+    $portOpen = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        $result = SSH-Exec "sudo ss -ltn | grep ':8444'" -AllowFail
+        if ($result -match ":8444") {
+            $portOpen = $true
+            break
+        }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $portOpen) {
+        throw "HTTPS login portu 8444 40 saniye icinde acilamadi."
+    }
 
     $authSt = (SSH-Exec "sudo systemctl is-active novagate-auth" -AllowFail).Trim()
     $dbSt   = (SSH-Exec "sudo systemctl is-active novagate-db" -AllowFail).Trim()
@@ -123,10 +134,20 @@ try {
 
     # --- 6. Token testi ---
     Write-Host "[6/6] Test calistiriliyor..." -ForegroundColor Yellow
-    SCP-Upload $TEST_SCRIPT "/tmp/$TEST_SCRIPT"
-    $testResult = SSH-Exec "sudo -u novagate python3 /tmp/$TEST_SCRIPT 2>&1" -AllowFail
-    Write-Host $testResult
-    if ($testResult -notmatch "SUCCESS: Token verified") { throw "Token testi basarisiz." }
+    $testOk = $false
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        SCP-Upload $TEST_SCRIPT "/tmp/$TEST_SCRIPT"
+        $testResult = SSH-Exec "sudo -u novagate python3 /tmp/$TEST_SCRIPT 2>&1" -AllowFail
+        Write-Host $testResult
+        if ($testResult -match "SUCCESS: Token verified") {
+            $testOk = $true
+            break
+        }
+        if ($attempt -eq 0) {
+            Start-Sleep -Seconds 5
+        }
+    }
+    if (-not $testOk) { throw "Token testi basarisiz." }
 
     Write-Host "=== DEPLOY BASARILI ===" -ForegroundColor Green
     exit 0
@@ -135,8 +156,21 @@ catch {
     Write-Host "HATA: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "=== DEPLOY BASARISIZ - yedege donuluyor ===" -ForegroundColor Red
     SSH-Exec "if [ -d '$BACKUP_DIR' ]; then sudo cp -a '$BACKUP_DIR'/. '$PROJECT_DIR'/ && sudo chown -R novagate:novagate '$PROJECT_DIR'; fi" -AllowFail | Out-Null
+    SSH-Exec "sudo systemctl restart novagate-auth" -AllowFail | Out-Null
     SSH-Exec "sudo systemctl restart novagate-db" -AllowFail | Out-Null
     SSH-Exec "sudo systemctl restart novagate-server" -AllowFail | Out-Null
+    $rbPortOpen = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        $rbResult = SSH-Exec "sudo ss -ltn | grep ':8444'" -AllowFail
+        if ($rbResult -match ":8444") {
+            $rbPortOpen = $true
+            break
+        }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $rbPortOpen) {
+        Write-Host "UYARI: Rollback sonrasi 8444 portu acilamadi." -ForegroundColor Yellow
+    }
     Write-Host "Yedekten geri yuklendi (yedek: $BACKUP_DIR)." -ForegroundColor Yellow
     exit 1
 }

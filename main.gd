@@ -1913,7 +1913,16 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 	Net.account_id = acct_id
 
 	# SV'i sunucudan gelen verilerle doldur (istemci tarafindaki SV sadece gorunum kopyasi)
-	var ps: Dictionary = JSON.parse_string(player_state_json)
+	var ps_raw = JSON.parse_string(player_state_json)
+	if not (ps_raw is Dictionary):
+		push_warning("[MAIN] player_state_json gecerli bir Dictionary degil")
+		lbl_auth_msg.text = "Sunucu gecersiz durum gonderdi."
+		menu.modulate = Color(1, 1, 1, 1)
+		menu.show()
+		auth_box.visible = true
+		company_box.visible = false
+		return
+	var ps: Dictionary = ps_raw
 	SV = {
 		"faction": int(ps.get("faction", faction)),
 		"is_admin": int(ps.get("is_admin", 0)),
@@ -3326,6 +3335,27 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 			company_box.visible = false
 			lbl_auth_msg.text = "Sunucuya bağlanılamadı: " + Net.last_error
 			return
+	# Harita dogrulama: SV.map maps sozlugunde yoksa varsayilana donuluyor
+	var map_key: String = str(SV.get("map", "1-1"))
+	if not maps.has(map_key):
+		push_warning("[MAIN] Harita '%s' maps sozlugunde yok, varsayilana donuluyor" % map_key)
+		map_key = DOData.FACTIONS.has(int(SV.get("faction", 1))) and DOData.FACTIONS[int(SV.get("faction", 1))].has("home") and DOData.FACTIONS[int(SV.get("faction", 1))].home or "1-1"
+		if not maps.has(map_key):
+			map_key = "1-1"
+			if not maps.has(map_key):
+				var _mk := maps.keys()
+				if _mk.size() > 0:
+					map_key = str(_mk[0])
+				else:
+					push_error("[MAIN] maps sozlugu bos, oyuna girilemiyor")
+					menu.modulate = Color(1, 1, 1, 1)
+					menu.show()
+					auth_box.visible = true
+					company_box.visible = false
+					for n in hud_nodes:
+						n.visible = false
+					return
+		SV.map = map_key
 	menu.hide()
 	ensure_campaign_data()
 	ensure_loadout()
@@ -3342,7 +3372,7 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 	extras.reset()
 	_make_player()
 	_build_plate()
-	var m = maps[SV.map]
+	var m = maps[map_key]
 	var arrive := w2g(m.w / 2.0, m.h / 2.0)
 	if m.base != null:
 		arrive = w2g(m.base.x, m.base.y) + Vector3(10, 0, 10)
@@ -3393,6 +3423,9 @@ func load_map(name: String, arrive: Vector3) -> void:
 	prot_kind = 0
 	net_prot = 0     # yeni haritada koruma durumunu sunucu yeniden hesaplar (s_prot)
 	base_pos = null
+	if not maps.has(name):
+		push_warning("[MAIN] load_map: '%s' maps sozlugunde yok, islem iptal" % name)
+		return
 	var m = maps[name]
 	_apply_map_color_theme(name, m)
 	bg_tex = _tex(MAP_TEX % name)
@@ -6021,24 +6054,47 @@ func _drone_scene(id: String) -> PackedScene:
 	return ps
 
 
-# Gercek 3D droid modeli (flax / iris). Model yoksa eski procedural droid kullanilir.
-func _make_drone_model(ps: PackedScene, tint: Color, glow: Color, glow_e: float, metal: float) -> Node3D:
+# ===================== DROID GORUNUMU + ANIMASYONU =====================
+# RENK AYARI BURADAN: GLB'yi yeniden uretmeden renk degisir.
+#   body   = govde rengi        accent = vurgu isigi (halka/lambalar)   core = cekirdek/motor isigi
+#   rim    = kenar isigi gucu (uzayda siluet net kalsin)                lift = govdenin kendi isigi (siyaha donmesin)
+const DRONE_LOOK := {
+	"iris": {"body": Color(0.20, 0.22, 0.27), "accent": Color(1.00, 0.10, 0.05), "core": Color(1.00, 0.62, 0.45), "rim": 0.55, "lift": 0.22},
+	"flax": {"body": Color(0.48, 0.53, 0.62), "accent": Color(1.00, 0.42, 0.06), "core": Color(1.00, 0.85, 0.55), "rim": 0.40, "lift": 0.14},
+}
+const DRONE_ACCENT_E := 1.7    # vurgu isigi parlakligi (bloom'a patlarsa dusur)
+const DRONE_CORE_E := 2.2      # cekirdek parlakligi
+const DRONE_FX_ON := true      # false: tum droid animasyon/efektleri kapanir (sadece renk kalir)
+var _drone_fx_mats: Dictionary = {}
+
+
+func _drone_mat_kind(m: StandardMaterial3D) -> String:
+	var nm := m.resource_name.to_lower()
+	if nm.ends_with("accent") or nm.ends_with("cyan") or nm.ends_with("orange"):
+		return "accent"
+	if nm.ends_with("core") or nm.ends_with("hot"):
+		return "core"
+	if nm.ends_with("dark"):
+		return "dark"
+	if m.emission_enabled:
+		return "accent"
+	return "body"
+
+
+# Gercek 3D droid modeli (flax / iris). GLB'nin KENDI malzemeleri korunur (eskiden hepsi tek malzemeye
+# eziliyordu -> duz leke). Model yoksa eski procedural droid kullanilir.
+func _make_drone_model(ps: PackedScene, id: String) -> Node3D:
+	var look: Dictionary = DRONE_LOOK.get(id, {})
+	var styled: bool = not look.is_empty()
 	var root := Node3D.new()
 	var model: Node3D = ps.instantiate() as Node3D
 	if model == null:
 		return root
+	var fx := {"id": id, "accent": [], "core": [], "spin": [], "flames": [], "age": 0.0, "settled": false}
 	var bb := AABB()
 	var have := false
 	var nodes: Array = [model]
 	nodes.append_array(model.find_children("*", "MeshInstance3D", true, false))
-	# Parlak gumus govde (uzayda koyu metal siyaha doner, bu yuzden metalik dusuk + hafif kendi isigi)
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = tint
-	mat.metallic = metal
-	mat.roughness = 0.5
-	mat.emission_enabled = true
-	mat.emission = glow
-	mat.emission_energy_multiplier = glow_e
 	for item in nodes:
 		var mi := item as MeshInstance3D
 		if mi == null or mi.mesh == null:
@@ -6048,27 +6104,201 @@ func _make_drone_model(ps: PackedScene, tint: Color, glow: Color, glow_e: float,
 		bb = b if not have else bb.merge(b)
 		have = true
 		for s in mi.mesh.get_surface_count():
-			mi.set_surface_override_material(s, mat)
+			var src := mi.get_active_material(s) as StandardMaterial3D
+			if src == null:
+				continue
+			var m := src.duplicate() as StandardMaterial3D
+			var kind := _drone_mat_kind(m) if styled else "plain"
+			if kind == "accent" or kind == "core":
+				var c: Color = look["accent"] if kind == "accent" else look["core"]
+				m.albedo_color = c
+				m.emission_enabled = true
+				m.emission = c
+				m.emission_energy_multiplier = DRONE_ACCENT_E if kind == "accent" else DRONE_CORE_E
+				(fx[kind] as Array).append(m)
+			else:
+				if kind == "body":
+					m.albedo_color = look["body"]
+				elif kind == "dark":
+					m.albedo_color = (look["body"] as Color).darkened(0.75)
+				m.metallic = minf(m.metallic, 0.2)
+				m.emission_enabled = true
+				m.emission = m.albedo_color
+				m.emission_energy_multiplier = float(look.get("lift", 0.2))
+				if styled:
+					# parlak boya hissi + kenar isigi: kucuk ekranda silueti okunur yapar
+					m.clearcoat_enabled = true
+					m.clearcoat = 0.45
+					m.clearcoat_roughness = 0.3
+					m.rim_enabled = true
+					m.rim = float(look["rim"]) * (1.0 if kind == "body" else 0.6)
+					m.rim_tint = 0.4
+			mi.set_surface_override_material(s, m)
 	if have:
 		var sz := maxf(bb.size.x, maxf(bb.size.y, bb.size.z))
 		var k := DRONE_MODEL_SIZE / maxf(sz, 0.001)
 		model.scale = Vector3.ONE * k
 		model.position = -bb.get_center() * k
+	if styled and DRONE_FX_ON:
+		_drone_build_fx(model, id, look, fx)
 	# modeller burnu -Z'ye bakacak sekilde cikiyor; gemi +Z'ye bakar -> 180 derece cevir
 	var flip := Node3D.new()
 	flip.rotation.y = PI
 	root.add_child(flip)
 	flip.add_child(model)
+	root.set_meta("fx", fx)
 	return root
+
+
+func _drone_fx_mat() -> StandardMaterial3D:
+	if _drone_fx_mats.has("ring"):
+		return _drone_fx_mats["ring"]
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	m.vertex_color_use_as_albedo = true
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_drone_fx_mats["ring"] = m
+	return m
+
+
+func _drone_flame_mat(c: Color, a: float) -> StandardMaterial3D:
+	var key := "fl_%s_%d" % [c.to_html(false), int(a * 100.0)]
+	if _drone_fx_mats.has(key):
+		return _drone_fx_mats[key]
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.albedo_color = Color(c.r, c.g, c.b, a)
+	_drone_fx_mats[key] = m
+	return m
+
+
+# Kuyruklu yay halka: her yay bir ucta sonuk, diger ucta parlak (donerken "tarama izi" birakir).
+func _drone_arc_mesh(r_in: float, r_out: float, arcs: int, arc_deg: float, steps: int, col: Color) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var gap := TAU / float(arcs)
+	var span := deg_to_rad(arc_deg)
+	for a in arcs:
+		var a0 := gap * float(a)
+		for i in steps:
+			var u0 := float(i) / float(steps)
+			var u1 := float(i + 1) / float(steps)
+			var t0 := a0 + span * u0
+			var t1 := a0 + span * u1
+			var p0 := Vector3(cos(t0) * r_in, 0.0, sin(t0) * r_in)
+			var p1 := Vector3(cos(t0) * r_out, 0.0, sin(t0) * r_out)
+			var p2 := Vector3(cos(t1) * r_out, 0.0, sin(t1) * r_out)
+			var p3 := Vector3(cos(t1) * r_in, 0.0, sin(t1) * r_in)
+			var c0 := Color(col.r, col.g, col.b, u0 * u0)
+			var c1 := Color(col.r, col.g, col.b, u1 * u1)
+			st.set_color(c0)
+			st.add_vertex(p0)
+			st.set_color(c0)
+			st.add_vertex(p1)
+			st.set_color(c1)
+			st.add_vertex(p2)
+			st.set_color(c0)
+			st.add_vertex(p0)
+			st.set_color(c1)
+			st.add_vertex(p2)
+			st.set_color(c1)
+			st.add_vertex(p3)
+	return st.commit()
+
+
+func _drone_add_ring(model: Node3D, fx: Dictionary, r_in: float, r_out: float, arcs: int, arc_deg: float, y: float, speed: float, col: Color) -> void:
+	var mi := MeshInstance3D.new()
+	mi.mesh = _drone_arc_mesh(r_in, r_out, arcs, arc_deg, 10, col)
+	mi.material_override = _drone_fx_mat()
+	mi.position = Vector3(0.0, y, 0.0)
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	model.add_child(mi)
+	(fx["spin"] as Array).append({"node": mi, "speed": speed})
+
+
+# Motor alevi: modelin +Z (arka) ucuna dogru uzanan ic ice iki koni; her karede boyu titrer.
+func _drone_add_flame(model: Node3D, fx: Dictionary, at: Vector3, radius: float, length: float, outer: Color, inner: Color, ph: float) -> void:
+	var piv := Node3D.new()
+	piv.position = at
+	model.add_child(piv)
+	for part in 2:
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.0
+		cm.bottom_radius = radius * (1.0 if part == 0 else 0.5)
+		cm.height = length * (1.0 if part == 0 else 0.62)
+		cm.radial_segments = 10
+		cm.rings = 1
+		cm.cap_top = false
+		cm.cap_bottom = false
+		var mi := MeshInstance3D.new()
+		mi.mesh = cm
+		mi.material_override = _drone_flame_mat(outer, 0.40) if part == 0 else _drone_flame_mat(inner, 0.85)
+		mi.rotation_degrees = Vector3(90.0, 0.0, 0.0)
+		mi.position = Vector3(0.0, 0.0, cm.height * 0.5)
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		piv.add_child(mi)
+	(fx["flames"] as Array).append({"node": piv, "ph": ph})
+
+
+func _drone_build_fx(model: Node3D, id: String, look: Dictionary, fx: Dictionary) -> void:
+	var ac: Color = look["accent"]
+	var cc: Color = look["core"]
+	if id == "iris":
+		# aciklik icinde iki ters yonde donen tarayici halka (cekirdegin etrafinda)
+		_drone_add_ring(model, fx, 0.40, 0.50, 3, 75.0, 0.095, 2.6, ac.lerp(cc, 0.35))
+		_drone_add_ring(model, fx, 0.255, 0.295, 2, 130.0, 0.095, -4.2, cc)
+	elif id == "flax":
+		_drone_add_flame(model, fx, Vector3(0.0, 0.0, 0.97), 0.095, 0.62, ac, cc, 0.0)
+		_drone_add_flame(model, fx, Vector3(-0.55, 0.0, 0.50), 0.055, 0.34, ac, cc, 1.7)
+		_drone_add_flame(model, fx, Vector3(0.55, 0.0, 0.50), 0.055, 0.34, ac, cc, 3.1)
+
+
+# Her karede cagrilir. Doner: Vector2(pitch, roll) -> cagiran bunu droidin yonune ekler.
+#   bank  = yanal gecikmeden gelen yatma (rad), pitch = boylamasina gecikmeden gelen egilme (rad)
+# Yapar: acilis animasyonu (buyuyerek belirir), isik nabzi, halka donusu, alev titremesi, hafif sallanma.
+func drone_fx_update(nd: Node3D, ph: float, dt: float, bank: float, pitch: float) -> Vector2:
+	if not DRONE_FX_ON or not nd.has_meta("fx"):
+		return Vector2(pitch, bank)
+	var fx: Dictionary = nd.get_meta("fx")
+	var t: float = clock
+	var age: float = float(fx["age"]) + dt
+	fx["age"] = age
+	if age < 1.6:
+		nd.scale = Vector3.ONE * maxf(1.0 - exp(-age * 7.0) * cos(age * 12.0), 0.001)
+	elif not bool(fx["settled"]):
+		nd.scale = Vector3.ONE
+		fx["settled"] = true
+	var ae: float
+	var ce: float
+	if str(fx["id"]) == "flax":
+		ae = DRONE_ACCENT_E * (1.0 + 0.12 * sin(t * 9.0 + ph))
+		ce = DRONE_CORE_E * (0.86 + 0.14 * sin(t * 23.0 + ph * 3.0) * sin(t * 13.0 + ph))
+	else:
+		ae = DRONE_ACCENT_E * (1.0 + 0.25 * sin(t * 2.6 + ph))
+		ce = DRONE_CORE_E * (0.85 + 0.20 * sin(t * 1.9 + ph + 1.0))
+	for mm in fx["accent"]:
+		(mm as StandardMaterial3D).emission_energy_multiplier = ae
+	for mm in fx["core"]:
+		(mm as StandardMaterial3D).emission_energy_multiplier = ce
+	for sp in fx["spin"]:
+		((sp as Dictionary)["node"] as Node3D).rotate_y(float((sp as Dictionary)["speed"]) * dt)
+	for fl in fx["flames"]:
+		var fd: Dictionary = fl
+		var f: float = 0.85 + 0.15 * sin(t * 37.0 + ph + float(fd["ph"])) * sin(t * 19.0 + ph)
+		var r: float = 0.9 + 0.1 * f
+		(fd["node"] as Node3D).scale = Vector3(r, r, f)
+	return Vector2(pitch + 0.05 * sin(t * 1.3 + ph * 1.7), bank + 0.06 * sin(t * 1.7 + ph))
 
 
 func _make_drone(col: Color, id := "") -> Node3D:
 	var ps := _drone_scene(id)
 	if ps != null:
-		# flax: acik gumus (tahmin). iris: GERCEK referansa gore koyu kursun gri govde + kirmizi vurgu
-		if id == "iris":
-			return _make_drone_model(ps, Color(0.30, 0.31, 0.35), Color(0.85, 0.10, 0.06), 0.20, 0.35)
-		return _make_drone_model(ps, Color(0.80, 0.84, 0.90), Color(0.80, 0.84, 0.90), 0.22, 0.12)
+		return _make_drone_model(ps, id)
 	var root := Node3D.new()
 	var body := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
@@ -6223,7 +6453,10 @@ func _update_drones(dt: float) -> void:
 		if d.get("spin", true):
 			nd.rotation.y += dt * 2.0   # sadece eski procedural droid doner
 		else:
-			nd.global_rotation = Vector3(0.0, float(d["yaw"]), 0.0)
+			# Yatma: yanal gecikme -> roll, boylamasina gecikme -> pitch (gemi doner/hizlanirsa droidler egilir)
+			var ll: Vector3 = gt.basis.orthonormalized().inverse() * lag
+			var tilt: Vector2 = drone_fx_update(nd, float(d["ph"]), dt, clampf(-ll.x * 0.5, -0.4, 0.4), clampf(ll.z * 0.35, -0.3, 0.3))
+			nd.global_rotation = Vector3(tilt.x, float(d["yaw"]), tilt.y)
 
 
 func _update_hud(def: Dictionary, mhp: float, po: Vector3) -> void:

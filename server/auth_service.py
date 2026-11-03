@@ -472,12 +472,19 @@ def _start_https_login_server() -> None:
         def log_message(self, format, *args):
             pass  # HTTP loglarini bastir (hassas bilgi sızıntısı yok)
 
+    class ReuseTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
     https_port = 8444
     ctx = build_ssl_context()
-    with socketserver.TCPServer(("0.0.0.0", https_port), AuthHandler) as httpd:
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
-        log.info("HTTPS login endpoint hazir: https://127.0.0.1:%d/login", https_port)
-        httpd.serve_forever()
+    try:
+        with ReuseTCPServer(("0.0.0.0", https_port), AuthHandler) as httpd:
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            log.info("HTTPS login endpoint hazir: https://127.0.0.1:%d/login", https_port)
+            httpd.serve_forever()
+    except OSError as e:
+        log.error("HTTPS login endpoint baslatilamadi (port %d): %s", https_port, e)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

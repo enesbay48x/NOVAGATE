@@ -1,0 +1,129 @@
+--- proj/data.gd	2026-11-03 10:06:18.000000000 +0000
++++ out/data.gd	2026-11-03 08:27:09.451532400 +0000
+@@ -65,28 +65,30 @@
+ 
+ const SHIPS := [
+ 	{"id": "phoenix", "name": "Phoenix", "hp": 4000, "spd": 320, "las": 2, "gen": 1, "cr": 0, "uri": 0},
+-	{"id": "yamato", "name": "Yamato", "hp": 8000, "spd": 340, "las": 2, "gen": 2, "cr": 10000, "uri": 0},
+-	{"id": "leonov", "name": "Leonov", "hp": 16000, "spd": 330, "las": 3, "gen": 3, "cr": 40000, "uri": 0},
+-	{"id": "defcom", "name": "Defcom", "hp": 32000, "spd": 320, "las": 4, "gen": 4, "cr": 120000, "uri": 0},
+-	{"id": "liberator", "name": "Liberator", "hp": 64000, "spd": 320, "las": 6, "gen": 6, "cr": 300000, "uri": 0},
+-	{"id": "piranha", "name": "Piranha", "hp": 100000, "spd": 330, "las": 8, "gen": 8, "cr": 600000, "uri": 0},
+-	{"id": "nostromo", "name": "Nostromo", "hp": 128000, "spd": 330, "las": 8, "gen": 8, "cr": 1000000, "uri": 0},
++	{"id": "yamato", "name": "Yamato", "hp": 8000, "spd": 340, "las": 2, "gen": 2, "cr": 16000, "uri": 0},
++	{"id": "leonov", "name": "Leonov", "hp": 16000, "spd": 330, "las": 3, "gen": 3, "cr": 0, "uri": 9000},
++	{"id": "defcom", "name": "Defcom", "hp": 32000, "spd": 320, "las": 4, "gen": 4, "cr": 32000, "uri": 0},
++	{"id": "liberator", "name": "Liberator", "hp": 64000, "spd": 320, "las": 6, "gen": 6, "cr": 64000, "uri": 0},
++	{"id": "piranha", "name": "Piranha", "hp": 100000, "spd": 330, "las": 8, "gen": 8, "cr": 80000, "uri": 0},
++	{"id": "nostromo", "name": "Nostromo", "hp": 128000, "spd": 330, "las": 8, "gen": 8, "cr": 100000, "uri": 0},
+ 	{"id": "bigboy", "name": "Bigboy", "hp": 160000, "spd": 320, "las": 10, "gen": 10, "cr": 1500000, "uri": 0},
+ 	{"id": "spearhead", "name": "Spearhead", "hp": 100000, "spd": 370, "las": 5, "gen": 12, "cr": 0, "uri": 80000},
+-	{"id": "vengeance", "name": "Vengeance", "hp": 180000, "spd": 380, "las": 10, "gen": 10, "cr": 0, "uri": 100000},
+-	{"id": "goliath", "name": "Goliath", "hp": 256000, "spd": 300, "las": 15, "gen": 15, "cr": 0, "uri": 100000},
++	{"id": "vengeance", "name": "Vengeance", "hp": 180000, "spd": 380, "las": 10, "gen": 10, "cr": 0, "uri": 30000},
++	{"id": "goliath", "name": "Goliath", "hp": 256000, "spd": 300, "las": 15, "gen": 15, "cr": 0, "uri": 80000},
+ 	{"id": "aegis", "name": "Aegis", "hp": 275000, "spd": 300, "las": 10, "gen": 15, "cr": 0, "uri": 130000},
+ 	{"id": "citadel", "name": "Citadel", "hp": 550000, "spd": 240, "las": 7, "gen": 20, "cr": 0, "uri": 170000},
+ 	{"id": "police", "name": "Police", "hp": 256000, "spd": 300, "las": 50, "gen": 50, "cr": 0, "uri": 0},
+ ]
+ 
+ const AMMO := [
+-	{"id": "x1", "name": "LCB-10", "mult": 1.0, "price": 1000, "col": Color(1.0, 0.22, 0.16)},
+-	{"id": "x2", "name": "MCB-25", "mult": 2.0, "price": 2000, "col": Color(0.35, 0.72, 1.0)},
+-	{"id": "x3", "name": "MCB-50", "mult": 3.0, "price": 3000, "col": Color(0.3, 1.0, 0.45)},
+-	{"id": "x4", "name": "UCB-100", "mult": 4.0, "price": 4000, "col": Color(0.95, 1.0, 1.0)},
+-	{"id": "sab", "name": "SAB-50", "mult": 2.0, "price": 3000, "col": Color(0.45, 0.8, 1.0)},
+-	{"id": "rsb", "name": "RSB-75", "mult": 6.0, "price": 5000, "col": Color(1.0, 0.8, 0.28)},
++	{"id": "x1", "name": "LCB-10", "mult": 1.0, "price": 10000, "cur": "cr", "col": Color(1.0, 0.22, 0.16)},
++	{"id": "x2", "name": "MCB-25", "mult": 2.0, "price": 500, "cur": "uri", "col": Color(0.35, 0.72, 1.0)},
++	{"id": "x3", "name": "MCB-50", "mult": 3.0, "price": 1000, "cur": "uri", "col": Color(0.3, 1.0, 0.45)},
++	{"id": "x4", "name": "UCB-100", "mult": 4.0, "price": 4000, "cur": "uri", "col": Color(0.95, 1.0, 1.0)},
++	{"id": "sab", "name": "SAB-50", "mult": 2.0, "price": 1000, "cur": "uri", "col": Color(0.45, 0.8, 1.0)},
++	{"id": "rsb", "name": "RSB-75", "mult": 6.0, "price": 5000, "cur": "uri", "col": Color(1.0, 0.8, 0.28)},
++	{"id": "job", "name": "JOB-100", "mult": 2.0, "price": 500, "cur": "uri", "icon": "x2", "col": Color(0.8, 0.55, 1.0)},
++	{"id": "pib", "name": "PIB-100", "mult": 4.0, "price": 9000, "cur": "uri", "icon": "x4", "col": Color(1.0, 0.5, 0.2)},
+ ]
+ 
+ # Kristallin/Kristallon/Boslar: SQL (server_ships). Digerleri ~yaklasik.
+@@ -561,35 +563,38 @@
+ 
+ # ------------------------------------------------------------------ TECHIZAT VERISI (~ yaklasik degerler, istedigin gibi degistir)
+ # Lazer: "dmg" = tek lazerin salvo basina hasari. col = mermi rengi, w = kalinlik, len = uzunluk, spd = mermi hizi.
+-const LASER_ORDER := ["lf1", "lf2", "lf3", "lf4"]
++const LASER_ORDER := ["lf1", "mp1", "lf2", "lf3", "lf4"]
+ const LASERS := {
+-	"lf1": {"name": "LF-1", "dmg": 40, "cr": 10000, "uri": 0, "col": Color(1.0, 0.35, 0.3), "w": 0.12, "len": 1.8, "spd": 90.0, "desc": "Temel lazer topu."},
+-	"lf2": {"name": "LF-2", "dmg": 100, "cr": 0, "uri": 5000, "col": Color(0.4, 1.0, 0.45), "w": 0.16, "len": 2.3, "spd": 96.0, "desc": "Gelistirilmis lazer."},
++	"lf1": {"name": "LF-1", "dmg": 65, "cr": 1000, "uri": 0, "col": Color(1.0, 0.35, 0.3), "w": 0.12, "len": 1.8, "spd": 90.0, "desc": "Temel lazer topu."},
++	"mp1": {"name": "MP-1", "dmg": 70, "cr": 10000, "uri": 0, "icon": "lf1", "col": Color(1.0, 0.35, 0.3), "w": 0.12, "len": 1.8, "spd": 90.0, "desc": "Gelistirilmis temel lazer. (gorsel: LF-1)"},
++	"lf2": {"name": "LF-2", "dmg": 140, "cr": 50000, "uri": 0, "col": Color(0.4, 1.0, 0.45), "w": 0.16, "len": 2.3, "spd": 96.0, "desc": "Gelistirilmis lazer."},
+ 	"lf3": {"name": "LF-3", "dmg": 150, "cr": 0, "uri": 10000, "col": Color(0.35, 0.8, 1.0), "w": 0.20, "len": 2.9, "spd": 104.0, "desc": "Agir lazer, genis demet."},
+-	"lf4": {"name": "LF-4", "dmg": 230, "cr": 0, "uri": 60000, "col": Color(0.8, 0.4, 1.0), "w": 0.25, "len": 3.6, "spd": 112.0, "desc": "En guclu lazer, cift cekirdekli demet."},
++	"lf4": {"name": "LF-4", "dmg": 200, "cr": 0, "uri": 45000, "col": Color(0.8, 0.4, 1.0), "w": 0.25, "len": 3.6, "spd": 112.0, "desc": "En guclu lazer, cift cekirdekli demet."},
+ }
+ 
+ # Jeneratorler: type "spd" = hiz bonusu (DO birimi), type "sh" = kalkan kapasitesi + soguruma orani (abs)
+-const GEN_ORDER := ["g3n-1010", "g3n-2010", "g3n-3210", "g3n-3310", "g3n-6900", "g3n-7900", "sg3n-a01", "sg3n-a02", "sg3n-a03", "sg3n-b01", "sg3n-b02"]
++const GEN_ORDER := ["g3n-1010", "g3n-2010", "g3n-3210", "g3n-3310", "g3n-6900", "g3n-7900", "sg3n-a01", "sg3n-a02", "sg3n-a03", "sg3n-b01", "sg3n-b02", "fs-01", "fs-02"]
+ const GENS := {
+-	"g3n-1010": {"name": "G3N-1010", "type": "spd", "val": 4, "abs": 0.8, "cr": 3000, "uri": 0},
+-	"g3n-2010": {"name": "G3N-2010", "type": "spd", "val": 6, "abs": 0.8, "cr": 8000, "uri": 0},
+-	"g3n-3210": {"name": "G3N-3210", "type": "spd", "val": 8, "abs": 0.8, "cr": 20000, "uri": 0},
+-	"g3n-3310": {"name": "G3N-3310", "type": "spd", "val": 10, "abs": 0.8, "cr": 50000, "uri": 0},
+-	"g3n-6900": {"name": "G3N-6900", "type": "spd", "val": 14, "abs": 0.8, "cr": 120000, "uri": 0},
+-	"g3n-7900": {"name": "G3N-7900", "type": "spd", "val": 18, "abs": 0.8, "cr": 0, "uri": 600},
+-	"sg3n-a01": {"name": "SG3N-A01", "type": "sh", "val": 1500, "abs": 0.80, "cr": 4000, "uri": 0},
+-	"sg3n-a02": {"name": "SG3N-A02", "type": "sh", "val": 2500, "abs": 0.80, "cr": 12000, "uri": 0},
+-	"sg3n-a03": {"name": "SG3N-A03", "type": "sh", "val": 4000, "abs": 0.80, "cr": 35000, "uri": 0},
+-	"sg3n-b01": {"name": "SG3N-B01", "type": "sh", "val": 6000, "abs": 0.85, "cr": 100000, "uri": 0},
+-	"sg3n-b02": {"name": "SG3N-B02", "type": "sh", "val": 9000, "abs": 0.90, "cr": 0, "uri": 800},
++	"g3n-1010": {"name": "G3N-1010", "type": "spd", "val": 2, "abs": 0.8, "cr": 2000, "uri": 0},
++	"g3n-2010": {"name": "G3N-2010", "type": "spd", "val": 3, "abs": 0.8, "cr": 4000, "uri": 0},
++	"g3n-3210": {"name": "G3N-3210", "type": "spd", "val": 4, "abs": 0.8, "cr": 8000, "uri": 0},
++	"g3n-3310": {"name": "G3N-3310", "type": "spd", "val": 5, "abs": 0.8, "cr": 16000, "uri": 0},
++	"g3n-6900": {"name": "G3N-6900", "type": "spd", "val": 7, "abs": 0.8, "cr": 0, "uri": 1000},
++	"g3n-7900": {"name": "G3N-7900", "type": "spd", "val": 10, "abs": 0.8, "cr": 0, "uri": 8000},
++	"sg3n-a01": {"name": "SG3N-A01", "type": "sh", "val": 1000, "abs": 0.40, "cr": 8000, "uri": 0},
++	"sg3n-a02": {"name": "SG3N-A02", "type": "sh", "val": 2000, "abs": 0.50, "cr": 16000, "uri": 0},
++	"sg3n-a03": {"name": "SG3N-A03", "type": "sh", "val": 5000, "abs": 0.60, "cr": 256000, "uri": 0},
++	"sg3n-b01": {"name": "SG3N-B01", "type": "sh", "val": 9500, "abs": 0.70, "cr": 0, "uri": 2500},
++	"sg3n-b02": {"name": "SG3N-B02", "type": "sh", "val": 10000, "abs": 0.80, "cr": 0, "uri": 10000},
++	"fs-01": {"name": "FS-01", "type": "sh", "val": 3200, "abs": 0.70, "cr": 256000, "uri": 0, "icon": "sg3n-a03"},
++	"fs-02": {"name": "FS-02", "type": "sh", "val": 5600, "abs": 0.75, "cr": 2560000, "uri": 0, "icon": "sg3n-b01"},
+ }
+ 
+ # Droidler: dmg / sh = tanesi basina hasar / kalkan bonusu (orani)
+ const DRONE_ORDER := ["flax", "iris"]
+ const DRONES := {
+-	"flax": {"name": "Flax", "dmg": 0.05, "sh": 0.10, "slots": 1, "cr": 60000, "uri": 0, "col": Color(1.0, 0.6, 0.25), "desc": "Gemiye takilan droid. Geminin etrafinda ucar ve kendi lazeri ile ateş eder."},
+-	"iris": {"name": "Iris", "dmg": 0.0, "sh": 0.0, "slots": 2, "cr": 60000, "uri": 0, "col": Color(0.4, 0.85, 1.0), "desc": "Gemiye takilan droid. Geminin etrafinda ucar ve kendi lazeri ile ateş eder."},
++	"flax": {"name": "Flax", "dmg": 0.05, "sh": 0.10, "slots": 1, "cr": 100000, "uri": 0, "col": Color(1.0, 0.6, 0.25), "desc": "Gemiye takilan droid. Geminin etrafinda ucar ve kendi lazeri ile ateş eder."},
++	"iris": {"name": "Iris", "dmg": 0.0, "sh": 0.0, "slots": 2, "cr": 0, "uri": 15000, "col": Color(0.4, 0.85, 1.0), "desc": "Gemiye takilan droid. Geminin etrafinda ucar ve kendi lazeri ile ateş eder."},
+ }
+ 
+ # Droid formasyonlari (ikonlar CMS'ten): dmg / sh / spd = ek bonus (oran)
+@@ -613,6 +618,24 @@
+ 
+ const MAX_DRONES := 10
+ 
++# Droid fiyati: AYNI turden kacinci droid alindigina gore (sunucu server_db.py drone_price ile ayni).
++const DRONE_PRICES := {
++	"flax": ["cr", [100000, 200000, 400000, 800000, 1600000, 3200000, 6400000, 12800000, 20000000, 20000000]],
++	"iris": ["uri", [15000, 24000, 42000, 60000, 84000, 96000, 126000, 200000, 375000, 589000]],
++}
++const SELL_RATE := 0.4
++
++
++# owned = o turden sahip olunan adet, n = alinacak adet -> [cr, uri]; limit asilirsa [-1, -1]
++static func drone_price(id: String, owned: int, n: int) -> Array:
++	var seq: Array = DRONE_PRICES[id][1]
++	if owned < 0 or owned + n > seq.size():
++		return [-1, -1]
++	var tot := 0
++	for i in range(owned, owned + n):
++		tot += int(seq[i])
++	return [tot, 0] if str(DRONE_PRICES[id][0]) == "cr" else [0, tot]
++
+ 
+ static func drone_slots(_ship: Dictionary) -> int:
+ 	# Her gemi, jenerator sayisindan bagimsiz olarak 10 droid tasiyabilir.

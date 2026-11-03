@@ -273,48 +273,152 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 			gp_peer = k
 			break
 	if gp != null:
-		players[peer_id] = gp.p
-		players[peer_id]["id"] = peer_id
-		ghost_players.erase(gp_peer)
+		# Once DB'den tam state'i yukle, sonra ghost'dan canli alanlari ustune yaz
+		var state_resp: Dictionary = db_send("load_player_state", {
+			"account_id": acct_id,
+		})
+		if not state_resp.has("ok") or state_resp["ok"] == false:
+			print("[SUNUCU] Player state yuklenemedi (ghost): account_id=%d" % acct_id)
+			return [false, "Oyuncu verisi yuklenemedi", 0, "", 0, ""]
+		var ps: Dictionary = state_resp["player_state"]
+		var gp_p: Dictionary = gp.p
+		# DB'den gelen tum alanlari al, ghost'dan canli alanlari ustune yaz
+		var merged: Dictionary = ps.duplicate()
+		merged["map"] = str(gp_p.get("map", merged.get("map", "")))
+		merged["ship"] = str(gp_p.get("ship", merged.get("ship", "phoenix")))
+		merged["form"] = str(gp_p.get("form", merged.get("form", "std")))
+		merged["drn"] = (gp_p.get("drn", merged.get("drn", [])) as Array).duplicate()
+		# Konum: ghost'taki pos Vector3'den al (px/pz anahtari yok)
+		var ghost_pos: Vector3 = gp_p.get("pos", Vector3.ZERO)
+		merged["px"] = float(ghost_pos.x)
+		merged["pz"] = float(ghost_pos.z)
+		merged["hp"] = float(gp_p.get("hp", merged.get("hp", 1.0)))
+		merged["mhp"] = float(gp_p.get("mhp", merged.get("mhp", 1.0)))
+		merged["sh"] = float(gp_p.get("sh", merged.get("sh", 0.0)))
+		merged["msh"] = float(gp_p.get("msh", merged.get("msh", 0.0)))
+		merged["spd"] = float(gp_p.get("spd", merged.get("spd", 0.0)))
+		# Session hash'i yeni oturuma guncelle (eski hash ile heartbeat owned=false olur ve oyuncu atilir)
+		session_hash = _hash_sha256(token)
+		merged["_session_hash"] = session_hash
+		players[peer_id] = {
+			"id": peer_id,
+			"account_id": acct_id,
+			"name": str(merged.get("callsign", "Gezgin")),
+			"faction": int(merged.get("faction", 1)),
+			"ship": str(merged.get("ship", "phoenix")),
+			"map": str(merged.get("map", "")),
+			"pos": ghost_pos,
+			"yaw": 0.0,
+			"hp": float(merged.get("hp", 1.0)),
+			"mhp": float(merged.get("mhp", 1.0)),
+			"sh": float(merged.get("sh", 0.0)),
+			"msh": float(merged.get("msh", 0.0)),
+			"spd": float(merged.get("spd", 0.0)),
+			"in_safe": false, "ut": false, "chat_t": 0.0, "form": str(merged.get("form", "std")),
+			"drn": (merged.get("drn", []) as Array).duplicate(),
+			"zone": 0, "prot": 0, "lock_t": -1.0e9, "arr_t": -1.0e9, "combat_t": -1.0e9, "last_dmg_t": -1.0e9,
+			"jump_to": "", "jump_dl": -1.0, "respawn_ok": false, "group": 0,
+			"_sv_cr": int(merged.get("cr", 0)),
+			"_sv_uri": int(merged.get("uri", 0)),
+			"_sv_xp": float(merged.get("xp", 0.0)),
+			"_sv_hon": float(merged.get("hon", 0.0)),
+			"_sv_sep": int(merged.get("seprom", 0)),
+			"_sv_kills": int(merged.get("kills", 0)),
+			"_sv_pvp_kills": int(merged.get("pvp_kills", 0)),
+			"_sv_settings": str(merged.get("settings", "{}")),
+			"_sv_inventory": merged.get("inv", {}),
+			"_sv_admin": int(merged.get("is_admin", 0)),
+			"_sv_reg_ts": int(merged.get("reg_ts", 0)),
+			"_sv_rank_pen": float(merged.get("rank_pen", 0.0)),
+			"_sv_quests": merged.get("quests", {}),
+			"_sv_rank": 0,
+			"_sv_owned": (merged.get("owned", [str(merged.get("ship", "phoenix"))]) as Array).duplicate(),
+			"_session_hash": session_hash,
+		}
+		var p: Dictionary = players[peer_id]
+		if bool(p.get("_sv_admin", 0)) and not "police" in p.get("_sv_owned", []):
+			p["_sv_owned"].append("police")
+			db_send("admin_ship", {"account_id": int(p.account_id), "ship": "police", "add": true})
+			print("[ADMIN SHIP] account_id=%d callsign=%s police owned'e eklendi (ghost geri yukleme)" % [int(p.account_id), str(p.name)])
+		# NPC hedef/aggro referanslarini eski peer id'den yeni peer id'ye guncelle
+		var reaggro_n: int = 0
+		for wn in worlds.keys():
+			var w: Dictionary = worlds[wn]
+			var npcs: Dictionary = w.npcs as Dictionary
+			for uid in npcs.keys():
+				var e: Dictionary = npcs[uid]
+				if int(e.target) == gp_peer:
+					e.target = peer_id
+					reaggro_n += 1
+				if int(e.owner) == gp_peer:
+					e.owner = peer_id
+				if e.tally.has(gp_peer):
+					var dmg: float = e.tally[gp_peer]
+					e.tally.erase(gp_peer)
+					e.tally[peer_id] = dmg
+		print("[GHOST_REAGGRO] %d NPC hedefi eski peer %d -> yeni peer %d'ye aktarildi" % [reaggro_n, gp_peer, peer_id])
 		print("[COMBAT LOGOUT] %s geri yuklendi (peer=%d, acct=%d)" % [str(players[peer_id].get("name", "Gezgin")), peer_id, acct_id])
 		# Haritadaki digerlerine guncellenen bilgi gonder
-		if str(players[peer_id].get("map", "")) != "" and worlds.has(str(players[peer_id].get("map", ""))):
-			_bcast(str(players[peer_id].get("map", "")), "s_pjoin", [_player_info(players[peer_id])], peer_id)
-		# player_state_json olustur (Vector3 pos JSON'a donusturulemez, px/pz kullan)
-		var gp_p: Dictionary = players[peer_id]
+		var ghost_map: String = str(players[peer_id].get("map", ""))
+		if ghost_map != "" and worlds.has(ghost_map):
+			_bcast(ghost_map, "s_pjoin", [_player_info(players[peer_id])], peer_id)
+		# Ghost'tan gelen oyuncuya s_map_init gonder (NPC listesi + oyuncu listesi), normal giris gibi
+		var ghost_w: Dictionary = _get_world(ghost_map)
+		var ghost_npc_list: Array = []
+		for uid in (ghost_w.npcs as Dictionary).keys():
+			ghost_npc_list.append(_npc_info(ghost_w.npcs[uid]))
+		var ghost_plist: Array = []
+		for pid in _players_in(ghost_map):
+			if pid != peer_id:
+				ghost_plist.append(_player_info(players[pid]))
+		_to(peer_id, "s_map_init", [ghost_map, ghost_npc_list, ghost_plist])
+		print("[GHOST_JOIN] map=%s world=%s npc_count=%d s_map_init=yes" % [ghost_map, str(ghost_w != null), str(ghost_npc_list.size())])
+		# player_state_json olustur (tüm alanlar istemci SV'si ile birebir uyumlu)
 		var ps_json: Dictionary = {
-			"callsign": str(gp_p.get("name", "Gezgin")),
-			"faction": int(gp_p.get("faction", 1)),
-			"ship": str(gp_p.get("ship", "phoenix")),
-			"map": str(gp_p.get("map", "")),
-			"px": float(gp_p.get("px", 0.0)),
-			"pz": float(gp_p.get("pz", 0.0)),
-			"hp": float(gp_p.get("hp", 1.0)),
-			"mhp": float(gp_p.get("mhp", 1.0)),
-			"sh": float(gp_p.get("sh", 0.0)),
-			"msh": float(gp_p.get("msh", 0.0)),
-			"spd": float(gp_p.get("spd", 0.0)),
-			"form": str(gp_p.get("form", "std")),
-			"drn": (gp_p.get("drn", []) as Array).duplicate(),
-			"owned": (gp_p.get("_sv_owned", []) as Array).duplicate(),
-			"cr": int(gp_p.get("_sv_cr", 0)),
-			"uri": int(gp_p.get("_sv_uri", 0)),
-			"xp": float(gp_p.get("_sv_xp", 0.0)),
-			"hon": float(gp_p.get("_sv_hon", 0.0)),
-			"pvp_kills": int(gp_p.get("_sv_pvp_kills", 0)),
-			"kills": int(gp_p.get("_sv_kills", 0)),
-			"reg_ts": int(gp_p.get("_sv_reg_ts", 0)),
-			"rank_pen": float(gp_p.get("_sv_rank_pen", 0.0)),
-			"quests": gp_p.get("_sv_quests", {}),
-			"settings": gp_p.get("_sv_settings", "{}"),
-			"inv": gp_p.get("_sv_inventory", {}),
-			"forms": gp_p.get("forms", ["std"]),
-			"loads": gp_p.get("loads", {}),
-			"cfgi": int(gp_p.get("cfgi", 0)),
+			"callsign": str(merged.get("callsign", "Gezgin")),
+			"faction": int(merged.get("faction", 1)),
+			"ship": str(merged.get("ship", "phoenix")),
+			"map": str(merged.get("map", "")),
+			"px": float(merged.get("px", 0.0)),
+			"pz": float(merged.get("pz", 0.0)),
+			"hp": float(merged.get("hp", 1.0)),
+			"mhp": float(merged.get("mhp", 1.0)),
+			"sh": float(merged.get("sh", 0.0)),
+			"msh": float(merged.get("msh", 0.0)),
+			"spd": float(merged.get("spd", 0.0)),
+			"form": str(merged.get("form", "std")),
+			"drn": (merged.get("drn", []) as Array).duplicate(),
+			"owned": (merged.get("owned", [str(merged.get("ship", "phoenix"))]) as Array).duplicate(),
+			"cr": int(merged.get("cr", 0)),
+			"uri": int(merged.get("uri", 0)),
+			"xp": float(merged.get("xp", 0.0)),
+			"hon": float(merged.get("hon", 0.0)),
+			"seprom": int(merged.get("seprom", 0)),
+			"pvp_kills": int(merged.get("pvp_kills", 0)),
+			"kills": int(merged.get("kills", 0)),
+			"reg_ts": int(merged.get("reg_ts", 0)),
+			"rank_pen": float(merged.get("rank_pen", 0.0)),
+			"quests": merged.get("quests", {}),
+			"settings": merged.get("settings", {}),
+			"inv": merged.get("inv", {}),
+			"ammo": merged.get("ammo", {}),
+			"rockets": int(merged.get("rockets", 50)),
+			"forms": merged.get("forms", ["std"]),
+			"loads": merged.get("loads", {}),
+			"selected_ammo": str(merged.get("selected_ammo", "x1")),
+			"cfg_index": int(merged.get("cfg_index", 0)),
+			"free_mode": bool(merged.get("free_mode", false)),
+			"route_to": str(merged.get("route_to", "")),
+			"drone_equip": merged.get("drone_equip", {}),
+			"skill_points": int(merged.get("skill_points", 0)),
+			"maps_visited": merged.get("maps_visited", []),
+			"skills": merged.get("skills", {}),
+			"is_admin": int(merged.get("is_admin", 0)),
 		}
+		print("[ATTACH_DEBUG] ghost=%s ammo=%s inv_keys=%s sel=%s" % [str(merged.get("ship", "phoenix")), str(merged.get("ammo", {})), str((merged.get("inv", {}) as Dictionary).keys()), str(merged.get("selected_ammo", "x1"))])
 		return [true, "Kimlik dogrulandi (ghost geri yuklendi)", acct_id,
-			str(gp_p.get("name", "Gezgin")),
-			int(gp_p.get("faction", 1)),
+			str(merged.get("callsign", "Gezgin")),
+			int(merged.get("faction", 1)),
 			JSON.stringify(ps_json)]
 
 
@@ -459,19 +563,21 @@ func on_ship(peer: int, ship: String) -> void:
 		_bcast(str(p.map), "s_pjoin", [_player_info(p)], peer)
 
 	# Muhimmat secimi: savasta degistirme yasak (istemciye guvenilmez).
-	func on_select_ammo(peer: int, ammo: String) -> void:
-		if not players.has(peer):
-			return
-		var p: Dictionary = players[peer]
-		# Savasta/kilitli muhimmat degistirilemez
-		if float(p.combat_t) > clock or float(p.lock_t) > clock:
-			print("[SELECT AMMO] account_id=%d muhimmat degistirme REDDEDILDI (savasta/kilitli)" % int(p.account_id))
-			net.callv("rpc_id", [peer, "s_select_ammo_result", false, str(p.get("sel", "x1")), "Savasta muhimmat degistirilemez"])
-			return
-		# Muhimmat secimini guncelle
-		p.sel = ammo
-		print("[SELECT AMMO] account_id=%d muhimmat=%s" % [int(p.account_id), ammo])
-		net.callv("rpc_id", [peer, "s_select_ammo_result", true, ammo, ""])
+func on_select_ammo(peer: int, ammo: String) -> void:
+	if not players.has(peer):
+		return
+	var p: Dictionary = players[peer]
+	# Savasta/kilitli muhimmat degistirilemez
+	if float(p.combat_t) > clock or float(p.lock_t) > clock:
+		print("[SELECT AMMO] account_id=%d muhimmat degistirme REDDEDILDI (savasta/kilitli)" % int(p.account_id))
+		net.callv("rpc_id", [peer, "s_select_ammo_result", false, str(p.get("sel", "x1")), "Savasta muhimmat degistirilemez"])
+		return
+	# Muhimmat secimini guncelle
+	p.sel = ammo
+	print("[SELECT AMMO] account_id=%d muhimmat=%s" % [int(p.account_id), ammo])
+	net.callv("rpc_id", [peer, "s_select_ammo_result", true, ammo, ""])
+
+
 
 
 
@@ -480,6 +586,10 @@ func _kick_session(peer: int, reason: String) -> void:
 	# zaten olay aninda DB'ye yazildigi icin kaybolmaz. Kilit YENI oturumda oldugundan birakilmaz.
 	if not players.has(peer):
 		return
+	var p: Dictionary = players[peer]
+	var acct_id: int = int(p.get("account_id", 0))
+	var hash_old: String = str(p.get("_session_hash", ""))
+	print("[KICK] peer=%d acct=%d reason=%s hash_old=%s" % [peer, acct_id, reason, hash_old])
 	net.callv("rpc_id", [peer, "s_disconnect", reason])   # mevcut RPC; istemci mesaji gosterip baglantiyi keser
 	on_disconnect(peer, false)
 	var mp = net.multiplayer.multiplayer_peer
@@ -529,9 +639,21 @@ func on_disconnect(peer: int, release_lock: bool = true) -> void:
 
 
 func _maybe_free_world(map_name: String) -> void:
-	if worlds.has(map_name) and _players_in(map_name).is_empty():
+	if not worlds.has(map_name):
+		return
+	# Gercek oyuncular yok mu?
+	var real_empty: bool = _players_in(map_name).is_empty()
+	# Ghost oyuncusu var mi?
+	var ghost_here: bool = false
+	for gp in ghost_players.values():
+		if str(gp.p.map) == map_name:
+			ghost_here = true
+			break
+	if real_empty and not ghost_here:
 		worlds.erase(map_name)
 		print("[SUNUCU] Harita %s bos, NPC'ler temizlendi." % map_name)
+	elif ghost_here:
+		print("[GHOST_WORLD] Harita %s korundu (ghost var), NPC sayisi: %d" % [map_name, (worlds[map_name].npcs as Dictionary).size()])
 
 
 # ------------------------------------------------------------------ harita girisi
@@ -732,9 +854,11 @@ func on_jump(peer: int, to: String) -> void:
 # ------------------------------------------------------------------ oyuncu durumu
 func on_state(peer: int, x: float, z: float, yaw: float, hp: float, mhp: float, sh: float, msh: float, spd: float, ut: bool) -> void:
 	if not players.has(peer):
+		print("[FIRE_REJECT] peer=%d reason=not_in_players state" % peer)
 		return
 	var p: Dictionary = players[peer]
 	if str(p.map) == "":
+		print("[FIRE_REJECT] peer=%d acct=%d reason=map_empty state map=%s" % [peer, int(p.get("account_id", 0)), str(p.map)])
 		return
 	var m: Dictionary = maps[str(p.map)]
 	p.pos = Vector3(clampf(x, 0.0, float(m.w) * DOData.S), 0.0, clampf(z, 0.0, float(m.h) * DOData.S))
@@ -770,7 +894,11 @@ func on_drones(peer: int, form: String, drn: Array) -> void:
 
 # ------------------------------------------------------------------ savas
 func on_fire_vis(peer: int, kind: int, ref: int, nb: int, ammo: String) -> void:
-	if not players.has(peer) or str(players[peer].map) == "":
+	if not players.has(peer):
+		print("[FIRE_REJECT] peer=%d reason=not_in_players" % peer)
+		return
+	if str(players[peer].map) == "":
+		print("[FIRE_REJECT] peer=%d acct=%d reason=map_empty map=%s" % [peer, int(players[peer].get("account_id", 0)), str(players[peer].map)])
 		return
 	# Sunucu dogrulamasi: oyuncu salvosu PLAYER_FIRE_INTERVAL'dan sik olamaz. Jeton kovasi: ortalama hiz tam sinirda tutulur,
 	# ag gecikmesi yuzunden birikip gelen en fazla FIRE_BURST salvoya izin verilir. Fazlasi yayinlanmaz / saldiri sayilmaz.
@@ -792,7 +920,10 @@ func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
 		if gp != null:
 			gp.timer = DOData.COMBAT_LOGOUT_COMBAT_SEC
 			return  # timer yenilendi, hasar islenmeyecek (edge case)
+		print("[FIRE_REJECT] peer=%d reason=not_in_players hit_npc" % peer)
+		return
 	if not players.has(peer) or dmg <= 0.0 or dmg > 5.0e6:
+		print("[FIRE_REJECT] peer=%d acct=%d reason=invalid_dmg dmg=%s hit_npc" % [peer, int(players[peer].get("account_id", 0)), str(dmg)])
 		return
 	var p: Dictionary = players[peer]
 	if not worlds.has(str(p.map)):
@@ -1553,8 +1684,11 @@ func tick(dt: float) -> void:
 		for hb_pid in players.keys().duplicate():
 			var hb_p: Dictionary = players[hb_pid]
 			if hb_p.has("account_id") and str(hb_p.get("_session_hash", "")) != "":
+				var hash_cur: String = str(hb_p._session_hash)
 				var hb: Dictionary = db_send("renew_session_lock", {"account_id": int(hb_p.account_id), "session_token_hash": str(hb_p._session_hash)})
-				if hb.get("ok", false) and not hb.get("owned", true):
+				var owned: bool = hb.get("owned", true)
+				print("[HB_DEBUG] peer=%d acct=%d hash=%s ok=%s owned=%s" % [hb_pid, int(hb_p.account_id), hash_cur, str(hb.get("ok", false)), str(owned)])
+				if hb.get("ok", false) and not owned:
 					_kick_session(int(hb_pid), "Hesabına başka bir cihazdan girildi")
 		var cl: Dictionary = db_send("cleanup_stale_locks", {})
 		if cl.has("ok"):
@@ -1582,18 +1716,21 @@ func tick(dt: float) -> void:
 		g.timer -= dt
 		if g.timer <= 0.0:
 			var gp_p: Dictionary = g.p
-			if str(gp_p.map) != "":
-				_bcast(str(gp_p.map), "s_pleave", [gp])
-				if gp_p.has("account_id") and str(gp_p.map) != "":
+			var gp_map: String = str(gp_p.map)
+			if gp_map != "":
+				_bcast(gp_map, "s_pleave", [gp])
+				if gp_p.has("account_id") and gp_map != "":
 					var pos: Vector3 = gp_p.pos
 					if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
 						db_send("save_player_position", {
 							"account_id": int(gp_p.account_id),
-							"map_name": str(gp_p.map),
+							"map_name": gp_map,
 							"px": float(pos.x),
 							"pz": float(pos.z),
 						})
 			ghost_players.erase(gp)
+			if gp_map != "":
+				_maybe_free_world(gp_map)
 			print("[COMBAT LOGOUT] %s sure doldu, gemi haridan kaldirildi" % [str(gp_p.name)])
 
 func _tick_respawn(w: Dictionary, dt: float) -> void:
@@ -1732,6 +1869,24 @@ func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 		if score < tl:
 			tl = score
 			tgt = p
+	# Ghost oyuncularini da hedef olarak degerlendir
+	for gp in ghost_players.keys():
+		var gp_p: Dictionary = ghost_players[gp].p
+		gp_p["id"] = gp
+		if str(gp_p.map) != str(w.name) or bool(gp_p.in_safe) or bool(gp_p.ut):
+			continue
+		if int(e.owner) != 0 and int(gp) != int(e.owner):
+			continue
+		var dv: Vector3 = (gp_p.pos as Vector3) - (e.pos as Vector3)
+		dv.y = 0.0
+		var L: float = dv.length()
+		var ok: bool = (bool(d.aggr) and L < aggro_u) or (bool(e.aggro) and L < aggro_u * 3.0)
+		if not ok:
+			continue
+		var score: float = L - (1000.0 if int(gp) == int(e.target) else 0.0)
+		if score < tl:
+			tl = score
+			tgt = gp_p
 	if not tgt.is_empty():
 		var dvec: Vector3 = (tgt.pos as Vector3) - (e.pos as Vector3)
 		dvec.y = 0.0

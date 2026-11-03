@@ -168,6 +168,7 @@ func _process(dt: float) -> void:
 
 
 func _on_peer_gone(id: int) -> void:
+	print("[DISCONNECT] _on_peer_gone peer=%d" % id)
 	if is_server and srv != null:
 		srv.on_disconnect(id)
 
@@ -266,6 +267,7 @@ func disconnect_from_server() -> void:
 
 
 func _on_server_lost() -> void:
+	print("[DISCONNECT] _on_server_lost")
 	if is_server:
 		return
 	online = false
@@ -529,6 +531,9 @@ func s_disconnect(reason: String) -> void:
 	if is_server:
 		return
 	last_error = reason
+	print("[DISCONNECT] s_disconnect reason=%s peer=%d" % [reason, multiplayer.get_remote_sender_id()])
+	if game != null and is_instance_valid(game):
+		game.toast("Baglanti koptu: " + reason)
 	online = false
 	if multiplayer.multiplayer_peer != null:
 		multiplayer.multiplayer_peer.close()

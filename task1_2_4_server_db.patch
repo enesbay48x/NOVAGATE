@@ -1,0 +1,406 @@
+--- proj/server/server_db.py	2026-11-03 10:40:24.000000000 +0000
++++ out/server_db.py	2026-11-03 08:26:24.990178687 +0000
+@@ -477,25 +477,119 @@
+ # ---------------------------------------------------------------------------
+ # EKONOMIK ISLEM: SATIN ALMA (ATOMIC, BEGIN IMMEDIATE)
+ # ---------------------------------------------------------------------------
++# ---------------------------------------------------------------------------
++# MARKET KATALOGU (SUNUCU FIYATI) -- istemci data.gd ile AYNI (catalog.py'den uretildi)
++# ---------------------------------------------------------------------------
++CAT_SHIPS = {'defcom': (32000, 0),
++ 'goliath': (0, 80000),
++ 'leonov': (0, 9000),
++ 'liberator': (64000, 0),
++ 'nostromo': (100000, 0),
++ 'phoenix': (0, 0),
++ 'piranha': (80000, 0),
++ 'spearhead': (0, 80000),
++ 'vengeance': (0, 30000),
++ 'yamato': (16000, 0)}
++CAT_SHIP_HIDDEN = ['bigboy', 'aegis', 'citadel', 'police']
++CAT_LASERS = {'lf1': (65, 1000, 0),
++ 'lf2': (140, 50000, 0),
++ 'lf3': (150, 0, 10000),
++ 'lf4': (200, 0, 45000),
++ 'mp1': (70, 10000, 0)}
++CAT_SPD_GENS = {'g3n-1010': (2, 2000, 0),
++ 'g3n-2010': (3, 4000, 0),
++ 'g3n-3210': (4, 8000, 0),
++ 'g3n-3310': (5, 16000, 0),
++ 'g3n-6900': (7, 0, 1000),
++ 'g3n-7900': (10, 0, 8000)}
++CAT_SH_GENS = {'fs-01': (3200, 0.7, 256000, 0),
++ 'fs-02': (5600, 0.75, 2560000, 0),
++ 'sg3n-a01': (1000, 0.4, 8000, 0),
++ 'sg3n-a02': (2000, 0.5, 16000, 0),
++ 'sg3n-a03': (5000, 0.6, 256000, 0),
++ 'sg3n-b01': (9500, 0.7, 0, 2500),
++ 'sg3n-b02': (10000, 0.8, 0, 10000)}
++CAT_AMMO = {'job': (2.0, 500, 'uri'),
++ 'pib': (4.0, 9000, 'uri'),
++ 'rsb': (6.0, 5000, 'uri'),
++ 'sab': (2.0, 1000, 'uri'),
++ 'x1': (1.0, 10000, 'cr'),
++ 'x2': (2.0, 500, 'uri'),
++ 'x3': (3.0, 1000, 'uri'),
++ 'x4': (4.0, 4000, 'uri')}
++CAT_AMMO_PACKS = (1000, 10000, 50000)
++CAT_DRONE_PRICES = {'flax': ('cr', [100000, 200000, 400000, 800000, 1600000, 3200000, 6400000, 12800000, 20000000, 20000000]),
++ 'iris': ('uri', [15000, 24000, 42000, 60000, 84000, 96000, 126000, 200000, 375000, 589000])}
++CAT_MAX_DRONES = 10
++CAT_SELL_RATE = 0.4
++
++
++def _drone_total(conn, account_id: int) -> int:
++    ids = list(CAT_DRONE_PRICES.keys())
++    q = "SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE account_id = ? AND item_id IN (%s)" % ",".join("?" * len(ids))
++    return int(conn.execute(q, [account_id] + ids).fetchone()[0])
++
++
++def _item_kind(item_id: str) -> str:
++    if item_id in CAT_SHIPS or item_id in CAT_SHIP_HIDDEN:
++        return "ship"
++    if item_id in CAT_LASERS:
++        return "laser"
++    if item_id in CAT_SPD_GENS or item_id in CAT_SH_GENS:
++        return "gen"
++    if item_id in CAT_AMMO:
++        return "ammo"
++    if item_id in CAT_DRONE_PRICES:
++        return "drone"
++    return ""
++
++
++def _unit_price(item_id: str):
++    """Tek adetlik (cr, uri). Droid/cephane/gemi icin ayri hesap kullanilir."""
++    if item_id in CAT_LASERS:
++        return CAT_LASERS[item_id][1], CAT_LASERS[item_id][2]
++    if item_id in CAT_SPD_GENS:
++        return CAT_SPD_GENS[item_id][1], CAT_SPD_GENS[item_id][2]
++    if item_id in CAT_SH_GENS:
++        return CAT_SH_GENS[item_id][2], CAT_SH_GENS[item_id][3]
++    return 0, 0
++
++
++def drone_price(item_id: str, owned: int, n: int):
++    """Oyuncunun o turden `owned` droidi varken sonraki n droidin toplam fiyati -> (cr, uri) veya None."""
++    cur, seq = CAT_DRONE_PRICES[item_id]
++    if owned < 0 or owned + n > len(seq):
++        return None
++    tot = sum(seq[owned:owned + n])
++    return (tot, 0) if cur == "cr" else (0, tot)
++
++
+ def purchase_item(account_id: int, item_id: str, quantity: int, tx_id: str,
+-                  price_cr: int, price_uri: int) -> dict:
+-    """
+-    Atomik satin alma.
+-    - quantity negatif/sifir/gecersizse RED.
+-    - price_cr/price_uri SUNUCU TARAFINDAN hesaplanir (istemciden gelmez).
+-    - Ayni (account_id, tx_id) zaten varsa cached response dondurulur (idempotency).
+-    - Bakiye, envanter, transaction kaydi ayni BEGIN IMMEDIATE islemde.
++                  price_cr: int = 0, price_uri: int = 0) -> dict:
+     """
+-    if quantity <= 0:
++    SUNUCU-OTORITER market islemi. price_cr/price_uri parametreleri YOKSAYILIR (istemciye guvenilmez).
++    quantity > 0: satin alma, quantity < 0: satis (yalniz lazer/jenerator/droid; iade %40).
++    Gemi -> player_ships, cephane -> ammo, lazer/jenerator/droid -> inventory. Hepsi tek BEGIN IMMEDIATE
++    islemde (bakiye + kayit + transaction), ayni (account_id, tx_id) tekrar islenmez.
++    """
++    item_id = str(item_id)
++    kind = _item_kind(item_id)
++    if quantity == 0 or not kind:
++        return {"ok": False, "error": "invalid_item" if not kind else "invalid_quantity"}
++    selling = quantity < 0
++    n = abs(int(quantity))
++    if n > 100000:
++        return {"ok": False, "error": "invalid_quantity"}
++    if kind == "ship" and (item_id in CAT_SHIP_HIDDEN or selling or n != 1):
++        return {"ok": False, "error": "not_purchasable"}
++    if kind == "ammo" and (selling or n not in CAT_AMMO_PACKS):
++        return {"ok": False, "error": "invalid_pack"}
++    if kind in ("laser", "gen", "drone") and n > (CAT_MAX_DRONES if kind == "drone" else 1000):
+         return {"ok": False, "error": "invalid_quantity"}
+-    if price_cr < 0 or price_uri < 0:
+-        return {"ok": False, "error": "invalid_price"}
+ 
+     conn = get_db()
+     try:
+         conn.execute("BEGIN IMMEDIATE")
+-
+-        # Idempotency kontrolu
+         existing = conn.execute(
+             "SELECT response_payload FROM transactions WHERE account_id = ? AND tx_id = ?",
+             (account_id, tx_id),
+@@ -504,43 +598,91 @@
+             conn.execute("ROLLBACK")
+             return json.loads(existing["response_payload"])
+ 
+-        # Bakiye kontrolu
+         pd = conn.execute("SELECT cr, uri FROM player_data WHERE account_id = ?", (account_id,)).fetchone()
+         if not pd:
+             conn.execute("ROLLBACK")
+             return {"ok": False, "error": "account_not_found"}
+-        if pd["cr"] < price_cr or pd["uri"] < price_uri:
++
++        def fail(err):
+             conn.execute("ROLLBACK")
+-            return {"ok": False, "error": "insufficient_funds"}
++            return {"ok": False, "error": err}
+ 
+-        # Dusum
+-        conn.execute(
+-            "UPDATE player_data SET cr = cr - ?, uri = uri - ?, updated_at = ? WHERE account_id = ?",
+-            (price_cr, price_uri, now_ts(), account_id),
+-        )
++        def inv_qty(iid):
++            r = conn.execute("SELECT quantity FROM inventory WHERE account_id = ? AND item_id = ?", (account_id, iid)).fetchone()
++            return int(r[0]) if r else 0
++
++        cost_cr = cost_uri = 0     # alimda dusulen
++        gain_cr = gain_uri = 0     # satista eklenen
++        if kind == "ship":
++            if conn.execute("SELECT 1 FROM player_ships WHERE account_id = ? AND ship_id = ?", (account_id, item_id)).fetchone():
++                return fail("already_owned")
++            cost_cr, cost_uri = CAT_SHIPS[item_id]
++        elif kind == "ammo":
++            mult, per1000, cur = CAT_AMMO[item_id]
++            tot = per1000 * n // 1000
++            cost_cr, cost_uri = (tot, 0) if cur == "cr" else (0, tot)
++        elif kind == "drone":
++            owned_type = inv_qty(item_id)
++            if selling:
++                if owned_type < n:
++                    return fail("not_enough_items")
++                # satis: en son alinan n droidin fiyati uzerinden %40
++                cur, seq = CAT_DRONE_PRICES[item_id]
++                tot = sum(seq[owned_type - n:owned_type])
++                g = int(tot * CAT_SELL_RATE)
++                gain_cr, gain_uri = (g, 0) if cur == "cr" else (0, g)
++            else:
++                if _drone_total(conn, account_id) + n > CAT_MAX_DRONES:
++                    return fail("drone_limit")
++                p = drone_price(item_id, owned_type, n)
++                if p is None:
++                    return fail("drone_limit")
++                cost_cr, cost_uri = p
++        else:  # laser / gen
++            u_cr, u_uri = _unit_price(item_id)
++            if selling:
++                if inv_qty(item_id) < n:
++                    return fail("not_enough_items")
++                gain_cr, gain_uri = int(u_cr * CAT_SELL_RATE) * n, int(u_uri * CAT_SELL_RATE) * n
++            else:
++                cost_cr, cost_uri = u_cr * n, u_uri * n
++
++        if pd["cr"] < cost_cr or pd["uri"] < cost_uri:
++            return fail("insufficient_funds")
+ 
+-        # Envanter artisi
++        now = now_ts()
+         conn.execute(
+-            "INSERT INTO inventory (account_id, item_id, quantity) VALUES (?, ?, ?) "
+-            "ON CONFLICT(account_id, item_id) DO UPDATE SET quantity = quantity + excluded.quantity",
+-            (account_id, item_id, quantity),
++            "UPDATE player_data SET cr = cr - ? + ?, uri = uri - ? + ?, updated_at = ? WHERE account_id = ?",
++            (cost_cr, gain_cr, cost_uri, gain_uri, now, account_id),
+         )
++        if kind == "ship":
++            conn.execute("INSERT INTO player_ships (account_id, ship_id, acquired_at) VALUES (?, ?, ?)", (account_id, item_id, now))
++        elif kind == "ammo":
++            conn.execute(
++                "INSERT INTO ammo (account_id, ammo_id, quantity) VALUES (?, ?, ?) "
++                "ON CONFLICT(account_id, ammo_id) DO UPDATE SET quantity = quantity + excluded.quantity",
++                (account_id, item_id, n),
++            )
++        else:
++            delta = -n if selling else n
++            conn.execute(
++                "INSERT INTO inventory (account_id, item_id, quantity) VALUES (?, ?, ?) "
++                "ON CONFLICT(account_id, item_id) DO UPDATE SET quantity = quantity + excluded.quantity",
++                (account_id, item_id, delta),
++            )
+ 
+-        # Transaction kaydi
++        new_cr = int(pd["cr"]) - cost_cr + gain_cr
++        new_uri = int(pd["uri"]) - cost_uri + gain_uri
+         response_payload = json.dumps({
+-            "ok": True,
+-            "item_id": item_id,
+-            "quantity": quantity,
+-            "new_cr": pd["cr"] - price_cr,
+-            "new_uri": pd["uri"] - price_uri,
+-            "tx_id": tx_id,
++            "ok": True, "item_id": item_id, "kind": kind, "quantity": quantity,
++            "new_cr": new_cr, "new_uri": new_uri, "tx_id": tx_id,
+         })
+         conn.execute(
+             "INSERT INTO transactions (account_id, tx_id, type, amount_cr, amount_uri, item_id, item_qty, status, request_payload, response_payload, created_at) "
+-            "VALUES (?, ?, 'purchase', ?, ?, ?, ?, 'committed', ?, ?, ?)",
+-            (account_id, tx_id, -price_cr, -price_uri, item_id, quantity, "{}", response_payload, now_ts()),
++            "VALUES (?, ?, ?, ?, ?, ?, ?, 'committed', ?, ?, ?)",
++            (account_id, tx_id, "sale" if selling else "purchase", gain_cr - cost_cr, gain_uri - cost_uri,
++             item_id, quantity, "{}", response_payload, now),
+         )
+-
+         conn.execute("COMMIT")
+         return json.loads(response_payload)
+     except sqlite3.OperationalError as e:
+@@ -763,11 +905,13 @@
+ # SESSION LOCK (HEARTBEAT/LEASE)
+ # ---------------------------------------------------------------------------
+ def acquire_session_lock(account_id: int, session_token_hash: str, instance_id: str,
+-                         ttl_seconds: int = 1800) -> dict:
++                         ttl_seconds: int = 90) -> dict:
+     """
+-    Aktif oturum kilidi alir. Zaten aktif bir kilit varsa (ve bu instance'e ait degilse)
+-    {"ok": False, "error": "session_locked", "kick_required": True} dondurur.
+-    Basariliysa {"ok": True} dondurur.
++    TEK CIHAZ KURALI: yeni giris HER ZAMAN kazanir. Kilit oturuma (session_token_hash) baglidir,
++    sunucu surecine (instance_id) degil. BEGIN IMMEDIATE ile atomik: iki eszamanli giriste
++    sirayla islenir, son giren kilidi alir, bir oncekinin session hash'i 'previous_session'
++    olarak doner (sunucu o oturumu dusurur).
++    Donus: {"ok": True, "replaced": bool, "previous_session": str}
+     """
+     conn = get_db()
+     try:
+@@ -775,9 +919,6 @@
+         now = now_ts()
+         expires_at = now + ttl_seconds
+ 
+-        # [KILIT-FIX] session_locks.account_id -> accounts(id) FK'si var. Hesap auth DB'sinde
+-        # olusturuldugu icin oyun DB'sinde satir henuz olmayabilir; yoksa yer tutucu olustur
+-        # (load_player_state ile ayni degerler).
+         conn.execute(
+             "INSERT OR IGNORE INTO accounts (id, username, password_hash, faction, callsign, created_at) "
+             "VALUES (?, ?, '', 1, ?, ?)",
+@@ -803,31 +944,22 @@
+             log.warning("auth bilgisi senkronlanamadi (account_id=%s): %s", account_id, _e)
+ 
+         existing = conn.execute(
+-            "SELECT instance_id, updated_at, expires_at FROM session_locks WHERE account_id = ?",
++            "SELECT session_token, expires_at FROM session_locks WHERE account_id = ?",
+             (account_id,),
+         ).fetchone()
+-
+-        if existing:
+-            # Ayni instance'e aitse yenile
+-            if existing["instance_id"] == instance_id:
+-                conn.execute(
+-                    "UPDATE session_locks SET updated_at = ?, expires_at = ?, session_token = ? WHERE account_id = ?",
+-                    (now, expires_at, session_token_hash, account_id),
+-                )
+-                conn.execute("COMMIT")
+-                return True
+-            # Baska instance'e ait ve sure dolmamis ise kilitli; yeni giris bu kilidi alacak
+-            if now < existing["expires_at"]:
+-                conn.execute("ROLLBACK")
+-                return {"ok": False, "error": "session_locked", "kick_required": True}
+-            # Sure dolmus ise temizle ve al
++        previous = ""
++        replaced = False
++        if existing and existing["session_token"] != session_token_hash:
++            # Baska bir oturum kilidi tutuyor (suresi dolmus olsa da olmasa da) -> yeni giris devralir.
++            previous = existing["session_token"]
++            replaced = now < existing["expires_at"]
+         conn.execute(
+             "INSERT OR REPLACE INTO session_locks (account_id, session_token, locked_at, updated_at, expires_at, instance_id) "
+             "VALUES (?, ?, ?, ?, ?, ?)",
+             (account_id, session_token_hash, now, now, expires_at, instance_id),
+         )
+         conn.execute("COMMIT")
+-        return {"ok": True}
++        return {"ok": True, "replaced": replaced, "previous_session": previous}
+     except sqlite3.Error as e:
+         try:
+             conn.execute("ROLLBACK")
+@@ -835,6 +967,37 @@
+             pass
+         log.warning("acquire_session_lock HATA (%s): %s", type(e).__name__, e)
+         return {"ok": False, "error": "internal"}
++    finally:
++        conn.close()
++
++
++def renew_session_lock(account_id: int, session_token_hash: str, ttl_seconds: int = 90) -> dict:
++    """
++    Heartbeat: kilit HALA bu oturumdaysa suresini uzatir. Baska oturum devraldiysa
++    {"ok": True, "owned": False} doner -> sunucu bu oturumu dusurur.
++    """
++    conn = get_db()
++    try:
++        conn.execute("BEGIN IMMEDIATE")
++        now = now_ts()
++        cur = conn.execute(
++            "UPDATE session_locks SET updated_at = ?, expires_at = ? WHERE account_id = ? AND session_token = ?",
++            (now, now + ttl_seconds, account_id, session_token_hash),
++        )
++        owned = cur.rowcount == 1
++        conn.execute("COMMIT")
++        return {"ok": True, "owned": owned}
++    except sqlite3.Error as e:
++        try:
++            conn.execute("ROLLBACK")
++        except Exception:
++            pass
++        log.warning("renew_session_lock HATA: %s", e)
++        return {"ok": False, "error": "internal"}
++    finally:
++        conn.close()
++
++
+ def verify_and_consume_token(token: str, instance_id: str) -> dict | None:
+     """
+     Jetonu dogrular ve atomik olarak kullanildi olarak isaretler.
+@@ -916,17 +1079,21 @@
+         return None
+ 
+ 
+-def release_session_lock(account_id: int, instance_id: str) -> None:
++def release_session_lock(account_id: int, session_token_hash: str) -> None:
++    """Yalnizca kilit HALA bu oturuma aitse siler (eski oturum yeni oturumun kilidini silemez)."""
+     conn = get_db()
+     try:
+         conn.execute("BEGIN IMMEDIATE")
+         conn.execute(
+-            "DELETE FROM session_locks WHERE account_id = ? AND instance_id = ?",
+-            (account_id, instance_id),
++            "DELETE FROM session_locks WHERE account_id = ? AND session_token = ?",
++            (account_id, session_token_hash),
+         )
+         conn.execute("COMMIT")
+     except Exception:
+-        pass
++        try:
++            conn.execute("ROLLBACK")
++        except Exception:
++            pass
+     finally:
+         conn.close()
+ 
+@@ -941,8 +1108,8 @@
+         conn.execute("BEGIN IMMEDIATE")
+         now = now_ts()
+         cur = conn.execute(
+-            "DELETE FROM session_locks WHERE instance_id != ? AND expires_at < ?",
+-            (current_instance_id, now),
++            "DELETE FROM session_locks WHERE expires_at < ?",
++            (now,),
+         )
+         deleted = cur.rowcount
+         conn.execute("COMMIT")
+@@ -1281,8 +1448,13 @@
+                 resp = {"ok": False, "error": "invalid_or_expired_token"}
+             else:
+                 resp = {"ok": True, "account_id": resp["account_id"]}
++        elif method == "renew_session_lock":
++            resp = renew_session_lock(
++                int(msg.get("account_id", 0)),
++                msg.get("session_token_hash", ""),
++            )
+         elif method == "release_session_lock":
+-            release_session_lock(int(msg.get("account_id", 0)), msg.get("instance_id", instance_id))
++            release_session_lock(int(msg.get("account_id", 0)), msg.get("session_token_hash", ""))
+             resp = {"ok": True}
+         elif method == "cleanup_stale_locks":
+             resp = {"ok": True, "deleted": cleanup_stale_locks(instance_id)}

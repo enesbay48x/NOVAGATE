@@ -1,0 +1,13 @@
+--- proj/main.gd	2026-11-03 10:58:12.000000000 +0000
++++ out/main.gd	2026-11-03 08:22:57.638465082 +0000
+@@ -4242,8 +4242,8 @@
+ 		toast("Once bir hedef sec (dusmana tikla / Tab)")
+ 		return
+ 	fire = v
+-	if not v:
+-		target = null
++	# Ates birakilinca hedef kilidi KALIR. Hedef yalniz dusman olunce (tick), oyuncu bilerek
++	# birakinca (_stop_all: sag tik/Esc/geri) veya baska hedef secince degisir.
+ 
+ 
+ # Roket secimi: R tusu / roket slotu / ROKET butonu otomatik atisi acar-kapatir.

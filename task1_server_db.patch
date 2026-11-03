@@ -1,0 +1,160 @@
+--- proj/server/server_db.py	2026-11-03 10:40:24.000000000 +0000
++++ out/server_db.py	2026-11-03 08:20:23.490719368 +0000
+@@ -763,11 +763,13 @@
+ # SESSION LOCK (HEARTBEAT/LEASE)
+ # ---------------------------------------------------------------------------
+ def acquire_session_lock(account_id: int, session_token_hash: str, instance_id: str,
+-                         ttl_seconds: int = 1800) -> dict:
++                         ttl_seconds: int = 90) -> dict:
+     """
+-    Aktif oturum kilidi alir. Zaten aktif bir kilit varsa (ve bu instance'e ait degilse)
+-    {"ok": False, "error": "session_locked", "kick_required": True} dondurur.
+-    Basariliysa {"ok": True} dondurur.
++    TEK CIHAZ KURALI: yeni giris HER ZAMAN kazanir. Kilit oturuma (session_token_hash) baglidir,
++    sunucu surecine (instance_id) degil. BEGIN IMMEDIATE ile atomik: iki eszamanli giriste
++    sirayla islenir, son giren kilidi alir, bir oncekinin session hash'i 'previous_session'
++    olarak doner (sunucu o oturumu dusurur).
++    Donus: {"ok": True, "replaced": bool, "previous_session": str}
+     """
+     conn = get_db()
+     try:
+@@ -775,9 +777,6 @@
+         now = now_ts()
+         expires_at = now + ttl_seconds
+ 
+-        # [KILIT-FIX] session_locks.account_id -> accounts(id) FK'si var. Hesap auth DB'sinde
+-        # olusturuldugu icin oyun DB'sinde satir henuz olmayabilir; yoksa yer tutucu olustur
+-        # (load_player_state ile ayni degerler).
+         conn.execute(
+             "INSERT OR IGNORE INTO accounts (id, username, password_hash, faction, callsign, created_at) "
+             "VALUES (?, ?, '', 1, ?, ?)",
+@@ -803,31 +802,22 @@
+             log.warning("auth bilgisi senkronlanamadi (account_id=%s): %s", account_id, _e)
+ 
+         existing = conn.execute(
+-            "SELECT instance_id, updated_at, expires_at FROM session_locks WHERE account_id = ?",
++            "SELECT session_token, expires_at FROM session_locks WHERE account_id = ?",
+             (account_id,),
+         ).fetchone()
+-
+-        if existing:
+-            # Ayni instance'e aitse yenile
+-            if existing["instance_id"] == instance_id:
+-                conn.execute(
+-                    "UPDATE session_locks SET updated_at = ?, expires_at = ?, session_token = ? WHERE account_id = ?",
+-                    (now, expires_at, session_token_hash, account_id),
+-                )
+-                conn.execute("COMMIT")
+-                return True
+-            # Baska instance'e ait ve sure dolmamis ise kilitli; yeni giris bu kilidi alacak
+-            if now < existing["expires_at"]:
+-                conn.execute("ROLLBACK")
+-                return {"ok": False, "error": "session_locked", "kick_required": True}
+-            # Sure dolmus ise temizle ve al
++        previous = ""
++        replaced = False
++        if existing and existing["session_token"] != session_token_hash:
++            # Baska bir oturum kilidi tutuyor (suresi dolmus olsa da olmasa da) -> yeni giris devralir.
++            previous = existing["session_token"]
++            replaced = now < existing["expires_at"]
+         conn.execute(
+             "INSERT OR REPLACE INTO session_locks (account_id, session_token, locked_at, updated_at, expires_at, instance_id) "
+             "VALUES (?, ?, ?, ?, ?, ?)",
+             (account_id, session_token_hash, now, now, expires_at, instance_id),
+         )
+         conn.execute("COMMIT")
+-        return {"ok": True}
++        return {"ok": True, "replaced": replaced, "previous_session": previous}
+     except sqlite3.Error as e:
+         try:
+             conn.execute("ROLLBACK")
+@@ -835,6 +825,37 @@
+             pass
+         log.warning("acquire_session_lock HATA (%s): %s", type(e).__name__, e)
+         return {"ok": False, "error": "internal"}
++    finally:
++        conn.close()
++
++
++def renew_session_lock(account_id: int, session_token_hash: str, ttl_seconds: int = 90) -> dict:
++    """
++    Heartbeat: kilit HALA bu oturumdaysa suresini uzatir. Baska oturum devraldiysa
++    {"ok": True, "owned": False} doner -> sunucu bu oturumu dusurur.
++    """
++    conn = get_db()
++    try:
++        conn.execute("BEGIN IMMEDIATE")
++        now = now_ts()
++        cur = conn.execute(
++            "UPDATE session_locks SET updated_at = ?, expires_at = ? WHERE account_id = ? AND session_token = ?",
++            (now, now + ttl_seconds, account_id, session_token_hash),
++        )
++        owned = cur.rowcount == 1
++        conn.execute("COMMIT")
++        return {"ok": True, "owned": owned}
++    except sqlite3.Error as e:
++        try:
++            conn.execute("ROLLBACK")
++        except Exception:
++            pass
++        log.warning("renew_session_lock HATA: %s", e)
++        return {"ok": False, "error": "internal"}
++    finally:
++        conn.close()
++
++
+ def verify_and_consume_token(token: str, instance_id: str) -> dict | None:
+     """
+     Jetonu dogrular ve atomik olarak kullanildi olarak isaretler.
+@@ -916,17 +937,21 @@
+         return None
+ 
+ 
+-def release_session_lock(account_id: int, instance_id: str) -> None:
++def release_session_lock(account_id: int, session_token_hash: str) -> None:
++    """Yalnizca kilit HALA bu oturuma aitse siler (eski oturum yeni oturumun kilidini silemez)."""
+     conn = get_db()
+     try:
+         conn.execute("BEGIN IMMEDIATE")
+         conn.execute(
+-            "DELETE FROM session_locks WHERE account_id = ? AND instance_id = ?",
+-            (account_id, instance_id),
++            "DELETE FROM session_locks WHERE account_id = ? AND session_token = ?",
++            (account_id, session_token_hash),
+         )
+         conn.execute("COMMIT")
+     except Exception:
+-        pass
++        try:
++            conn.execute("ROLLBACK")
++        except Exception:
++            pass
+     finally:
+         conn.close()
+ 
+@@ -941,8 +966,8 @@
+         conn.execute("BEGIN IMMEDIATE")
+         now = now_ts()
+         cur = conn.execute(
+-            "DELETE FROM session_locks WHERE instance_id != ? AND expires_at < ?",
+-            (current_instance_id, now),
++            "DELETE FROM session_locks WHERE expires_at < ?",
++            (now,),
+         )
+         deleted = cur.rowcount
+         conn.execute("COMMIT")
+@@ -1281,8 +1306,13 @@
+                 resp = {"ok": False, "error": "invalid_or_expired_token"}
+             else:
+                 resp = {"ok": True, "account_id": resp["account_id"]}
++        elif method == "renew_session_lock":
++            resp = renew_session_lock(
++                int(msg.get("account_id", 0)),
++                msg.get("session_token_hash", ""),
++            )
+         elif method == "release_session_lock":
+-            release_session_lock(int(msg.get("account_id", 0)), msg.get("instance_id", instance_id))
++            release_session_lock(int(msg.get("account_id", 0)), msg.get("session_token_hash", ""))
+             resp = {"ok": True}
+         elif method == "cleanup_stale_locks":
+             resp = {"ok": True, "deleted": cleanup_stale_locks(instance_id)}

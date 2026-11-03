@@ -442,6 +442,9 @@ func _anim_drones(e, dt: float) -> void:
 		(d.node as Node3D).position = Vector3(o.x, o.y + 0.3 * sin(g.clock * 2.2 + float(d.ph)), o.z)
 		if bool(d.spin):
 			(d.node as Node3D).rotation.y += dt * 2.0
+		else:
+			var tilt: Vector2 = g.drone_fx_update(d.node as Node3D, float(d.ph), dt, 0.0, 0.0)
+			(d.node as Node3D).rotation = Vector3(tilt.x, 0.0, tilt.y)
 
 
 # Tiklanan noktada ayni sirketten bir oyuncu varsa onu dondurur (saldirilamaz uyarisi icin).

@@ -1,0 +1,141 @@
+--- proj/net_server.gd	2026-11-03 10:48:50.000000000 +0000
++++ out/net_server.gd	2026-11-03 08:27:55.925654765 +0000
+@@ -243,43 +243,24 @@
+ 		print("[SUNUCU] Banli hesap giris engellendi: account_id=%d" % acct_id)
+ 		return [false, "Hesap yasakli: " + str(ban_status.get("ban_reason", "bilinmeyen")), 0, "", 0, ""]
+ 
+-	# 2. Session lock al (eski oturumu temizle, yeni kilitle)
++	# 2. Session lock al: TEK CIHAZ KURALI -- yeni giren kazanir, eski oturum dusurulur.
++	#    Kilit oturuma (token hash) baglidir; sunucu db_send ile atomik devralir.
++	var session_hash: String = _hash_sha256(token)
+ 	var lock_resp: Dictionary = db_send("acquire_session_lock", {
+ 		"account_id": acct_id,
+-		"session_token_hash": _hash_sha256(token),
++		"session_token_hash": session_hash,
+ 		"instance_id": db_instance_id,
+ 	})
+-	# [KILIT-FIX] bos cevap = DB hatasi (gercek kilit degil)
+-	if lock_resp.is_empty() or not lock_resp.has("ok"):
+-		print("[SUNUCU] Session lock: DB cevap vermedi: account_id=%d" % acct_id)
++	if lock_resp.is_empty() or not lock_resp.has("ok") or lock_resp["ok"] == false:
++		print("[SUNUCU] Session lock alinamadi (DB): account_id=%d" % acct_id)
+ 		return [false, "Veritabani hatasi, lutfen tekrar dene", 0, "", 0, ""]
+-	if lock_resp["ok"] == false:
+-		if lock_resp.has("error") and lock_resp.error == "session_locked":
+-			# Yeni giris eski oturumu dusuruyor (tek cihaz kurali)
+-			var old_peer: int = 0
+-			for pid in players.keys():
+-				if int(players[pid].account_id) == acct_id:
+-					old_peer = int(pid)
+-					break
+-			if old_peer != 0:
+-				print("[SUNUCU] Eski oturum dusuruluyor: account_id=%d, eski_peer=%d" % [acct_id, old_peer])
+-				on_disconnect(old_peer)
+-				print("[SUNUCU] Eski oturum dusuruldu: account_id=%d, eski_peer=%d" % [acct_id, old_peer])
+-			# Kilidi tekrar al (eski kilit serbest besti)
+-			lock_resp = db_send("acquire_session_lock", {
+-				"account_id": acct_id,
+-				"session_token_hash": _hash_sha256(token),
+-				"instance_id": db_instance_id,
+-			})
+-			if lock_resp.is_empty() or not lock_resp.has("ok") or lock_resp["ok"] == false:
+-				print("[SUNUCU] Session lock tekrar denemesi basarisiz: account_id=%d" % acct_id)
+-				return [false, "Hesap baska bir oturumda calisiyor", 0, "", 0, ""]
+-			print("[SUNUCU] Session lock tekrar alindandi: account_id=%d" % acct_id)
+-		else:
+-			print("[SUNUCU] Session lock reddedildi: account_id=%d" % acct_id)
+-			return [false, "Hesap baska bir oturumda calisiyor", 0, "", 0, ""]
+-	else:
+-		print("[SUNUCU] Session lock alindi: account_id=%d" % acct_id)
++	print("[SUNUCU] Session lock alindi: account_id=%d, devralindi=%s" % [acct_id, str(lock_resp.get("replaced", false))])
++	# Bu sunucuda ayni hesabin eski oturumu varsa ONCE onu kaydedip dusur (yeni oturum
++	# ancak ondan sonra DB'den veri yukler -> konum/envanter/bakiye kaybi olmaz).
++	for old_pid in players.keys().duplicate():
++		if int(old_pid) != peer_id and int(players[old_pid].get("account_id", -1)) == acct_id:
++			print("[SUNUCU] Eski oturum dusuruluyor: account_id=%d, eski_peer=%d" % [acct_id, int(old_pid)])
++			_kick_session(int(old_pid), "Hesabına başka bir cihazdan girildi")
+ 
+ 	# 3. Oyuncu durumunu veritabanindan yukle
+ 	var state_resp: Dictionary = db_send("load_player_state", {
+@@ -322,6 +303,7 @@
+ 		"_sv_quests": ps.get("quests", {}),    # gorevler (rutbe hesabi)
+ 		"_sv_rank": 0,    # rutbe rozeti (1..21), _calculate_ranks ile doldurulur
+ 		"_sv_owned": ps.get("owned", [str(ps.get("ship", "phoenix"))]),  # sahip oldugu gemiler
++		"_session_hash": session_hash,   # tek cihaz kurali: bu oturumun kilit kimligi
+ 	}
+ 
+ 	print("[SUNUCU] Token dogrulandi: peer=%d, account_id=%d, callsign=%s" % [peer_id, acct_id, str(ps.get("callsign", "Gezgin"))])
+@@ -362,7 +344,7 @@
+ 	# Token asamasinda yuklenen sunucu ekonomi/profil kopyasini KORU (odul kaybi olmasin).
+ 	for _k in ["_sv_cr", "_sv_uri", "_sv_xp", "_sv_hon", "_sv_sep", "_sv_kills",
+ 			"_sv_pvp_kills", "_sv_settings", "_sv_inventory", "_sv_admin",
+-			"_sv_rank", "_sv_reg_ts", "_sv_rank_pen", "_sv_quests", "_sv_owned"]:
++			"_sv_rank", "_sv_reg_ts", "_sv_rank_pen", "_sv_quests", "_sv_owned", "_session_hash"]:
+ 		if old_p.has(_k):
+ 			players[peer][_k] = old_p[_k]
+ 	if ghosts.has(nm.to_lower()):
+@@ -402,13 +384,25 @@
+ 		_bcast(str(p.map), "s_pjoin", [_player_info(p)], peer)
+ 
+ 
+-func on_disconnect(peer: int) -> void:
++func _kick_session(peer: int, reason: String) -> void:
++	# Tek cihaz kurali: oturumu dusur. Kayit (konum) on_disconnect icinde yazilir; envanter/bakiye
++	# zaten olay aninda DB'ye yazildigi icin kaybolmaz. Kilit YENI oturumda oldugundan birakilmaz.
++	if not players.has(peer):
++		return
++	net.callv("rpc_id", [peer, "s_disconnect", reason])   # mevcut RPC; istemci mesaji gosterip baglantiyi keser
++	on_disconnect(peer, false)
++	var mp = net.multiplayer.multiplayer_peer
++	if mp != null:
++		mp.disconnect_peer(peer)   # guvenlik agi (reliable paket once gider)
++
++
++func on_disconnect(peer: int, release_lock: bool = true) -> void:
+ 	if not players.has(peer):
+ 		return
+ 	var p: Dictionary = players[peer]
+-	# [KILIT-FIX] oyuncu ayrilinca oturum kilidini birak
+-	if p.has("account_id"):
+-		db_send("release_session_lock", {"account_id": int(p["account_id"]), "instance_id": db_instance_id})
++	# Oturum kilidini YALNIZCA kendi oturumuysa birak (eski oturum yeni oturumun kilidini silemez)
++	if release_lock and p.has("account_id") and str(p.get("_session_hash", "")) != "":
++		db_send("release_session_lock", {"account_id": int(p["account_id"]), "session_token_hash": str(p["_session_hash"])})
+ 	var old_map: String = str(p.map)
+ 	_remove_from_group(peer, false)
+ 	invites.erase(peer)
+@@ -1403,10 +1397,16 @@
+ 					# Haritadaki diger oyunculara guncellenen oyuncu bilgisini gonder
+ 					if str(p.map) != "" and worlds.has(str(p.map)):
+ 						_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
+-	# Bayat session kilitlerini temizle (sunucu çöküp kalabilen kilitler, zaman asimi ile)
++	# Bayat session kilitlerini temizle + heartbeat (kilit TTL 90 sn, 30 sn'de bir yenilenir)
+ 	stale_lock_t += dt
+ 	if stale_lock_t >= 30.0:
+ 		stale_lock_t = 0.0
++		for hb_pid in players.keys().duplicate():
++			var hb_p: Dictionary = players[hb_pid]
++			if hb_p.has("account_id") and str(hb_p.get("_session_hash", "")) != "":
++				var hb: Dictionary = db_send("renew_session_lock", {"account_id": int(hb_p.account_id), "session_token_hash": str(hb_p._session_hash)})
++				if hb.get("ok", false) and not hb.get("owned", true):
++					_kick_session(int(hb_pid), "Hesabına başka bir cihazdan girildi")
+ 		var cl: Dictionary = db_send("cleanup_stale_locks", {})
+ 		if cl.has("ok"):
+ 			print("[SUNUCU] Bayat kilit temizlendi: %d adet" % cl.get("deleted", 0))
+@@ -1772,13 +1772,14 @@
+ 		"item_id": item_id,
+ 		"quantity": quantity,
+ 		"tx_id": tx_id,
+-		"price_cr": 0,
+-		"price_uri": 0,
++		# Fiyati sunucu (server_db.py katalogu) kendisi hesaplar; istemciden fiyat alinmaz.
+ 	})
+ 	if resp.has("ok") and resp.get("ok", false):
+ 		# Bellekteki sunucu kopyasini guncelle
+ 		p["_sv_cr"] = int(resp.get("new_cr", p.get("_sv_cr", 0)))
+ 		p["_sv_uri"] = int(resp.get("new_uri", p.get("_sv_uri", 0)))
++		if str(resp.get("kind", "")) == "ship" and not (item_id in p.get("_sv_owned", [])):
++			p["_sv_owned"].append(item_id)   # sunucu gemi dogrulamasi icin sahip listesi
+ 		# Mermi/envanter odulunu istemciye bildir
+ 		net.callv("rpc_id", [peer, "s_purchase_result", true, "", tx_id, int(resp.get("new_cr", 0)), int(resp.get("new_uri", 0))])
+ 	else:
