@@ -550,7 +550,11 @@ func _calculate_ranks() -> void:
 			var idx: int = RankSys.rank_index(pos, counts)
 			var rank_num: int = RankSys.icon_id(idx)   # 1..20
 			var p: Dictionary = players[e.pid]
+			var old_rank: int = int(p.get("_sv_rank", 0))
 			p["_sv_rank"] = rank_num
+			if rank_num != old_rank and str(p.map) != "":
+				# Rozette degisiklik var: haritadaki diger oyuncularin plakalarini guncelle (mevcut s_pjoin RPC'si, yeni RPC yok).
+				_bcast(str(p.map), "s_pjoin", [_player_info(p)], e.pid)
 
 
 

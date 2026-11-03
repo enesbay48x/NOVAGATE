@@ -1938,7 +1938,6 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 		"forms": ps.get("forms", ["std"]),
 		"loads": ps.get("loads", {}),
 		"cfgi": int(ps.get("cfg_index", 0)),
-		"free": bool(ps.get("free_mode", false)),
 		"quests": ps.get("quests", {}),
 		"skills": ps.get("skills", {}),
 		"skill_points": int(ps.get("skill_points", 0)),

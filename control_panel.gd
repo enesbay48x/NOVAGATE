@@ -98,7 +98,6 @@ var lbl_section: Label
 var lbl_cr: Label
 var lbl_uri: Label
 var lbl_lvl: Label
-var chip_test: Control
 
 var hang_list: VBoxContainer
 var hang_cfg: HFlowContainer
@@ -468,8 +467,6 @@ func _form_tex(code: String) -> Texture2D:
 
 
 func _cost_txt(cr: int, uri: int) -> String:
-	if bool(game.SV.free):
-		return "ÜCRETSİZ (test)"
 	if uri > 0:
 		return "%s Uridium" % game._n(uri)
 	if cr > 0:
@@ -492,8 +489,6 @@ func _compact_num(v: int) -> String:
 
 
 func _compact_cost(cr: int, uri: int) -> String:
-	if bool(game.SV.free):
-		return "Ücretsiz (test)"
 	if uri > 0:
 		return "%s Uri" % _compact_num(uri)
 	if cr > 0:
@@ -602,13 +597,6 @@ func _build_header() -> Control:
 	var sp := Control.new()
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	h.add_child(sp)
-
-	var tp := _panel("PanelNote")
-	var tl := _mk("TEST MODU", 11, NEON_ORANGE)
-	tl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	tp.add_child(tl)
-	chip_test = tp
-	h.add_child(tp)
 
 	var c1 := _chip("KREDİ", GOLD)
 	lbl_cr = c1[1]
@@ -1279,9 +1267,9 @@ func _refresh_skills() -> void:
 	var btns := HBoxContainer.new()
 	btns.add_theme_constant_override("separation", 6)
 	for n in [1, 10, 100]:
-		var can_buy: bool = tot < ST.MAX_POINTS and (bool(SV.get("free", false)) or int(SV.uri) >= n * ST.LOGDISK_URI)
+		var can_buy: bool = tot < ST.MAX_POINTS and int(SV.uri) >= n * ST.LOGDISK_URI
 		btns.add_child(_btn("+%d DISK\n%s U" % [n, game._n(float(n * ST.LOGDISK_URI))], "ButtonGold" if can_buy else "Button", _buy_disk.bind(n), Vector2(92, 46), can_buy, 11))
-	var can_reset: bool = spent > 0 and (bool(SV.get("free", false)) or int(SV.uri) >= game.reset_cost_uri())
+	var can_reset: bool = spent > 0 and int(SV.uri) >= game.reset_cost_uri()
 	btns.add_child(_btn("SIFIRLA\n%s U" % game._n(float(game.reset_cost_uri())), "Button", _reset_skills, Vector2(92, 46), can_reset, 11))
 	right.add_child(btns)
 	skill_bar.add_child(right)
@@ -1355,7 +1343,7 @@ func _refresh_skill_detail() -> void:
 		cost_txt = "\n%s Kr" % game._n(float(cst.cr))
 		if int(cst.sep) > 0:
 			cost_txt += " + %s Sp" % game._n(float(cst.sep))
-		var rich: bool = bool(game.SV.get("free", false)) or (int(game.SV.cr) >= int(cst.cr) and int(game.SV.get("seprom", 0)) >= int(cst.sep))
+		var rich: bool = int(game.SV.cr) >= int(cst.cr) and int(game.SV.get("seprom", 0)) >= int(cst.sep)
 		can_spend = req_ok and game.rd_free() > 0 and rich
 	var spend := _btn("TAMAMLANDI" if maxed else "1 PUAN YÜKLE" + cost_txt, "ButtonGold" if can_spend else "Button", _spend_skill.bind(id), Vector2(150, 50), can_spend, 11)
 	spend.size_flags_vertical = Control.SIZE_SHRINK_CENTER
@@ -2295,7 +2283,7 @@ func _auc_side_build(A, lot: Dictionary) -> void:
 	ed.text_changed.connect(func(t: String) -> void: auc_bid_txt = t)
 	auc_side.add_child(ed)
 	auc_bid_edit = ed
-	var can: bool = open and not bool(game.SV.get("free", false))
+	var can: bool = open
 	auc_side.add_child(_btn("TEKLİF VER", "ButtonPrimary", _auc_do_bid, Vector2(0, 32), can, 12))
 	var sep := _line()
 	auc_side.add_child(sep)
