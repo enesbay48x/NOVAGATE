@@ -2092,7 +2092,7 @@ func _build_plate() -> void:
 
 
 # Diger oyunculara ait 2D isim plakasi: [sirket logosu] + isim. (Kendi plakanla ayni mantik; logo_sm yoksa logo_<sirket> kullanilir.)
-func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false) -> Control:
+func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false, rank: int = 0) -> Control:
 	if plate_layer == null or not is_instance_valid(plate_layer):
 		return null
 	var box := HBoxContainer.new()
@@ -2109,7 +2109,7 @@ func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false)
 	lb.add_theme_color_override("font_color", col)
 	lb.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	lb.add_theme_constant_override("outline_size", 3)
-	# Rutbe rozeti (admin -> rank_21.png) - isimden ONCE
+	# Rutbe rozeti: admin -> rank_21.png, digerleri -> rank_1..rank_20 - isimden ONCE
 	if bool(is_admin):
 		var ar := TextureRect.new()
 		ar.custom_minimum_size = Vector2(11, 11)
@@ -2119,6 +2119,16 @@ func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false)
 		ar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		ar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ar.texture = _tex(RankSys.ICON_PATH % RankSys.ADMIN_ICON)
+		box.add_child(ar)
+	elif rank > 0:
+		var ar := TextureRect.new()
+		ar.custom_minimum_size = Vector2(11, 11)
+		ar.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ar.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ar.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		ar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		ar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ar.texture = _tex(RankSys.ICON_PATH % rank)
 		box.add_child(ar)
 	# Isim (ortada)
 	box.add_child(lb)
@@ -2395,13 +2405,11 @@ func spend_skill_point(skill_id: String) -> bool:
 		toast("Önce ön koşul yeteneklerini geliştir.")
 		return false
 	var cost := SkillTree.level_cost(sk, rank + 1)
-	var is_free := bool(SV.get("free", false))
-	if not is_free:
-		if int(SV.cr) < int(cost.cr) or int(SV.get("seprom", 0)) < int(cost.sep):
-			toast("Yetersiz bakiye: %s Kredi + %s Seprom gerekli." % [_n(float(cost.cr)), _n(float(cost.sep))])
-			return false
-		SV.cr -= int(cost.cr)
-		SV.seprom = int(SV.get("seprom", 0)) - int(cost.sep)
+	if int(SV.cr) < int(cost.cr) or int(SV.get("seprom", 0)) < int(cost.sep):
+		toast("Yetersiz bakiye: %s Kredi + %s Seprom gerekli." % [_n(float(cost.cr)), _n(float(cost.sep))])
+		return false
+	SV.cr -= int(cost.cr)
+	SV.seprom = int(SV.get("seprom", 0)) - int(cost.sep)
 	var old_hp := max_hp()
 	SV.skills[skill_id] = rank + 1
 	if P != null:
@@ -2526,10 +2534,11 @@ func ensure_loadout() -> void:
 		SV.loads = {}
 	if not SV.has("cfgi"):
 		SV.cfgi = 0
-	if not SV.has("free"):
-		SV.free = false
 	SV.cfgi = clampi(int(SV.cfgi), 0, 1)
 	var fresh := false
+	# Eski kayitlarda free=true kalmissa kapalila: test modu kalici olarak kaldirildi.
+	if SV.has("free") and bool(SV.free):
+		SV.free = false
 	var ship_id := str(SV.get("ship", "phoenix"))
 	var cur = SV.loads.get(ship_id, null)
 	if typeof(cur) == TYPE_DICTIONARY and (cur as Dictionary).has("las"):
@@ -2982,12 +2991,10 @@ func loadout_text() -> String:
 
 
 func can_pay(cr: int, uri: int) -> bool:
-	return bool(SV.free) or (int(SV.cr) >= cr and int(SV.uri) >= uri)
+	return int(SV.cr) >= cr and int(SV.uri) >= uri
 
 
 func pay(cr: int, uri: int) -> bool:
-	if bool(SV.free):
-		return true
 	if int(SV.cr) < cr or int(SV.uri) < uri:
 		toast("Yetersiz bakiye!")
 		return false
@@ -3102,7 +3109,7 @@ func buy_rockets(n: int) -> bool:
 
 
 func service_repair() -> void:
-	var cost := 0 if bool(SV.free) else int((max_hp() - P.hp) / 40.0)
+	var cost := int((max_hp() - P.hp) / 40.0)
 	if not pay(cost, 0):
 		return
 	P.hp = max_hp()
@@ -3112,8 +3119,6 @@ func service_repair() -> void:
 
 
 func repair_cost() -> int:
-	if bool(SV.free):
-		return 0
 	return int((max_hp() - P.hp) / 40.0)
 
 
@@ -4119,14 +4124,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				dohud.toggle_contacts()
 			KEY_ENTER, KEY_KP_ENTER:
 				dohud.focus_chat()
-			KEY_F9:
-				if bool(SV.get("free", false)):
-					SV.cr += 1000000
-					SV.uri += 200000
-					toast("Test parası eklendi: +1.000.000 kredi, +200.000 uridium")
-					save_game()
-				else:
-					toast("F9 yalnızca Ayarlar'da TEST MODU açıkken çalışır.")
 
 
 func _ground_at(pos: Vector2):
@@ -5460,7 +5457,8 @@ func _process(dt: float) -> void:
 		_update_jump_fx(dt)
 		_update_game(dt)
 	else:
-		cam.look_at_from_position(Vector3(0, 80, 80), Vector3.ZERO, Vector3.UP)
+		if cam != null:
+			cam.look_at_from_position(Vector3(0, 80, 80), Vector3.ZERO, Vector3.UP)
 	_update_bars3d()
 	_update_bg()
 	MapBg.apply_vision(self)
@@ -5515,7 +5513,8 @@ func _process(dt: float) -> void:
 		var age: float = float(ts.max) - float(ts.life)
 		tl.position = Vector2(tvs.x * 0.5 - 350.0, 176.0 + float(ts.off) - age * 20.0)
 		tl.modulate.a = clampf(float(ts.life) / 1.2, 0.0, 1.0)
-	lbl_toast.text = ""
+	if lbl_toast != null:
+		lbl_toast.text = ""
 
 
 func _update_heading(dt: float, pn: Node3D, po: Vector3) -> void:

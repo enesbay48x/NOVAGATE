@@ -971,7 +971,7 @@ def get_account_status(account_id: int) -> dict:
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT is_banned, ban_until, ban_reason, is_muted, mute_until FROM accounts WHERE id = ?",
+            "SELECT is_banned, ban_until, ban_reason, is_muted, mute_until, is_admin FROM accounts WHERE id = ?",
             (account_id,),
         ).fetchone()
         if not row:
@@ -986,6 +986,7 @@ def get_account_status(account_id: int) -> dict:
             "mute_until": row["mute_until"] or 0,
             "ban_active": bool(row["is_banned"]) and (row["ban_until"] == 0 or now < row["ban_until"]),
             "mute_active": bool(row["is_muted"]) and (row["mute_until"] == 0 or now < row["mute_until"]),
+            "is_admin": bool(row["is_admin"]),
         }
     except Exception as e:
         log.error("get_account_status hata: %s", e)
@@ -1012,6 +1013,34 @@ def get_player_balance(account_id: int) -> dict:
         }
     except Exception as e:
         log.error("get_player_balance hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+def admin_ship(account_id: int, ship_id: str, add: bool) -> dict:
+    """Adminlik degisikliginde police gemisini owned listesine ekle/çıkar."""
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if add:
+            conn.execute(
+                "INSERT OR IGNORE INTO player_ships (account_id, ship_id, acquired_at) VALUES (?, ?, ?)",
+                (account_id, ship_id, now_ts()),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM player_ships WHERE account_id = ? AND ship_id = ?",
+                (account_id, ship_id),
+            )
+        conn.execute("COMMIT")
+        return {"ok": True}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("admin_ship hata: %s", e)
         return {"ok": False, "error": "internal"}
     finally:
         conn.close()
@@ -1260,6 +1289,12 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
             resp = get_account_status(int(msg.get("account_id", 0)))
         elif method == "get_player_balance":
             resp = get_player_balance(int(msg.get("account_id", 0)))
+        elif method == "admin_ship":
+            resp = admin_ship(
+                int(msg.get("account_id", 0)),
+                str(msg.get("ship", "")),
+                bool(msg.get("add", False)),
+            )
         elif method == "save_player_position":
             resp = save_player_position(
                 int(msg.get("account_id", 0)),

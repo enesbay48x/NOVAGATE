@@ -313,6 +313,7 @@ func add_player(info: Array) -> void:
 	var nm: String = str(info[1])
 	var fac: int = int(info[2])
 	var is_adm: bool = info.size() > 13 and int(info[13]) == 1
+	var rank: int = int(info[14]) if info.size() > 14 and int(info[14]) > 0 else 0
 	var pos := Vector3(float(info[4]), 0.0, float(info[5]))
 	var enemy: bool = fac != int(g.SV.get("faction", 1))
 	var node: Node3D = g.make_ship(str(info[3]), 6.0, g.ship_faction_tint(fac))
@@ -326,7 +327,7 @@ func add_player(info: Array) -> void:
 	nt.outline_size = 7
 	nt.outline_modulate = Color(0, 0, 0, 0.9)
 	node.add_child(nt)
-	var plate = g.make_remote_plate(nm, fac, col, is_adm)
+	var plate = g.make_remote_plate(nm, fac, col, is_adm, rank)
 	if plate != null:
 		nt.visible = false
 	var d: Dictionary = {"name": nm, "model": str(info[3]), "sz": 6.0, "hp": float(info[8]), "sh": float(info[10]),

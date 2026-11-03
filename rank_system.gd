@@ -34,7 +34,7 @@ const SHIP_COEFF := {
 # Admin rozeti isme göre VERİLMEZ (ADMIN adlı hesap da normal sıralamaya girer).
 # Sadece kayıtta elle "admin_rank": true yazılan hesap A rozetini alır.
 static func is_admin(sv: Dictionary) -> bool:
-	return bool(sv.get("admin_rank", false))
+	return bool(sv.get("admin_rank", false)) or bool(sv.get("is_admin", 0))
 
 
 static func icon_id(idx: int) -> int:

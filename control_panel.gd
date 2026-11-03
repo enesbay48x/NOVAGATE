@@ -68,7 +68,6 @@ const HELP_KEYS := [
 	["M", "Galaksi haritası."],
 	["H", "Kontrol yazısını aç/kapat."],
 	["Tekerlek", "Yakınlaştır / uzaklaştır."],
-	["F9", "Yalnızca test parası."],
 ]
 const HELP_NOTES := [
 	["HANGAR / TEÇHİZAT", "Mevcut gemileri, envanteri, lazerleri, jeneratörleri, droidleri, iki konfigürasyonu ve formasyonları yönet. Mağaza satın alımları yerel kayda yazılır. Görevler ve yetenek puanları da bu kayıt dosyasında saklanır."],
@@ -735,7 +734,6 @@ func refresh() -> void:
 	lbl_cr.text = str(game._n(game.SV.cr))
 	lbl_uri.text = str(game._n(game.SV.uri))
 	lbl_lvl.text = str(lvl)
-	chip_test.visible = bool(game.SV.free)
 	lbl_foot.text = "Gemi: %s     •     Harita: %s     •     Çağrı adı: %s" % [str(def.name), str(game.SV.map), str(game.SV.get("callsign", "Gezgin"))]
 	match cur_tab:
 		"shop":
@@ -913,7 +911,7 @@ func _refresh_shop() -> void:
 	if qty_btns.has(shop_qty):
 		qty_btns[shop_qty].button_pressed = true
 	_clear(shop_body)
-	shop_note.text = ("TEST MODU: her şey ücretsiz (Ayarlar'dan kapat)" if bool(game.SV.free) else "Satış iadesi: %40   •   Bakiyen üst çubukta")
+	shop_note.text = "Satış iadesi: %40   •   Bakiyen üst çubukta"
 	match shop_cat:
 		"ships":
 			var grid := _shop_grid()
@@ -2300,8 +2298,6 @@ func _auc_side_build(A, lot: Dictionary) -> void:
 	auc_side.add_child(sep)
 	auc_side.add_child(_mk("Hemen Al: %s U" % game._n(float(lot["instant"])), 12, ICE_WHITE))
 	auc_side.add_child(_btn("HEMEN AL", "ButtonGold", _auc_do_buy, Vector2(0, 32), can, 12))
-	if bool(game.SV.get("free", false)):
-		auc_side.add_child(_wrap("Test parası modunda kapalı.", 10, RED))
 	auc_side.add_child(_mk("TEKLİF GEÇMİŞİ", 10, Color(0.45, 0.58, 0.72)))
 	var bids: Array = lot["bids"]
 	if bids.is_empty():
@@ -2397,7 +2393,6 @@ func _refresh_settings() -> void:
 	zr.add_child(sl)
 
 	set_body.add_child(_mk("OYNANIŞ", 13, GOLD))
-	_toggle_row(set_body, "TEST MODU", "Mağazadaki her şey ücretsiz olur.", bool(game.SV.free), _set_free)
 
 	set_body.add_child(_wrap("Ses ayarları yok: bu projede ses/AudioBus kaynağı bulunmuyor.   •   Masaüstü: fare + klavye   •   Dokunmatik: ekrana dokunarak hareket/hedef seçimi", 11, DIM))
 
@@ -2415,13 +2410,6 @@ func _set_fullscreen(on: bool) -> void:
 	else:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 	_store_setting("fullscreen", on)
-
-
-func _set_free(on: bool) -> void:
-	game.SV.free = on
-	game.toast("Test modu: " + ("AÇIK (her şey ücretsiz)" if on else "KAPALI"))
-	game.save_game()
-	refresh()
 
 
 func _set_stars(on: bool) -> void:

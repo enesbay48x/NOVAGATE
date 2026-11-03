@@ -194,20 +194,13 @@ func _start_cd(id: String) -> void:
 	cd[id] = cd_total(id)
 
 
-# Test modu (Ayarlar > TEST MODU) aciksa ozel esyalar ucretsizdir.
-func _is_free() -> bool:
-	return game != null and not game.SV.is_empty() and bool(game.SV.get("free", false))
-
-
-# Mesajlarda gosterilecek gercek ucret (test modunda 0).
+# Mesajlarda gosterilecek gercek ucret.
 func _paid(id: String) -> int:
-	return 0 if _is_free() else int(DEFS[id].price)
+	return int(DEFS[id].price)
 
 
 # Uridium kontrolu + tahsilat. Sadece kullanim BASARILI olacagi kesinlestikten sonra cagrilir.
 func _charge(id: String) -> bool:
-	if _is_free():
-		return true   # TEST MODU: ucretsiz, Uridium dusmez
 	var price: int = int(DEFS[id].price)
 	if int(game.SV.uri) < price:
 		game.toast("%s için yeterli Uridium yok (gerekli: %d)." % [str(DEFS[id].name), price])

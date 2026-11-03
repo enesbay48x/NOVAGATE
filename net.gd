@@ -380,7 +380,12 @@ func c_join(proto: int, nm: String, faction: int, ship: String) -> void:
 @rpc("any_peer", "call_remote", "reliable")
 func c_ship(ship: String) -> void:
 	if is_server and srv != null:
-		srv.on_ship(multiplayer.get_remote_sender_id(), ship)
+		var id: int = multiplayer.get_remote_sender_id()
+		if srv.players.has(id):
+			var p: Dictionary = srv.players[id]
+			if ship == "police" and not bool(p.get("_sv_admin", 0)):
+				return   # Police sadece admin icin: istemciye guvenilmez
+		srv.on_ship(id, ship)
 
 
 @rpc("any_peer", "call_remote", "reliable")

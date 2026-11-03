@@ -9,6 +9,7 @@ const DOData := preload("res://data.gd")
 const Auction := preload("res://auction.gd")
 const SafeZone := preload("res://safe_zone.gd")
 const SkillTree := preload("res://skill_tree.gd")
+const RankSys := preload("res://rank_system.gd")
 
 # ---- SUNUCU DB KOPRUSU (TCP/JSON, 127.0.0.1:54321) ---------------------------
 const DB_HOST := "127.0.0.1"
@@ -44,6 +45,8 @@ var npc_override_t: float = 0.0   # son npc_overrides okuma zamani
 var ban_tick_t: float = 0.0   # ban kick tick sayaci
 var balance_tick_t: float = 0.0   # online oyuncu bakiye senkronizasyon sayaci
 var pos_save_t: float = 0.0   # oyuncu konumu periyodik kayit sayaci
+var rank_t: float = 0.0       # rütbe yeniden hesaplama sayaci (60 sn'de bir)
+var admin_tick_t: float = 0.0 # admin durumu yenileme sayaci (30 sn'de bir)
 var npc_overrides: Dictionary = {}   # map_id -> npc_count (admin panelden)
 var reward_run_id: String = ""        # her sunucu acilisinda benzersiz odul olay kimligi
 var next_box_id: int = 1              # kutular dunya yeniden kurulsa da tekrar etmeyen kimlik
@@ -290,6 +293,11 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_sv_settings": str(ps.get("settings", "{}")),
 		"_sv_inventory": ps.get("inv", {}),  # doldurulabilir
 		"_sv_admin": int(ps.get("is_admin", 0)),   # admin yetkisi (sunucu tarafige)
+		"_sv_reg_ts": int(ps.get("reg_ts", 0)),    # kayit gunu (rutbe hesabi)
+		"_sv_rank_pen": float(ps.get("rank_pen", 0.0)),  # rutbe cezasi
+		"_sv_quests": ps.get("quests", {}),    # gorevler (rutbe hesabi)
+		"_sv_rank": 0,    # rutbe rozeti (1..21), _calculate_ranks ile doldurulur
+		"_sv_owned": ps.get("owned", [str(ps.get("ship", "phoenix"))]),  # sahip oldugu gemiler
 	}
 
 	print("[SUNUCU] Token dogrulandi: peer=%d, account_id=%d, callsign=%s" % [peer_id, acct_id, str(ps.get("callsign", "Gezgin"))])
@@ -329,7 +337,8 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 		"jump_to": "", "jump_dl": -1.0, "respawn_ok": false, "group": 0}
 	# Token asamasinda yuklenen sunucu ekonomi/profil kopyasini KORU (odul kaybi olmasin).
 	for _k in ["_sv_cr", "_sv_uri", "_sv_xp", "_sv_hon", "_sv_sep", "_sv_kills",
-			"_sv_pvp_kills", "_sv_settings", "_sv_inventory", "_sv_admin"]:
+			"_sv_pvp_kills", "_sv_settings", "_sv_inventory", "_sv_admin",
+			"_sv_rank", "_sv_reg_ts", "_sv_rank_pen", "_sv_quests", "_sv_owned"]:
 		if old_p.has(_k):
 			players[peer][_k] = old_p[_k]
 	if ghosts.has(nm.to_lower()):
@@ -472,7 +481,59 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 func _player_info(p: Dictionary) -> Array:
 	return [int(p.id), str(p.name), int(p.faction), str(p.ship), float((p.pos as Vector3).x), float((p.pos as Vector3).z),
 		float(p.yaw), float(p.hp), float(p.mhp), float(p.sh), float(p.msh), str(p.form), (p.drn as Array).duplicate(),
-		int(p.get("_sv_admin", 0))]
+		int(p.get("_sv_admin", 0)), int(p.get("_sv_rank", 0))]
+
+# Her 60 saniyede bir calistirilir: her sirket icin oyuncularin rutbesini hesaplar.
+# Adminler siralamaya girmez. RankSys.points() formulu ile puan hesaplanir, RankSys.rank_index()
+# ile rutbe indeksi (0..19) bulunur ve 1..21 arasinda bir rozet numarasina donusturulur
+# (20 = en yuksek rutbe rank_20.png, 21 = admin rank_21.png).
+func _calculate_ranks() -> void:
+	var now: float = Time.get_unix_time_from_system()
+	# Sirketlere gore ayir: {faction: [peer_id, ...]}
+	var by_faction: Dictionary = {}
+	for pid in players.keys():
+		var p: Dictionary = players[pid]
+		if str(p.map) == "":
+			continue
+		var f: int = int(p.faction)
+		if not by_faction.has(f):
+			by_faction[f] = []
+		(by_faction[f] as Array).append(pid)
+	# Her sirket icin sirala ve rutbe ata
+	for f in by_faction.keys():
+		var members: Array = by_faction[f]
+		# Puan hesapla
+		var entries: Array = []
+		for pid in members:
+			var p: Dictionary = players[pid]
+			if bool(p.get("_sv_admin", 0)):
+				p["_sv_rank"] = 21   # admin: rank_21.png
+				continue
+			var sv: Dictionary = {
+				"xp": float(p.get("_sv_xp", 0.0)),
+				"hon": float(p.get("_sv_hon", 0.0)),
+				"ship": str(p.get("ship", "phoenix")),
+				"pvp_kills": int(p.get("_sv_pvp_kills", 0)),
+				"kills": int(p.get("_sv_kills", 0)),
+				"reg_ts": int(p.get("_sv_reg_ts", now)),
+				"rank_pen": float(p.get("_sv_rank_pen", 0.0)),
+				"quests": p.get("_sv_quests", {}),
+				"settings": p.get("_sv_settings", "{}"),
+			}
+			var pts: Dictionary = RankSys.points(sv, now)
+			entries.append({"pid": pid, "pts": float(pts.total)})
+		# Puanla sirala (yukselen)
+		entries.sort_custom(func(a, b): return float(a.pts) > float(b.pts))
+		# Sira no ver ve rutbe indeksi hesapla
+		var counts: int = entries.size()
+		for i in range(entries.size()):
+			var e: Dictionary = entries[i]
+			var pos: int = i + 1
+			var idx: int = RankSys.rank_index(pos, counts)
+			var rank_num: int = RankSys.icon_id(idx)   # 1..20
+			var p: Dictionary = players[e.pid]
+			p["_sv_rank"] = rank_num
+
 
 
 func _npc_info(e: Dictionary) -> Array:
@@ -1250,6 +1311,7 @@ func tick(dt: float) -> void:
 		for wn in worlds.keys():
 			npc_n += (worlds[wn].npcs as Dictionary).size()
 		print("[SUNUCU] Oyuncu: %d | Aktif harita: %d | NPC: %d" % [players.size(), worlds.size(), npc_n])
+		_calculate_ranks()
 	npc_override_t += dt
 	ban_tick_t += dt        # [ZAMANLAYICI-FIX] her karede artar (eskiden 5 sn'lik blogun icindeydi)
 	balance_tick_t += dt
@@ -1287,6 +1349,36 @@ func tick(dt: float) -> void:
 			if bal.has("ok") and bal["ok"]:
 				p["_sv_cr"] = int(bal["cr"])
 				p["_sv_uri"] = int(bal["uri"])
+	# Admin durumu her 30 sn'de bir DB'den yenilenir (admin panelinden gelen degisiklik icin)
+	admin_tick_t += dt
+	if admin_tick_t >= 30.0:
+		admin_tick_t = 0.0
+		for pid in players.keys().duplicate():
+			var p: Dictionary = players[pid]
+			var st: Dictionary = db_send("get_account_status", {"account_id": int(p.account_id)})
+			if st.has("ok") and st["ok"]:
+				var new_admin: bool = bool(st.get("is_admin", false))
+				var old_admin: bool = bool(p.get("_sv_admin", 0))
+				if new_admin != old_admin:
+					p["_sv_admin"] = 1 if new_admin else 0
+					# Adminlik degisti: police gemisi owned listesini guncelle
+					var owned: Array = p.get("_sv_owned", []).duplicate()
+					if new_admin and not "police" in owned:
+						owned.append("police")
+						db_send("admin_ship", {"account_id": int(p.account_id), "ship": "police", "add": true})
+					elif not new_admin and "police" in owned:
+						owned.erase("police")
+						db_send("admin_ship", {"account_id": int(p.account_id), "ship": "police", "add": false})
+						# Aktif gimi police ise Phoenix'e don
+						if str(p.ship) == "police":
+							p.ship = "phoenix"
+							# Haritadaki diger oyunculara guncellenen gemi bilgisini gonder
+							if str(p.map) != "" and worlds.has(str(p.map)):
+								_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
+					p["_sv_owned"] = owned
+					# Haritadaki diger oyunculara guncellenen oyuncu bilgisini gonder
+					if str(p.map) != "" and worlds.has(str(p.map)):
+						_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
 	# Her oyuncunun konumunu periyodik olarak kaydet (~20 saniyede bir)
 	if pos_save_t >= 20.0:
 		pos_save_t = 0.0

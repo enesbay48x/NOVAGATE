@@ -61,7 +61,7 @@ const FACTIONS := {
 
 # hp/speed/lasers/gens: SQL (goliath, vengeance, aegis, citadel, spearhead); digerleri ~yaklasik. Fiyatlar ~yaklasik.
 # Marketten kaldirilan gemiler (hangarda sahip olunanlar kullanilmaya devam eder).
-const MARKET_HIDDEN := ["bigboy", "aegis", "citadel"]
+const MARKET_HIDDEN := ["bigboy", "aegis", "citadel", "police"]
 
 const SHIPS := [
 	{"id": "phoenix", "name": "Phoenix", "hp": 4000, "spd": 320, "las": 2, "gen": 1, "cr": 0, "uri": 0},
@@ -77,6 +77,7 @@ const SHIPS := [
 	{"id": "goliath", "name": "Goliath", "hp": 256000, "spd": 300, "las": 15, "gen": 15, "cr": 0, "uri": 100000},
 	{"id": "aegis", "name": "Aegis", "hp": 275000, "spd": 300, "las": 10, "gen": 15, "cr": 0, "uri": 130000},
 	{"id": "citadel", "name": "Citadel", "hp": 550000, "spd": 240, "las": 7, "gen": 20, "cr": 0, "uri": 170000},
+	{"id": "police", "name": "Police", "hp": 256000, "spd": 300, "las": 50, "gen": 50, "cr": 0, "uri": 0},
 ]
 
 const AMMO := [
