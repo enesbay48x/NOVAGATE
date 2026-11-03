@@ -8,6 +8,7 @@ on:
 jobs:
   ios:
     runs-on: macos-14
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,6 +32,15 @@ jobs:
           cp "$IOS_ZIP" "$TEMPL_DIR/ios.zip"
           echo "Copied to: $TEMPL_DIR/ios.zip"
 
+      - name: Import assets (Godot headless)
+        run: |
+          GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
+          if [ -z "$GODOT_BIN" ]; then
+            GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
+          fi
+          echo "Using Godot binary: $GODOT_BIN"
+          "$GODOT_BIN" --headless --path . --import
+
       - name: Export iOS Xcode project
         run: |
           mkdir -p export/ios
@@ -44,7 +54,7 @@ jobs:
       - name: Build unsigned .ipa with xcodebuild
         run: |
           cd export/ios
-          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO OTHER_LDFLAGS="-framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation" -derivedDataPath xcode-build
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO OTHER_LDFLAGS="-framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation -framework CoreMedia -framework CoreVideo -framework AVFoundation -framework GameKit -weak-framework MetalPerformanceShaders" -derivedDataPath xcode-build
           mkdir -p Payload
           cp -R "xcode-build/Build/Products/Release-iphoneos/NOVAGATE.app" Payload/
           zip -r ../../NOVAGATE.ipa Payload/
