@@ -425,12 +425,18 @@ def uri_account(account_id):
 @app.route("/admin/admin/<int:account_id>", methods=["POST"])
 @require_auth
 def toggle_admin(account_id):
-    conn = get_db(AUTH_DB)
-    row = conn.execute("SELECT is_admin FROM accounts WHERE id=?", (account_id,)).fetchone()
-    new_val = 0 if row and row["is_admin"] else 1
-    conn.execute("UPDATE accounts SET is_admin=? WHERE id=?", (new_val, account_id))
-    conn.commit()
-    conn.close()
+    # Tek doğru kaynak: oyun sunucusu is_admin'i GAME_DB (novagate_game.db)'dan okur.
+    # Panel degisikligini AUTH_DB ve GAME_DB'ye ikisine de yazarak senkron tutar.
+    new_val = None
+    for db_path in (AUTH_DB, GAME_DB):
+        conn = get_db(db_path)
+        try:
+            row = conn.execute("SELECT is_admin FROM accounts WHERE id=?", (account_id,)).fetchone()
+            new_val = 0 if row and row["is_admin"] else 1
+            conn.execute("UPDATE accounts SET is_admin=? WHERE id=?", (new_val, account_id))
+            conn.commit()
+        finally:
+            conn.close()
     admin_log(ADMIN_USER, "admin_toggle", "account", str(account_id), f"is_admin={new_val}")
     return redirect(url_for("dashboard"))
 
