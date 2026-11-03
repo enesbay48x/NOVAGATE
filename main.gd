@@ -3051,9 +3051,9 @@ func buy_item(id: String, qty: int) -> bool:
 	toast("Satın alındı: %s x%d" % [str(d.name), qty])
 	save_game()
 	# Sunucuya da bildir (kalicilik icin)
-	if net.online:
+	if Net.online:
 		var tx_id: String = "buy:" + str(Time.get_unix_time_from_system()) + ":" + str(randi())
-		net.send_purchase_item(id, qty, tx_id)
+		Net.send_purchase_item(id, qty, tx_id)
 		# Bekleyen alim kaydi (sunucu hatasi durumunda geri almak icin)
 		SV["_pending_purchase"] = {"id": id, "qty": qty, "cr": int(d.cr) * qty, "uri": int(d.uri) * qty, "tx_id": tx_id}
 	return true
