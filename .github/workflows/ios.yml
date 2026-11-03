@@ -16,7 +16,6 @@ jobs:
         run: |
           curl -L -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_macos.universal.zip"
           unzip -o -q godot.zip -d /Applications
-          mv "/Applications/Godot_v4.7.2-stable_macos.universal.app" /Applications/Godot.app
 
       - name: Install iOS export templates
         run: |
@@ -26,7 +25,7 @@ jobs:
 
       - name: Export iOS Xcode project
         run: |
-          /Applications/Godot.app/Contents/MacOS/Godot --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
+          /Applications/Godot_v4.7.2-stable_macos.universal.app/Contents/MacOS/Godot --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
 
       - name: Build unsigned .ipa with xcodebuild
         run: |
