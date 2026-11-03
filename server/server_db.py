@@ -763,9 +763,11 @@ def grant_reward(account_id: int, event_id: str, source: str,
 # SESSION LOCK (HEARTBEAT/LEASE)
 # ---------------------------------------------------------------------------
 def acquire_session_lock(account_id: int, session_token_hash: str, instance_id: str,
-                         ttl_seconds: int = 1800) -> bool:
+                         ttl_seconds: int = 1800) -> dict:
     """
-    Aktif oturum kilidi alir. Zaten aktif bir kilit varsa (ve bu instance'e ait degilse) FALSE dondurur.
+    Aktif oturum kilidi alir. Zaten aktif bir kilit varsa (ve bu instance'e ait degilse)
+    {"ok": False, "error": "session_locked", "kick_required": True} dondurur.
+    Basariliysa {"ok": True} dondurur.
     """
     conn = get_db()
     try:
@@ -814,10 +816,10 @@ def acquire_session_lock(account_id: int, session_token_hash: str, instance_id: 
                 )
                 conn.execute("COMMIT")
                 return True
-            # Baska instance'e ait ve sure dolmamis ise kilitli
+            # Baska instance'e ait ve sure dolmamis ise kilitli; yeni giris bu kilidi alacak
             if now < existing["expires_at"]:
                 conn.execute("ROLLBACK")
-                return False
+                return {"ok": False, "error": "session_locked", "kick_required": True}
             # Sure dolmus ise temizle ve al
         conn.execute(
             "INSERT OR REPLACE INTO session_locks (account_id, session_token, locked_at, updated_at, expires_at, instance_id) "
@@ -825,13 +827,14 @@ def acquire_session_lock(account_id: int, session_token_hash: str, instance_id: 
             (account_id, session_token_hash, now, now, expires_at, instance_id),
         )
         conn.execute("COMMIT")
-        return True
+        return {"ok": True}
     except sqlite3.Error as e:
         try:
             conn.execute("ROLLBACK")
         except Exception:
             pass
         log.warning("acquire_session_lock HATA (%s): %s", type(e).__name__, e)
+        return {"ok": False, "error": "internal"}
 def verify_and_consume_token(token: str, instance_id: str) -> dict | None:
     """
     Jetonu dogrular ve atomik olarak kullanildi olarak isaretler.
@@ -1264,11 +1267,11 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 meta=msg.get("meta", {}) if isinstance(msg.get("meta", {}), dict) else {},
             )
         elif method == "acquire_session_lock":
-            resp = {"ok": acquire_session_lock(
+            resp = acquire_session_lock(
                 int(msg.get("account_id", 0)),
                 msg.get("session_token_hash", ""),
                 msg.get("instance_id", instance_id),
-            )}
+            )
         elif method == "verify_and_consume_token":
             resp = verify_and_consume_token(
                 msg.get("session_token", ""),

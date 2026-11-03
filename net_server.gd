@@ -47,6 +47,7 @@ var balance_tick_t: float = 0.0   # online oyuncu bakiye senkronizasyon sayaci
 var pos_save_t: float = 0.0   # oyuncu konumu periyodik kayit sayaci
 var rank_t: float = 0.0       # rütbe yeniden hesaplama sayaci (60 sn'de bir)
 var admin_tick_t: float = 0.0 # admin durumu yenileme sayaci (30 sn'de bir)
+var stale_lock_t: float = 0.0 # bayat kilit temizleme sayaci (30 sn'de bir)
 var npc_overrides: Dictionary = {}   # map_id -> npc_count (admin panelden)
 var reward_run_id: String = ""        # her sunucu acilisinda benzersiz odul olay kimligi
 var next_box_id: int = 1              # kutular dunya yeniden kurulsa da tekrar etmeyen kimlik
@@ -253,9 +254,32 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		print("[SUNUCU] Session lock: DB cevap vermedi: account_id=%d" % acct_id)
 		return [false, "Veritabani hatasi, lutfen tekrar dene", 0, "", 0, ""]
 	if lock_resp["ok"] == false:
-		print("[SUNUCU] Session lock reddedildi: account_id=%d" % acct_id)
-		return [false, "Hesap baska bir oturumda calisiyor", 0, "", 0, ""]
-	print("[SUNUCU] Session lock alindi: account_id=%d" % acct_id)
+		if lock_resp.has("error") and lock_resp.error == "session_locked":
+			# Yeni giris eski oturumu dusuruyor (tek cihaz kurali)
+			var old_peer: int = 0
+			for pid in players.keys():
+				if int(players[pid].account_id) == acct_id:
+					old_peer = int(pid)
+					break
+			if old_peer != 0:
+				print("[SUNUCU] Eski oturum dusuruluyor: account_id=%d, eski_peer=%d" % [acct_id, old_peer])
+				on_disconnect(old_peer)
+				print("[SUNUCU] Eski oturum dusuruldu: account_id=%d, eski_peer=%d" % [acct_id, old_peer])
+			# Kilidi tekrar al (eski kilit serbest besti)
+			lock_resp = db_send("acquire_session_lock", {
+				"account_id": acct_id,
+				"session_token_hash": _hash_sha256(token),
+				"instance_id": db_instance_id,
+			})
+			if lock_resp.is_empty() or not lock_resp.has("ok") or lock_resp["ok"] == false:
+				print("[SUNUCU] Session lock tekrar denemesi basarisiz: account_id=%d" % acct_id)
+				return [false, "Hesap baska bir oturumda calisiyor", 0, "", 0, ""]
+			print("[SUNUCU] Session lock tekrar alindandi: account_id=%d" % acct_id)
+		else:
+			print("[SUNUCU] Session lock reddedildi: account_id=%d" % acct_id)
+			return [false, "Hesap baska bir oturumda calisiyor", 0, "", 0, ""]
+	else:
+		print("[SUNUCU] Session lock alindi: account_id=%d" % acct_id)
 
 	# 3. Oyuncu durumunu veritabanindan yukle
 	var state_resp: Dictionary = db_send("load_player_state", {
@@ -1379,6 +1403,13 @@ func tick(dt: float) -> void:
 					# Haritadaki diger oyunculara guncellenen oyuncu bilgisini gonder
 					if str(p.map) != "" and worlds.has(str(p.map)):
 						_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
+	# Bayat session kilitlerini temizle (sunucu çöküp kalabilen kilitler, zaman asimi ile)
+	stale_lock_t += dt
+	if stale_lock_t >= 30.0:
+		stale_lock_t = 0.0
+		var cl: Dictionary = db_send("cleanup_stale_locks", {})
+		if cl.has("ok"):
+			print("[SUNUCU] Bayat kilit temizlendi: %d adet" % cl.get("deleted", 0))
 	# Her oyuncunun konumunu periyodik olarak kaydet (~20 saniyede bir)
 	if pos_save_t >= 20.0:
 		pos_save_t = 0.0
