@@ -4,16 +4,37 @@ extends Node
 #   Sunucu : godot --headless --path <proje> -- --server --port=7777
 #   Istemci: oyunun ana menusunde "Cok oyunculu" kutusunu isaretle, sunucu adresini yaz.
 
-const PROTO := 6   # 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: 5: sunucu otoriter guvenli bolge + kapi dogrulamasi (c_jump / s_jump_result / s_prot); 4: bonus kutular
+const PROTO := 7   # 7: grup sistemi + s_npc_reward RPC; 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: sunucu otoriter guvenli bolge + kapi dogrulamasi; 4: bonus kutular
 # ---- OTOMATIK BAGLANTI ----------------------------------------------------------
-# Buraya sunucunun adresini bir kez yaz (ornek: "100.64.12.5:7777" veya "oyun.alanadi.com:7777").
+# Yayin sunucusunun adresi (ornek: "54.x.x.x:7777" veya "oyun.alanadi.com:7777").
 # Doluysa: giris ekranindaki "Cok oyunculu" kutusu ve adres alani gizlenir, oyun giris yapinca
 # PC'de ve telefonda OTOMATIK bu sunucuya baglanir. Bos birakirsan eski elle adres girme calisir.
-const SERVER_ADDR := ""
+#
+# GELISTIRME / YAYIN ayrimi:
+#   - Yayin istemcisi (export edilen release build) do grup: PROD_SERVER_ADDR kullanilir.
+#   - Editorde calisirken NOVAGATE_SERVER ortam degiskeni tanimliysa o adres kullanilir
+#     (ornek  local test icin:  set NOVAGATE_SERVER=127.0.0.1:7777).
+#     Tanimli degilse editorde elle adres girme alanini kullan (AWS adresi on-doldurulur).
+# AWS yayin sunucusu (us-east-2, t3.micro, Elastic IP)
+const PROD_SERVER_ADDR := "18.117.15.199:7777"
+var SERVER_ADDR: String = PROD_SERVER_ADDR
 const DEFAULT_PORT := 7777
-const MAX_PEERS := 32
+# Yayin kapasitesi: hedef 100 eszamanli oyuncu; limit 32 -> 128 cikarildi.
+# NOT: 128 eszamanli baglanti ENet tarafinda kaynak duzeyinde desteklidir; bant genisligi
+# ve performans dogrulamasi AWS'de yuk testiyle yapilacak (onaylanmis sonuc yok).
+const MAX_PEERS := 128
 const NetServer := preload("res://net_server.gd")
 const NetGame := preload("res://net_game.gd")
+
+# ---- KIMLIK DOGRULAMA (TLS) ------------------------------------------------
+# Auth servisi: https://18.117.15.199:8444/login (Production AWS)
+# Gelistirme icin: set NOVAGATE_AUTH_HOST=127.0.0.1
+const AUTH_HOST := "18.117.15.199"
+const AUTH_HTTPS_PORT := 8444
+var session_token: String = ""    # auth_service'tan alinan oturum jetonu
+var account_id: int = 0           # sunucu tarafindan dogrulanmis hesap kimligi
+var auth_http_request: HTTPRequest  # TLS login icin
+var tls_opts: TLSOptions            # sertifika sabitleme (self-signed auth sertifikasi)
 
 var is_server: bool = false     # bu surec dedicated sunucu mu
 var online: bool = false        # istemci: sunucuya bagli ve dunyada
@@ -28,8 +49,24 @@ var _state_t: float = 0.0
 
 
 func _ready() -> void:
+	# Gelistirme istemcisinde yayin adresini NOVAGATE_SERVER ile ezebilirsin
+	# (local test: set NOVAGATE_SERVER=127.0.0.1:7777).
+	var env_addr := OS.get_environment("NOVAGATE_SERVER")
+	if env_addr != "":
+		SERVER_ADDR = env_addr
 	multiplayer.server_disconnected.connect(_on_server_lost)
 	multiplayer.peer_disconnected.connect(_on_peer_gone)
+	# TLS login icin HTTPRequest (auth_service.py HTTPS endpoint)
+	auth_http_request = HTTPRequest.new()
+	add_child(auth_http_request)
+	auth_http_request.request_completed.connect(_on_auth_http_completed)
+	# Self-signed auth sertifikasini guvenilir say (sabitleme). Alan adi: novagate.local
+	var _cert := X509Certificate.new()
+	if _cert.load("res://auth_cert_public.crt") == OK:
+		tls_opts = TLSOptions.client(_cert, "novagate.local")
+		auth_http_request.set_tls_options(tls_opts)
+	else:
+		push_error("[NET] auth_cert_public.crt yuklenemedi (export filtresine *.crt eklendi mi?)")
 	var args: PackedStringArray = OS.get_cmdline_user_args() + OS.get_cmdline_args()
 	if "--server" in args or OS.has_feature("dedicated_server"):
 		var port: int = DEFAULT_PORT
@@ -39,18 +76,86 @@ func _ready() -> void:
 		_start_server(port)
 
 
+# ------------------------------------------------------------------ TLS KIMLIK DOGRULAMA
+func login_via_tls(username: String, password: String) -> void:
+	"""
+	auth_service.py HTTPS endpoint ile TLS guvenli giris yapar.
+	Sonuc _on_auth_http_completed ile geri doner.
+	"""
+	last_error = ""
+	var url := "https://%s:%d/login" % [AUTH_HOST, AUTH_HTTPS_PORT]
+	var body: String = JSON.stringify({"username": username, "password": password})
+	var headers: PackedStringArray = ["Content-Type: application/json"]
+	auth_http_request.request(url, headers, HTTPClient.METHOD_POST, body)
+
+
+func _on_auth_http_completed(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
+	"""
+	TLS login HTTP cevabini isler.
+	Basariliysa session_token'i saklar ve main.gd'e bildirir.
+	"""
+	if result != HTTPRequest.RESULT_SUCCESS:
+		last_error = "TLS baglanti hatasi: %d" % result
+		if game != null:
+			game._on_auth_result(false, last_error)
+		return
+
+	if response_code != 200:
+		last_error = "Sunucu hatasi: %d" % response_code
+		if game != null:
+			game._on_auth_result(false, last_error)
+		return
+
+	var data: Dictionary = JSON.parse_string(body.get_string_from_utf8())
+	if not data.has("ok") or data["ok"] == false:
+		last_error = str(data.get("error", "bilinmeyen hata"))
+		if game != null:
+			game._on_auth_result(false, last_error)
+		return
+
+	session_token = str(data.get("session_token", ""))
+	account_id = int(data.get("account_id", 0))
+	var callsign: String = str(data.get("callsign", "Gezgin"))
+	var faction: int = int(data.get("faction", 1))
+	print("[NET] TLS giris basarili: account_id=%d, callsign=%s, faction=%d" % [account_id, callsign, faction])
+
+	if game != null:
+		game._on_auth_result(true, "", account_id, callsign, faction, session_token)
+
+
+# ------------------------------------------------------------------ ENET TOKEN BAGLANTISI
+func attach_token(token: String) -> void:
+	"""
+	Kimlik dogrulanmis jetonu ENet sunucusuna gonderir.
+	c_attach_token RPC ile sunucu token'i dogrular ve oyuncu verilerini yukler.
+	"""
+	print("[ISTEMCI] attach_token cagrildi, online=%s" % online)
+	if not online:
+		last_error = "ENet baglantisi yok"
+		print("[ISTEMCI] Hata: ENet baglantisi yok")
+		if game != null:
+			game._on_attach_result(false, "Oyun sunucusuna baglanilamadi.")
+		return
+	print("[ISTEMCI] c_attach_token RPC gonderiliyor, token_prefix=%s" % token.substr(0, 20))
+	rpc_id(1, "c_attach_token", token)
+	print("[ISTEMCI] c_attach_token RPC gonderildi")
+
+
 # ------------------------------------------------------------------ SUNUCU
 func _start_server(port: int) -> void:
+	print("[SUNUCU] _start_server cagrildi: port=%d" % port)
 	var peer := ENetMultiplayerPeer.new()
 	var err: int = peer.create_server(port, MAX_PEERS)
 	if err != OK:
 		push_error("[SUNUCU] Port %d acilamadi (hata %d). Baska bir sunucu aciksa kapat." % [port, err])
+		print("[SUNUCU] Port %d acilamadi, hata kodu: %d" % [port, err])
 		get_tree().quit(1)
 		return
 	multiplayer.multiplayer_peer = peer
 	is_server = true
 	Engine.max_fps = 30
 	srv = NetServer.new(self)
+	print("[SUNUCU] ENetMultiplayerPeer olusturuldu, port %d acildi" % port)
 	print("==============================================")
 	print(" NOVAGATE SUNUCUSU calisiyor  |  UDP port %d" % port)
 	print(" Kapatmak icin pencereyi kapat / Ctrl+C")
@@ -110,6 +215,42 @@ func connect_and_join(addr: String, info: Dictionary) -> bool:
 		last_error = _join_msg if _join_msg != "" else "Sunucu yanit vermedi."
 		disconnect_from_server()
 		return false
+	online = true
+	return true
+
+
+func connect_only(addr: String) -> bool:
+	"""
+	Sadece ENet baglantisi kurar, c_join cagirmaz.
+	Token dogrulamasina hazirlik icin kullanilir.
+	"""
+	last_error = ""
+	var host: String = addr.strip_edges()
+	var port: int = DEFAULT_PORT
+	var ci: int = host.rfind(":")
+	if ci >= 0:
+		port = int(host.substr(ci + 1))
+		host = host.substr(0, ci)
+	if host == "":
+		host = "127.0.0.1"
+	disconnect_from_server()
+	var peer := ENetMultiplayerPeer.new()
+	var err: int = peer.create_client(host, port)
+	if err != OK:
+		last_error = "Baglanti baslatilamadi (hata %d)." % err
+		return false
+	multiplayer.multiplayer_peer = peer
+	var t: float = 0.0
+	while peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTING and t < 8.0:
+		await get_tree().process_frame
+		t += get_process_delta_time()
+	if peer.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED:
+		last_error = "Sunucuya ulasilamadi (%s:%d). Sunucu acik mi? Port/guvenlik duvari?" % [host, port]
+		disconnect_from_server()
+		return false
+	my_id = multiplayer.get_unique_id()
+	_join_state = 0
+	_join_msg = ""
 	online = true
 	return true
 
@@ -215,6 +356,18 @@ func send_group_kick(peer: int) -> void:
 
 
 # ================================================================== RPC: istemci -> sunucu
+@rpc("any_peer", "call_remote", "reliable")
+func c_attach_token(token: String) -> void:
+	"""
+	Istemcinin TLS ile aldigi session token'i sunucu tarafinda dogrular.
+	Basariliysa peer_id <-> account_id eslemesi olusturulur.
+	"""
+	if not is_server or srv == null:
+		return
+	var id: int = multiplayer.get_remote_sender_id()
+	var r: Array = srv.on_attach_token(id, token)
+	rpc_id(id, "s_attach_result", bool(r[0]), str(r[1]), int(r[2]), str(r[3]), int(r[4]), str(r[5]))
+
 @rpc("any_peer", "call_remote", "reliable")
 func c_join(proto: int, nm: String, faction: int, ship: String) -> void:
 	if not is_server or srv == null:
@@ -341,6 +494,20 @@ func c_auc_ack(ids: Array) -> void:
 
 
 # ================================================================== RPC: sunucu -> istemci
+@rpc("authority", "call_remote", "reliable")
+func s_attach_result(ok: bool, msg: String, account_id: int, callsign: String, faction: int, player_state_json: String) -> void:
+	"""
+	Sunucu tarafindan token dogrulama sonucu.
+	Basariliysa oyuncu verileri istemciye gonderilir.
+	"""
+	_join_msg = msg
+	_join_state = 1 if ok else -1
+	if ok and game != null:
+		game._on_attach_result(true, "", account_id, callsign, faction, player_state_json)
+	elif not ok and game != null:
+		game._on_auth_result(false, msg)
+
+
 @rpc("authority", "call_remote", "reliable")
 func s_join_result(ok: bool, msg: String) -> void:
 	_join_msg = msg

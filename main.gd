@@ -5063,6 +5063,30 @@ func award_xp(amount: int) -> void:
 	if after > before:
 		toast("Seviye %d!" % after)
 
+# Sunucu tarafindan hesaplanan odul: [cr, uri, xp, hon] zaten nihayi degerler
+# Istemci sadece yetenek bonuslarini uygular.
+func give_reward_cr_uri_xp_hon(cr: int, uri: int, xp: int, hon: int, npc_id: String = "") -> void:
+	var loot := 1.0 + skill_bonus("loot_npc")
+	xp = int(round(float(xp) * (1.0 + skill_bonus("xp_npc"))))
+	cr = int(round(float(cr) * (1.0 + skill_bonus("cr_npc")) * loot))
+	uri = int(round(float(uri) * loot))
+	hon = float(hon) * (1.0 + skill_bonus("honor"))
+	var sep := int(round(float(uri) * float(SkillTree.SEPROM_PER_URI) * loot))
+	award_xp(xp)
+	SV.hon += hon
+	SV.cr += cr
+	SV.uri += uri
+	SV.seprom = int(SV.get("seprom", 0)) + sep
+	SV.kills += 1
+	# Quest ilerlemesi
+	if npc_id != "":
+		for quest in QUESTS:
+			if str(quest.npc) == npc_id:
+				var state: Dictionary = SV.quests.get(str(quest.id), {})
+				state["progress"] = mini(int(state.get("progress", 0)) + 1, int(quest.target))
+				SV.quests[str(quest.id)] = state
+	toast("%s+%d XP  +%d Kredi  +%d Şeref  +%d Uridium  +%d Seprom" % ["", xp, cr, int(round(hon)), uri, sep])
+
 
 # ---------- Gercek lazer cikis noktalari ----------
 const SALVO_BEAMS := 2          # salvoda ayni anda gorunen azami isin sayisi (ortadaki isin yok)

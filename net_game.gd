@@ -145,7 +145,7 @@ func on_box_new(id: int, x: float, z: float) -> void:
 
 
 func _make_box(id: int, x: float, z: float) -> void:
-	var bx: MeshInstance3D = g._make_bonus_box(Vector3(x, 0.0, z))
+	var bx: Node3D = g._make_bonus_box(Vector3(x, 0.0, z))
 	g.world.add_child(bx)
 	g.boxes.append({"node": bx, "id": id})
 
@@ -221,16 +221,11 @@ func on_npc_dead(uid: int, killer: int, silent: bool, share_n: int = 1) -> void:
 	if is_instance_valid(e.node) and not silent:
 		g.boom(e.node.position, float(e.node.get_meta("r", 3.0)) * 1.6)
 	_drop_entry(e)
-	if not silent and killer == net.my_id:
-		g.give_reward(e.d, str(e.id), share_n)
-		g.save_game()
 
-
-# Grup arkadasim NPC'yi oldurdu: odulun payi bana da gelir.
-func on_npc_share(npc_id: String, share_n: int) -> void:
-	if not DOData.NPCS.has(npc_id):
-		return
-	g.give_reward(DOData.NPCS[npc_id], npc_id, share_n)
+# Sunucu tarafindan gelen odul: [npc_id, cr, uri, xp, hon]
+@rpc("any_peer", "call_remote", "reliable")
+func on_npc_reward(npc_id: String, cr: int, uri: int, xp: int, hon: int) -> void:
+	g.give_reward_cr_uri_xp_hon(cr, uri, xp, hon, npc_id)
 	g.save_game()
 
 
@@ -288,6 +283,7 @@ func add_player(info: Array) -> void:
 	remove_player(peer)
 	var nm: String = str(info[1])
 	var fac: int = int(info[2])
+	var is_adm: bool = info.size() > 13 and int(info[13]) == 1
 	var pos := Vector3(float(info[4]), 0.0, float(info[5]))
 	var enemy: bool = fac != int(g.SV.get("faction", 1))
 	var node: Node3D = g.make_ship(str(info[3]), 6.0, g.ship_faction_tint(fac))
@@ -301,7 +297,7 @@ func add_player(info: Array) -> void:
 	nt.outline_size = 7
 	nt.outline_modulate = Color(0, 0, 0, 0.9)
 	node.add_child(nt)
-	var plate = g.make_remote_plate(nm, fac, col)
+	var plate = g.make_remote_plate(nm, fac, col, is_adm)
 	if plate != null:
 		nt.visible = false
 	var d: Dictionary = {"name": nm, "model": str(info[3]), "sz": 6.0, "hp": float(info[8]), "sh": float(info[10]),
@@ -535,10 +531,7 @@ func on_hurt(attacker: int, dmg: float) -> void:
 		return
 	last_attacker = attacker
 	last_attacker_t = g.clock
-	var had_sh: bool = g.P.sh > 1.0
-	g.impact(g.P.node.position, Color(1.0, 0.4, 0.3), had_sh, 1.0)
-	if had_sh:
-		g.extras.hit_fx()
+	g.impact(g.P.node.position, Color(1.0, 0.4, 0.3), false, 1.0)   # kalkan varken ozel efekt/balon yok
 	g.hurt(dmg)
 
 

@@ -543,23 +543,34 @@ func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
 	if dd.length() > DOData.LASER_RANGE * DOData.S * 3.0:
 		return    # cok uzaktan gelen vurus: reddedildi
 	_register_attack(p)   # guvenli bolgede NPC'ye saldirmak korumayi kaldirir
+	# --- Sahiplik mantigi (A) ---
+	if e.owner == 0:
+		e.owner = peer
+		e.owner_hit_t = clock
+	elif e.owner == peer:
+		e.owner_hit_t = clock   # sahibinin kendi vurusu: sureyi yenile
+	# baska oyuncu vursa owner degismez, owner_hit_t degismez
 	if mode == 1:
 		# SAB: yalnizca kalkan emer, govdeye hasar vermez
 		e.sh = maxf(0.0, float(e.sh) - minf(float(e.sh), dmg))
 		e.aggro = true
 		e.last_hit_t = clock
-		e.target = peer
+		if e.owner == 0 or int(e.owner) == peer:
+			e.target = peer
+		var tally: Dictionary = e.tally
+		tally[peer] = float(tally.get(peer, 0.0)) + dmg
 		return
 	var a: float = minf(float(e.sh), dmg * 0.8)
 	e.sh = float(e.sh) - a
 	e.hp = float(e.hp) - (dmg - a)
 	e.aggro = true
 	e.last_hit_t = clock
-	e.target = peer
+	if e.owner == 0 or int(e.owner) == peer:
+		e.target = peer
 	var tally: Dictionary = e.tally
 	tally[peer] = float(tally.get(peer, 0.0)) + dmg
 	if float(e.hp) <= 0.0:
-		_kill_npc(w, e, _top_damager(w, e, peer), false)
+		_kill_npc(w, e, e.owner, false)   # owner'a ver (sahiplik yoksa 0)
 
 
 func _top_damager(w: Dictionary, e: Dictionary, fallback: int) -> int:
@@ -934,7 +945,8 @@ func _make_npc(w: Dictionary, id: String, pos: Vector3, zone: int) -> Dictionary
 	var e: Dictionary = {"uid": next_uid, "id": id, "d": d, "pos": pos, "yaw": randf() * TAU,
 		"hp": float(d.hp), "mx": float(d.hp), "sh": float(d.sh), "msh": float(d.sh),
 		"v": Vector3(randf_range(-1.0, 1.0), 0.0, randf_range(-1.0, 1.0)).normalized(), "t": 0.0, "cd": 0.0,
-		"aggro": false, "zone": zone, "last_hit_t": -1.0e9, "tally": {}, "target": 0, "guard_home": 0}
+		"aggro": false, "zone": zone, "last_hit_t": -1.0e9, "tally": {}, "target": 0, "guard_home": 0,
+		"owner": 0, "owner_hit_t": -1.0e9}
 	next_uid += 1
 	(w.npcs as Dictionary)[e.uid] = e
 	return e
@@ -950,6 +962,12 @@ func _spawn_and_announce(w: Dictionary, id: String, pos: Vector3, zone: int) -> 
 func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 	e.hp = 0.0
 	(w.npcs as Dictionary).erase(e.uid)
+	# --- Cubikon hasar-oranli odul (B) ---
+	if str(e.id) == "cubikon" and not silent:
+		_cubikon_reward(w, e)
+	# --- Normal NPC: owner'a odul (A) ---
+	elif not silent and int(e.owner) != 0 and players.has(int(e.owner)) and str(players[int(e.owner)].map) == str(w.name):
+		killer = int(e.owner)
 	# Grup: oduller, NPC ile ayni haritadaki grup uyeleri arasinda ESIT bolunur (ornek: 10.000 kredi, 4 kisi = 2.500).
 	var share_n: int = 1
 	var mates: Array = []
@@ -958,17 +976,87 @@ func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 			if players.has(int(m)) and str(players[int(m)].map) == str(w.name):
 				mates.append(int(m))
 		share_n = maxi(mates.size(), 1)
-	_bcast(str(w.name), "s_npc_dead", [int(e.uid), killer, silent, share_n])
-	if share_n > 1:
+	# --- Normal NPC odul: sunucu hesaplar, s_npc_reward ile gonder (C) ---
+	if not silent and killer != 0 and players.has(killer) and str(players[killer].map) == str(w.name):
+		var d: Dictionary = e.d
+		var cr: int = int(d.cr)
+		var uri: int = int(d.uri)
+		var xp: int = int(d.xp)
+		var hon: int = int(d.hon)
+		# Tekbasli veya grup: herkes ayni miktar alir (grup toplam payi / uyeme sayisi)
+		var per_cr: int = int(cr / share_n)
+		var per_uri: int = int(uri / share_n)
+		var per_xp: int = int(xp / share_n)
+		var per_hon: int = int(hon / share_n)
+		# Odulu alacaklar: killer + grupdaki digerleri
+		var receivers: Array = [killer]
 		for m in mates:
 			if int(m) != killer:
-				_to(int(m), "s_npc_share", [str(e.id), share_n])
+				receivers.append(int(m))
+		for r in receivers:
+			_to(int(r), "s_npc_reward", [str(e.uid), per_cr, per_uri, per_xp, per_hon])
 	if silent or int(e.guard_home) != 0:
 		return
 	var at: Variant = null
 	if str(e.id) == "cubikon":
 		at = e.pos
 	(w.respawn as Array).append({"t": float(e.d.resp), "id": str(e.id), "zone": int(e.zone), "at": at})
+
+# --- Cubikon hasar-oranli odul ---
+func _cubikon_reward(w: Dictionary, e: Dictionary) -> void:
+	var C: Dictionary = DOData.CUBIKON
+	var tally: Dictionary = e.tally
+	var total: float = 0.0
+	for k in tally.keys():
+		total += float(tally[k])
+	if total <= 0.0:
+		return
+	# Her oyuncunun ham payi
+	var pays: Dictionary = {}
+	for k in tally.keys():
+		var pct: float = float(tally[k]) / total
+		pays[int(k)] = pct
+	# Grup toplami: grup uyesi ise grup adina topla
+	var group_totals: Dictionary = {}
+	var group_members: Dictionary = {}
+	for pid in pays.keys():
+		var p: Dictionary = players[pid]
+		if not p: continue
+		var g: int = int(p.group)
+		if g != 0 and groups.has(g):
+			var gm: Array = groups[g].members
+			var in_group: bool = false
+			for m in gm:
+				if int(m) == pid:
+					in_group = true
+					break
+			if in_group:
+				if not group_totals.has(g):
+					group_totals[g] = 0.0
+					group_members[g] = []
+				group_totals[g] += pays[pid]
+				group_members[g].append(pid)
+				pays[pid] = 0.0  # grup uyesinin tekil payi sifirla, grup totallendiginde dagitilacak
+	# Toplemeleri dagit
+	for g in group_totals.keys():
+		var members: Array = group_members[g]
+		var per_member: float = group_totals[g] / maxi(members.size(), 1)
+		for m in members:
+			if not pays.has(m):
+				pays[m] = 0.0
+			pays[m] += per_member
+	# Odemeyi gonder
+	for pid in pays.keys():
+		var pct: float = pays[pid]
+		if pct <= 0.0:
+			continue
+		var p: Dictionary = players[pid]
+		if not p: continue
+		var cr: int = roundi(float(DOData.NPCS["cubikon"].cr) * pct)
+		var uri: int = roundi(float(DOData.NPCS["cubikon"].uri) * pct)
+		var xp: int = roundi(float(DOData.CUBIKON_XP) * pct)
+		var hon: int = roundi(float(DOData.NPCS["cubikon"].hon) * pct)
+		_to(int(pid), "s_npc_reward", [str(e.uid), cr, uri, xp, hon])
 
 
 # ------------------------------------------------------------------ ana dongu
@@ -1170,12 +1258,28 @@ func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 	var spd: float = float(d.spd) * DOData.S * DOData.SPEEDMULT * 0.8
 	var aggro_u: float = DOData.AGGRO_RANGE * DOData.S
 	var range_u: float = DOData.LASER_RANGE * DOData.S
-	# hedef secimi: sasirtilmis oyuncu (e.target) once, yoksa en yakin uygun oyuncu
+	# --- Sahiplik sure dolumu ve temizleme (A) ---
+	if int(e.owner) != 0:
+		var owner_ok: bool = false
+		if players.has(int(e.owner)):
+			var op: Dictionary = players[int(e.owner)]
+			if str(op.map) == str(w.name) and not bool(op.ut):
+				owner_ok = true
+		if not owner_ok:
+			if clock - float(e.owner_hit_t) > 10.0:
+				e.owner = 0
+				e.owner_hit_t = -1.0e9
+				e.target = 0
+				e.aggro = false
+	# hedef secimi: sahip varsa SADECE owner'a, yoksa normal mantik
 	var tgt: Dictionary = {}
 	var tl: float = 1.0e9
 	for pid in players.keys():
 		var p: Dictionary = players[pid]
 		if str(p.map) != str(w.name) or bool(p.in_safe) or bool(p.ut):
+			continue
+		# Sahip varsa SADECE ona atis yapilabilir
+		if int(e.owner) != 0 and int(pid) != int(e.owner):
 			continue
 		var dv: Vector3 = (p.pos as Vector3) - (e.pos as Vector3)
 		dv.y = 0.0
@@ -1253,6 +1357,9 @@ func _update_cubic(w: Dictionary, e: Dictionary, dt: float) -> void:
 	var since_hit: float = clock - float(e.last_hit_t)
 	if since_hit > float(C.regen_delay) and float(e.hp) < float(e.mx):
 		e.hp = minf(float(e.mx), float(e.hp) + float(C.regen_hp) * dt)
+	# Tamamen yenelirse tally'yi temizle (eski saldirilar yeni savasa karismasin)
+	if since_hit > float(C.regen_delay) and float(e.hp) >= float(e.mx):
+		e.tally = {}
 	var leash_u: float = float(C.leash) * DOData.S
 	var engaged: bool = since_hit < float(C.regen_delay) and L <= leash_u
 	if engaged:

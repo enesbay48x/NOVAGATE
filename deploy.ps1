@@ -24,6 +24,8 @@ $FILES = @(
     @{ Local = "server/server_db.py";    Remote = "$SERVER_DIR/server_db.py" },
     @{ Local = "net_server.gd";          Remote = "/opt/novagate/net_server.gd" },
     @{ Local = "main.gd";                Remote = "/opt/novagate/main.gd" },
+    @{ Local = "net_game.gd";            Remote = "/opt/novagate/net_game.gd" },
+    @{ Local = "data.gd";                Remote = "/opt/novagate/data.gd" },
 )
 
 # Test betiği
@@ -74,10 +76,22 @@ foreach ($f in $pyFiles) {
 # --- 3. Yerel .gd dosyalarını denetle (Godot varsa) ---
 Write-Host "[3/7] Yerel .gd dosyaları denetleniyor..." -ForegroundColor Yellow
 $gdFiles = Get-ChildItem "*.gd" -ErrorAction SilentlyContinue
-foreach ($f in $gdFiles) {
-    Write-Host "  SKIP (Godot yok yerelde): $($f.Name)" -ForegroundColor DarkGray
+$godotExe = Get-Command godot -ErrorAction SilentlyContinue
+if ($godotExe) {
+    foreach ($f in $gdFiles) {
+        Write-Host "  Denetleniyor: $($f.Name)" -ForegroundColor Gray
+        & $godotExe --headless --check-only --script $f.FullName 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "GD_SCRIPT HATA: $($f.FullName)"
+        } else {
+            Write-Host "  OK: $($f.Name)"
+        }
+    }
+} else {
+    foreach ($f in $gdFiles) {
+        Write-Host "  SKIP (Godot yok yerelde): $($f.Name)" -ForegroundColor DarkGray
+    }
 }
-# Godot sunucuda varsa orada da denetlenecek (opsiyonel)
 
 # --- 4. Dosyaları sunucuya yükle ---
 Write-Host "[4/7] Dosyalar sunucuya yukleniyor..." -ForegroundColor Yellow
@@ -101,8 +115,15 @@ foreach ($f in $FILES) {
     }
 }
 
-# --- 6. Servisleri yeniden baslat ---
-Write-Host "[6/7] Servisler yeniden baslatiliyor..." -ForegroundColor Yellow
+# --- 6. Sunucuda .gd dosyalarını denetle (Godot varsa) ---
+Write-Host "[6/7] Sunucuda .gd dosyaları denetleniyor..." -ForegroundColor Yellow
+SSH-Exec "if command -v godot >/dev/null 2>&1; then for f in /opt/novagate/net_server.gd /opt/novagate/main.gd /opt/novagate/net_game.gd /opt/novagate/data.gd; do godot --headless --check-only --script `"$f`" 2>&1; if [ $? -ne 0 ]; then echo \"GD_SCRIPT HATA: $f\"; fi; done; else echo 'Godot yok sunucuda, .gd denetimi atlaniyor.'; fi"
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "REMOTE GD_CHECK HATA"
+}
+
+# --- 7. Servisleri yeniden baslat ---
+Write-Host "[7/7] Servisler yeniden baslatiliyor..." -ForegroundColor Yellow
 SSH-Exec "sudo systemctl restart novagate-db"
 Start-Sleep -Seconds 3
 SSH-Exec "sudo systemctl restart novagate-server"
@@ -116,8 +137,8 @@ Write-Host "  novagate-auth:  $authStatus" -ForegroundColor Gray
 Write-Host "  novagate-db:    $dbStatus" -ForegroundColor Gray
 Write-Host "  novagate-server:$srvStatus" -ForegroundColor Gray
 
-# --- 7. Test calistir ---
-Write-Host "[7/7] Test calistiriliyor..." -ForegroundColor Yellow
+# --- 8. Test calistir ---
+Write-Host "[8/7] Test calistiriliyor..." -ForegroundColor Yellow
 SCP-Upload $TEST_SCRIPT "/tmp/$TEST_SCRIPT"
 $testResult = SSH-Exec "sudo -u novagate python3 /tmp/$TEST_SCRIPT 2>&1"
 Write-Host $testResult

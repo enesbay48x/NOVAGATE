@@ -60,6 +60,9 @@ const FACTIONS := {
 }
 
 # hp/speed/lasers/gens: SQL (goliath, vengeance, aegis, citadel, spearhead); digerleri ~yaklasik. Fiyatlar ~yaklasik.
+# Marketten kaldirilan gemiler (hangarda sahip olunanlar kullanilmaya devam eder).
+const MARKET_HIDDEN := ["bigboy", "aegis", "citadel"]
+
 const SHIPS := [
 	{"id": "phoenix", "name": "Phoenix", "hp": 4000, "spd": 320, "las": 2, "gen": 1, "cr": 0, "uri": 0},
 	{"id": "yamato", "name": "Yamato", "hp": 8000, "spd": 340, "las": 2, "gen": 2, "cr": 10000, "uri": 0},
@@ -106,7 +109,7 @@ const NPCS := {
 	"uber_kristallon": {"name": "Uber Kristallon", "model": "kristallon", "sz": 18.0, "hp": 2400000, "sh": 1800000, "spd": 240, "dmg": 9000, "aggr": false, "xp": 307200, "hon": 1536, "cr": 2457600, "uri": 768, "resp": 90.0},
 	"pilot": {"name": "Rakip Pilot", "model": "goliath", "sz": 7.0, "hp": 256000, "sh": 100000, "spd": 300, "dmg": 3000, "aggr": true, "xp": 51200, "hon": 512, "cr": 0, "uri": 512, "resp": 30.0},
 	"streuner_boss": {"name": "StreuneR", "model": "streuner", "sz": 10.0, "hp": 30000, "sh": 20000, "spd": 200, "dmg": 350, "dmg_max": 500, "aggr": true, "xp": 3200, "hon": 64, "cr": 6400, "uri": 8, "resp": 20.0},
-	"cubikon": {"name": "Cubikon", "model": "kristallon", "sz": 20.0, "hp": 1600000, "sh": 1200000, "spd": 100, "dmg": 0, "aggr": false, "xp": 409600, "hon": 1024, "cr": 1638400, "uri": 1062, "resp": 75.0},
+	"cubikon": {"name": "Cubikon", "model": "kristallon", "sz": 20.0, "hp": 1600000, "sh": 1200000, "spd": 100, "dmg": 0, "aggr": false, "xp": 512000, "hon": 4096, "cr": 1638400, "uri": 1024, "resp": 75.0},
 	"protegit": {"name": "Protegit", "model": "protegit", "sz": 1.5, "hp": 50000, "sh": 40000, "spd": 320, "dmg": 1125, "dmg_max": 1500, "aggr": true, "xp": 6400, "hon": 64, "cr": 12800, "uri": 16, "resp": 3.0},
 }
 
@@ -114,6 +117,7 @@ const NPCS := {
 # "cells" + "cell_scale": 2010 X-6 izgara referansi (75,39 / 134,39 / 75,79 / 134,79 harita izgara
 # hucreleri); hücre * 140 DO birimi -> harita icine dusen dogus koordinatlari. Hücre olcegu
 # DOGRULANMAMIS baslangic degeridir; gerçek harita boyutuna göre istedigin gibi degistirebilirsin.
+const CUBIKON_XP := 512000                   # Cubikon icin ayrı XP sabiti
 const CUBIKON := {
 	"hp": 1600000, "sh": 1200000,            # 2010 referans degerleri
 	"regen_hp": 125000.0,                    # HP yenileme hizi (HP/sn) - baslangic referansi
@@ -413,12 +417,60 @@ static func make_maps() -> Dictionary:
 	# 4-5: yalnizca gorunmez solucan deligi (J ile rastgele haritaya isinlanir)
 	m["4-5"].portals = [{"to": "random", "x": 21000.0, "y": 13000.0, "wormhole": true}]
 
+	# Her sirkete FARKLI kapi / ust yerlesimi ver (eskiden 1-x, 2-x, 3-x birebir aynıydı).
+	_apply_company_layouts(m)
+
 	# Her haritaya yapilandirilmis dogus bolgelerini ekle (zones).
 	for k in m:
 		_attach_zones(m[k])
 		_attach_rules(m[k], str(k))
 
 	return m
+
+
+# Harita icinde "to" hedefli kapiyi (DO koordinatlari, 21000 x 13100 olcegi) yerlestirir; yoksa ekler.
+static func _set_gate(mm: Dictionary, to: String, ox: float, oy: float) -> void:
+	var sx: float = float(mm.w) / 21000.0
+	var sy: float = float(mm.h) / 13100.0
+	for p in mm.portals:
+		if str(p.to) == to:
+			p.x = ox * sx
+			p.y = oy * sy
+			return
+	(mm.portals as Array).append({"to": to, "x": ox * sx, "y": oy * sy})
+
+
+# Her sirketin kapi + ust yerlesimi farkli olur:
+#   MMO (1-x): temel yerlesim; ust sol ustte, ilerleme soldan saga.
+#   EIC (2-x): 180 derece cevrilmis; ust sag altta, ilerleme sagdan sola. 2-5'in 4-4 kapisi 4-4'teki 2-5 kapisiyla ayni yone bakar.
+#   VRU (3-x): sola-saga aynalanmis; ust sag ustte. 3-1 -> 3-2 kapisi capraz koseye, 3-8'de ust sag ortaya alinir (DO'daki gibi).
+static func _apply_company_layouts(m: Dictionary) -> void:
+	# 1) Tek yonlu kapilari duzelt: 6->7 ve 7->8 donus kapilari eksikti; 7->6 koordinati eslestirildi.
+	for f in [1, 2, 3]:
+		_set_gate(m["%d-6" % f], "%d-7" % f, 19000.0, 2000.0)
+		_set_gate(m["%d-7" % f], "%d-6" % f, 2000.0, 11000.0)
+		_set_gate(m["%d-7" % f], "%d-8" % f, 19000.0, 6500.0)
+	# 2) EIC: 180 derece, VRU: yatay ayna (kapilar ve ust birlikte doner; donus kapilari tutarli kalir)
+	for f in [2, 3]:
+		for n in range(1, 9):
+			var mm: Dictionary = m["%d-%d" % [f, n]]
+			var w: float = float(mm.w)
+			var h: float = float(mm.h)
+			for p in mm.portals:
+				p.x = w - float(p.x)
+				if f == 2:
+					p.y = h - float(p.y)
+			if mm.get("base") != null:
+				mm.base.x = w - float(mm.base.x)
+				if f == 2:
+					mm.base.y = h - float(mm.base.y)
+	# 3) VRU'ya ozel: ev haritasi kapisi capraz kosede; 3-8 ustu sag ortada, kapilar solda
+	_set_gate(m["3-1"], "3-2", 2000.0, 11000.0)
+	_set_gate(m["3-2"], "3-1", 19000.0, 2000.0)
+	var v8: Dictionary = m["3-8"]
+	v8.base = {"x": float(v8.w) - 2300.0 * float(v8.w) / 21000.0, "y": float(v8.h) * 0.5}
+	_set_gate(v8, "3-7", 2000.0, 2000.0)
+	_set_gate(v8, "3-6", 2000.0, 11000.0)
 
 
 # Her haritaya guvenli bolge / PvP / kapi kurallari ekler ("rules"). Kurallar harita numarasina degil bu yapilandirmaya baglidir;
