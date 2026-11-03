@@ -19,17 +19,16 @@ jobs:
       - name: Install Godot 4.7
         run: |
           GODOT_VERSION="4.7"
-          GODOT_OS="macos"
-          wget -q "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-${GODOT_OS}.x86_64.zip" -O godot.zip
+          curl -L -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_macos.x86_64.zip"
           unzip -q godot.zip -d godot
-          chmod +x godot/Godot_v${GODOT_VERSION}-${GODOT_OS}.x86_64
-          echo "GODOT_PATH=$PWD/godot/Godot_v${GODOT_VERSION}-${GODOT_OS}.x86_64" >> $GITHUB_ENV
+          chmod +x godot/Godot_v${GODOT_VERSION}-stable_macos.x86_64
+          echo "GODOT_PATH=$PWD/godot/Godot_v${GODOT_VERSION}-stable_macos.x86_64" >> $GITHUB_ENV
 
       - name: Download Godot 4.7 iOS export templates
         run: |
           GODOT_VERSION="4.7"
-          wget -q "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/ios_template.zip" -O ios_template.zip
-          wget -q "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/ios_debug_template.zip" -O ios_debug_template.zip
+          curl -L -o ios_template.zip "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/ios_template.zip"
+          curl -L -o ios_debug_template.zip "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/ios_debug_template.zip"
           mkdir -p ~/.local/share/godot/export_templates/
           unzip -o -q ios_template.zip -d ~/.local/share/godot/export_templates/
           unzip -o -q ios_debug_template.zip -d ~/.local/share/godot/export_templates/
@@ -38,10 +37,9 @@ jobs:
         run: |
           $GODOT_PATH --headless --export-release "iOS" export/ios/NOVAGATE.xcodeproj
 
-      - name: Install Xcode command line tools
+      - name: Configure Xcode
         run: |
-          xcode-select --install 2>/dev/null || true
-          sudo xcode-select -switch /Applications/Xcode_15.app/Contents/Developer 2>/dev/null || true
+          sudo xcode-select -switch "$(xcode-select -p)"
           xcodebuild -version
 
       - name: Build IPA with Xcode
@@ -64,7 +62,7 @@ jobs:
             -exportOptionsPlist ExportOptions.plist \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO 2>&1 || true
+            CODE_SIGNING_ALLOWED=NO || true
 
       - name: List build output
         run: |
