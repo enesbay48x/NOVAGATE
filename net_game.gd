@@ -313,8 +313,8 @@ func add_player(info: Array) -> void:
 			g.SV._sv_admin = int(info[13])
 		if info.size() > 14:
 			g.SV._sv_rank = int(info[14])
-		if info.size() > 15:
-			g.SV.owned = (info[15] as Array).duplicate()
+		if info.size() > 16:
+			g.SV.owned = (info[16] as Array).duplicate()
 		g._refresh_plate_rank()
 		return
 	remove_player(peer)

@@ -390,7 +390,7 @@ func on_ship(peer: int, ship: String) -> void:
 		return
 	p.ship = ship
 	if str(p.map) != "":
-		# s_pjoin: istemci oyuncuyu yeniden olusturur (yeni gemi modeli)
+		# s_pjoin: istemci oyuncuyu yeniden olusturur (yeni gemi modeli), digerlerine owned olmadan
 		_bcast(str(p.map), "s_pjoin", [_player_info(p)], peer)
 
 
@@ -501,15 +501,20 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 	if auc != null and not bool(p.get("auc_sent", false)):
 		p["auc_sent"] = true
 		auc.on_player_ready(peer)
-	_bcast(map_name, "s_pjoin", [_player_info(p)], peer)
+	_bcast(map_name, "s_pjoin", [_player_info(p)], peer)   # digerlerine owned olmadan
 	if int(p.group) != 0:
 		_group_push(int(p.group))   # grup uyelerinin harita bilgisi guncellensin
 
 
-func _player_info(p: Dictionary) -> Array:
-	return [int(p.id), str(p.name), int(p.faction), str(p.ship), float((p.pos as Vector3).x), float((p.pos as Vector3).z),
+# include_owned=true sadece isteyen istemciye (kendisine) giden s_pjoin'de gonderilir.
+# _bcast ile diger oyunculara giden pakette owned listesi olmaz (ag trafikini kisitlar).
+func _player_info(p: Dictionary, include_owned: bool = false) -> Array:
+	var arr: Array = [int(p.id), str(p.name), int(p.faction), str(p.ship), float((p.pos as Vector3).x), float((p.pos as Vector3).z),
 		float(p.yaw), float(p.hp), float(p.mhp), float(p.sh), float(p.msh), str(p.form), (p.drn as Array).duplicate(),
-		int(p.get("_sv_admin", 0)), int(p.get("_sv_rank", 0)), (p.get("_sv_owned", []) as Array).duplicate()]
+		int(p.get("_sv_admin", 0)), int(p.get("_sv_rank", 0))]
+	if include_owned:
+		arr.append((p.get("_sv_owned", []) as Array).duplicate())
+	return arr
 
 # Her 60 saniyede bir calistirilir: her sirket icin oyuncularin rutbesini hesaplar.
 # Adminler siralamaya girmez. RankSys.points() formulu ile puan hesaplanir, RankSys.rank_index()
@@ -540,7 +545,7 @@ func _calculate_ranks() -> void:
 				p["_sv_rank"] = 21   # admin: rank_21.png
 				if 21 != old_rank and str(p.map) != "":
 					# Admin rozeti: kendine ve haritadaki digerlere gonder (mevcut s_pjoin RPC'si, yeni RPC yok).
-					_to(int(pid), "s_pjoin", [_player_info(p)])
+					_to(int(pid), "s_pjoin", [_player_info(p, true)])
 					_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
 				print("[RANK DEBUG] account_id=%d faction=%d admin -> rank=21 (rank_21.png), old=%d" % [acct_id, f, old_rank])
 				continue
@@ -1420,7 +1425,7 @@ func tick(dt: float) -> void:
 					# Haritadaki diger oyunculara ve kendine guncellenen oyuncu bilgisini gonder (owned guncellemesi icin mevcut s_pjoin RPC'si, yeni RPC yok).
 					if str(p.map) != "" and worlds.has(str(p.map)):
 						_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
-						_to(int(pid), "s_pjoin", [_player_info(p)])
+						_to(int(pid), "s_pjoin", [_player_info(p, true)])
 	# Bayat session kilitlerini temizle + heartbeat (kilit TTL 90 sn, 30 sn'de bir yenilenir)
 	stale_lock_t += dt
 	if stale_lock_t >= 30.0:

@@ -3042,7 +3042,12 @@ func _ship_slots_section(parent: Node, key: String, title: String, c: Dictionary
 		fr[1].add_child(_wrap("Bu geminin bu türde yuvası yok.", 11, DIM))
 		return
 	var g := _slot_grid(cols)
-	fr[1].add_child(g)
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	sc.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	sc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.add_child(g)
+	fr[1].add_child(sc)
 	for i in cap:
 		if i < items.size():
 			var sid := str(items[i])
