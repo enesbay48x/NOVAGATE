@@ -334,6 +334,11 @@ func send_purchase_item(item_id: String, qty: int, tx_id: String) -> void:
 		rpc_id(1, "c_purchase_item", item_id, qty, tx_id)
 
 
+func send_select_ammo(ammo: String) -> void:
+	if online:
+		rpc_id(1, "c_select_ammo", ammo)
+
+
 # ch: 0 genel, 1 sirket, 2 grup
 func send_chat(text: String, ch: int = 0) -> void:
 	if online:
@@ -730,3 +735,17 @@ func c_purchase_item(item_id: String, quantity: int, tx_id: String) -> void:
 func s_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new_uri: int) -> void:
 	if gm != null and online:
 		gm.on_purchase_result(ok, error, tx_id, new_cr, new_uri)
+
+
+# ================================================================== MUHIMMAT SECIMI (client -> sunucu)
+@rpc("any_peer", "call_remote", "reliable")
+func c_select_ammo(ammo: String) -> void:
+	if is_server and srv != null:
+		srv.on_select_ammo(multiplayer.get_remote_sender_id(), ammo)
+
+
+# ================================================================== MUHIMMAT SECIMI SONUCI (sunucu -> client)
+@rpc("authority", "call_remote", "reliable")
+func s_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
+	if gm != null and online:
+		gm.on_select_ammo_result(ok, ammo, error)

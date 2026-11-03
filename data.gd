@@ -45,6 +45,8 @@ const PORTAL_SAFE_RADIUS := 600.0        # kapi cevresi guvenli yaricap (DO biri
 const COMBAT_SEC := 10.0                 # son PvP vurusundan sonra "catisma" sayilma suresi (sn) - varsayim
 const AGGRESSOR_LOCK_SEC := 10.0         # saldiridan sonra korumanin geri gelemedigi sure (sn) - varsayim
 const ARRIVAL_PROTECT_ENEMY_SEC := 0.0   # dusman haritasina gecis korumasi (sn). Kaynaklarda DOGRULANMADI -> 0 = kapali
+const COMBAT_LOGOUT_SAFE_SEC := 15.0     # savas disi cikis: gemi 15 sn haritada kalir
+const COMBAT_LOGOUT_COMBAT_SEC := 30.0   # NPC/PvP sagindan cikis: 30 sn
 const ADV_MAP_PORTAL_DMZ := false        # X-5..X-8'de kendi sirketinin kapi cevresi guvenli mi? Kaynak ayirmiyor -> kapali
 const ENEMY_BASE_SAFE := false           # dusman ussunun yaninda guvenli bolge (kapali: sadece kendi ussun)
 const JUMP_BLOCK_NORMAL_MAPS := false    # normal sirket haritalarinda saldiri altinda atlamayi engelle (kaynakta yalnizca PvP haritalari)

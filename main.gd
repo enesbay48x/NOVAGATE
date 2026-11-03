@@ -3174,7 +3174,8 @@ func select_ammo(id: String) -> void:
 	id = str(id)
 	if id != "rsb":
 		rsb_prev = id
-		SV.sel = id
+		# Savasta muhimmat degistirme kismi sunucu tarafinda dogrulanir (c_select_ammo).
+		Net.send_select_ammo(id)
 		return
 	if rsb_cd > 0.0:
 		toast("RSB-75 hazirlaniyor (%ds), bu surede %s kullanilmaya devam eder." % [int(ceil(rsb_cd)), str(SV.get("sel", "")).to_upper()])
@@ -3182,7 +3183,7 @@ func select_ammo(id: String) -> void:
 	if int(SV.ammo.get("rsb", 0)) <= 0:
 		toast("RSB-75 cephanesi yok! Mağazadan cephane al.")
 		return
-	SV.sel = "rsb"
+	Net.send_select_ammo("rsb")
 
 
 # Ekranda yalnizca ODUL yazilari gorunur (hasar sayilari ayri cizilir). Diger tum bildirimler sohbet gunlugune
@@ -5279,6 +5280,13 @@ func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new
 		SV.erase("pending_purchase")
 		toast("İşlem reddedildi: " + error)
 		save_game()
+
+
+func on_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
+	if ok:
+		SV.sel = ammo
+	else:
+		toast("Muhimmat degistirilemedi: " + error)
 
 
 # ---------- Gercek lazer cikis noktalari ----------

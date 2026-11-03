@@ -33,7 +33,7 @@ const TABS := [
 ]
 const SHOP_CATS := [
 	["ships", "Gemiler"], ["lasers", "Lazerler"], ["gens", "Jeneratörler"], ["drones", "Droidler"],
-	["forms", "Formasyonlar"], ["ammo", "Cephane"], ["rockets", "Roketler"], ["service", "Hizmetler"],
+	["forms", "Formasyonlar"], ["ammo", "Cephane"], ["service", "Hizmetler"],
 ]
 
 # ---- Renk paleti
@@ -61,7 +61,7 @@ const HELP_KEYS := [
 	["Tab", "Sıradaki en yakın hedef."],
 	["Minimap'e tıkla", "Gemi o noktaya uçar."],
 	["1..5 veya slot tık", "Cephane (x1 x2 x3 x4 SAB)."],
-	["R", "Hedefe roket fırlat (HUD roket slotu da çalışır)."],
+
 	["C", "Konfigürasyon 1 / 2 değiştir (5 sn bekleme)."],
 	["J", "Kapının yanında haritadan haritaya atla."],
 	["B", "Kontrol merkezi."],
@@ -965,17 +965,6 @@ func _refresh_shop() -> void:
 				for n in [1000, 10000, 50000]:
 					var cost := int(a.price * n / 1000)
 					_buy_btn(h, "+%s" % game._n(n), _shop_ammo.bind(str(a.id), int(n)), game.can_pay(0 if a_uri else cost, cost if a_uri else 0), 84)
-		"rockets":
-			var rocket_row := _row_panel(shop_body)
-			rocket_row.add_child(_icon(game._tex("res://assets/ui/rocket_r310.png"), 40))
-			var rocket_info := VBoxContainer.new()
-			rocket_info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			rocket_info.add_child(_mk("R-310 Roket   (hasar 400)", 15, GOLD))
-			rocket_info.add_child(_wrap("Stok: %s   •   Soğuma: 5 sn   •   1.000 kredi / 100 roket   •   Oyunda R tuşu" % game._n(game.SV.get("rockets", 0)), 12, TEXT2))
-			rocket_row.add_child(rocket_info)
-			for rocket_pack in [100, 500, 1000]:
-				var rocket_cost := int(ceil(float(rocket_pack) / 100.0) * 1000.0)
-				_buy_btn(rocket_row, "+%d" % rocket_pack, _shop_rockets.bind(rocket_pack), game.can_pay(rocket_cost, 0), 72)
 		_:
 			var cost: int = game.repair_cost()
 			_service_row("Tam Tamir", "Geminin canını ve kalkanını doldurur.", "TAMİR ET", _svc_repair, cost)
@@ -1024,11 +1013,6 @@ func _shop_form(code: String) -> void:
 
 func _shop_ammo(id: String, n: int) -> void:
 	game.buy_ammo(id, n)
-	refresh()
-
-
-func _shop_rockets(n: int) -> void:
-	game.buy_rockets(n)
 	refresh()
 
 
@@ -3021,13 +3005,6 @@ func _refresh_equip_tab_cephane() -> void:
 		var tip := "%s\nStok: %s\nHasar çarpanı: %sx\nSeçmek için tıkla" % [str(a.name), game._n(have), str(a.mult)]
 		fl.add_child(_ammo_card(game._tex("res://assets/ui/ammo_%s.png" % id), str(a.name), have, (a.col as Color).darkened(0.35), sel == id, tip, _pick_ammo.bind(id)))
 		i += 1
-
-	var fr2 := _sec_frame("Roket Cephanesi")
-	equip_content.add_child(fr2[0])
-	var fl2 := _flow(4)
-	fr2[1].add_child(fl2)
-	var rk := int(game.SV.get("rockets", 0))
-	fl2.add_child(_ammo_card(game._tex("res://assets/ui/rocket.png"), "Roket", rk, ROCKET_BAR_COL, false, "Roket\nStok: %s\nR tuşu ile hedefe fırlatılır" % game._n(rk), Callable()))
 
 
 # ============================================================================

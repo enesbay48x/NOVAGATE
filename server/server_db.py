@@ -1165,6 +1165,28 @@ def get_account_status(account_id: int) -> dict:
         conn.close()
 
 
+def save_active_ship(account_id: int, ship_id: str) -> dict:
+    """Oyuncunun aktif gemisini player_data.ship'te kalici olarak kaydeder."""
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE player_data SET ship = ?, updated_at = ? WHERE account_id = ?",
+            (ship_id, now_ts(), account_id),
+        )
+        conn.execute("COMMIT")
+        return {"ok": True}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("save_active_ship hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
 def get_player_balance(account_id: int) -> dict:
     """Oyuncunun cr/uri bakiyesini dondurur (online bellek senkronizasyonu icin)."""
     conn = get_db()
