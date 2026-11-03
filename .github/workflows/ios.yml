@@ -23,9 +23,17 @@ jobs:
           mkdir -p "$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable"
           cp ios_templates.tpz "$HOME/Library/Application Support/Godot/export_templates/4.7.2.stable/"
 
+      - name: Debug: list Godot app
+        run: |
+          ls -la /Applications/ | grep -i godot || true
+          find /Applications -name "Godot" -type f 2>/dev/null || true
+          find /Applications -name "*.app" -maxdepth 1 2>/dev/null | grep -i godot || true
+
       - name: Export iOS Xcode project
         run: |
-          /Applications/Godot_v4.7.2-stable_macos.universal.app/Contents/MacOS/Godot --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
+          GODOT_BIN=$(find /Applications -name "Godot" -type f -executable 2>/dev/null | head -1)
+          echo "Using Godot binary: $GODOT_BIN"
+          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
 
       - name: Build unsigned .ipa with xcodebuild
         run: |
