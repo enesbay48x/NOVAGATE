@@ -907,7 +907,11 @@ func _refresh_shop() -> void:
 			var grid := _shop_grid()
 			for s in DOData.SHIPS:
 				if str(s.id) in DOData.MARKET_HIDDEN:
-					continue   # bigboy / aegis / citadel marketten kaldirildi
+					# bigboy / aegis / citadel marketten kaldirildi; police sadece admin + sahipse hangarda KULLAN düğmesiyle görünür.
+					if s.id == "police" and bool(game.SV.get("_sv_admin", 0)) and s.id in game.SV.owned:
+						pass
+					else:
+						continue
 				var owned: bool = s.id in game.SV.owned
 				var lines := "Can %s   Hız %d\nLazer %d   Jeneratör %d   Droid %d" % [game._n(s.hp), s.spd, s.las, s.gen, DOData.drone_slots(s)]
 				var badge := ""

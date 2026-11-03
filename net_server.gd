@@ -305,6 +305,12 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_sv_owned": ps.get("owned", [str(ps.get("ship", "phoenix"))]),  # sahip oldugu gemiler
 		"_session_hash": session_hash,   # tek cihaz kurali: bu oturumun kilit kimligi
 	}
+	var p: Dictionary = players[peer_id]
+	# Adminlik varsa police'i giris aninda owned'e ekle (30 sn tick'e bagli kalma)
+	if bool(p.get("_sv_admin", 0)) and not "police" in p.get("_sv_owned", []):
+		p["_sv_owned"].append("police")
+		db_send("admin_ship", {"account_id": int(p.account_id), "ship": "police", "add": true})
+		print("[ADMIN SHIP] account_id=%d callsign=%s police owned'e eklendi (giris aninda)" % [int(p.account_id), str(p.name)])
 
 	print("[SUNUCU] Token dogrulandi: peer=%d, account_id=%d, callsign=%s" % [peer_id, acct_id, str(ps.get("callsign", "Gezgin"))])
 
@@ -377,6 +383,10 @@ func on_ship(peer: int, ship: String) -> void:
 		return
 	var p: Dictionary = players[peer]
 	if str(p.ship) == ship:
+		return
+	# Sunucu tarafinda gemi secimi dogrulanir: police sadece admin icin (istemciye guvenilmez).
+	if ship == "police" and not bool(p.get("_sv_admin", 0)):
+		print("[ON_SHIP] account_id=%d police secimi REDDEDILDI (degil admin)" % int(p.account_id))
 		return
 	p.ship = ship
 	if str(p.map) != "":
@@ -499,7 +509,7 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 func _player_info(p: Dictionary) -> Array:
 	return [int(p.id), str(p.name), int(p.faction), str(p.ship), float((p.pos as Vector3).x), float((p.pos as Vector3).z),
 		float(p.yaw), float(p.hp), float(p.mhp), float(p.sh), float(p.msh), str(p.form), (p.drn as Array).duplicate(),
-		int(p.get("_sv_admin", 0)), int(p.get("_sv_rank", 0))]
+		int(p.get("_sv_admin", 0)), int(p.get("_sv_rank", 0)), (p.get("_sv_owned", []) as Array).duplicate()]
 
 # Her 60 saniyede bir calistirilir: her sirket icin oyuncularin rutbesini hesaplar.
 # Adminler siralamaya girmez. RankSys.points() formulu ile puan hesaplanir, RankSys.rank_index()
@@ -1407,9 +1417,10 @@ func tick(dt: float) -> void:
 							if str(p.map) != "" and worlds.has(str(p.map)):
 								_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
 					p["_sv_owned"] = owned
-					# Haritadaki diger oyunculara guncellenen oyuncu bilgisini gonder
+					# Haritadaki diger oyunculara ve kendine guncellenen oyuncu bilgisini gonder (owned guncellemesi icin mevcut s_pjoin RPC'si, yeni RPC yok).
 					if str(p.map) != "" and worlds.has(str(p.map)):
 						_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
+						_to(int(pid), "s_pjoin", [_player_info(p)])
 	# Bayat session kilitlerini temizle + heartbeat (kilit TTL 90 sn, 30 sn'de bir yenilenir)
 	stale_lock_t += dt
 	if stale_lock_t >= 30.0:

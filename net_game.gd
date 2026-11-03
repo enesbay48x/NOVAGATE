@@ -308,11 +308,13 @@ func add_player(info: Array) -> void:
 		return
 	var peer: int = int(info[0])
 	if peer == net.my_id:
-		# Kendi rütbesi ve admin bayragi SUNUCUdan gelir (yerelden hesaplanmaz).
+		# Kendi rütbesi, admin bayragi ve owned listesi SUNUCUdan gelir (yerelden hesaplanmaz).
 		if info.size() > 13:
 			g.SV._sv_admin = int(info[13])
 		if info.size() > 14:
 			g.SV._sv_rank = int(info[14])
+		if info.size() > 15:
+			g.SV.owned = (info[15] as Array).duplicate()
 		g._refresh_plate_rank()
 		return
 	remove_player(peer)
