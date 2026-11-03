@@ -607,8 +607,8 @@ func _chat_line(bb: String) -> void:
 # ------------------------------------------------------------------ market alimi sonucu (sunucu -> istemci)
 func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new_uri: int) -> void:
 	if ok:
-		SV.cr = new_cr
-		SV.uri = new_uri
+		g.SV.cr = new_cr
+		g.SV.uri = new_uri
 		g.save_game()
 	else:
 		g.toast("Alim basarisiz: " + error)
