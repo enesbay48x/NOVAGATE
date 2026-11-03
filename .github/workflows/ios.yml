@@ -54,7 +54,7 @@ jobs:
       - name: Build unsigned .ipa with xcodebuild
         run: |
           cd export/ios
-          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO OTHER_LDFLAGS="-framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation -framework CoreMedia -framework CoreVideo -framework AVFoundation -framework GameKit" -derivedDataPath xcode-build
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO OTHER_LDFLAGS="-ObjC -all_load -framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation -framework CoreMedia -framework CoreVideo -framework AVFoundation -framework GameKit" -derivedDataPath xcode-build
           mkdir -p Payload
           cp -R "xcode-build/Build/Products/Release-iphoneos/NOVAGATE.app" Payload/
           zip -r ../../NOVAGATE.ipa Payload/
