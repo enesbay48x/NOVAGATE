@@ -264,8 +264,7 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 			_kick_session(int(old_pid), "Hesabına başka bir cihazdan girildi")
 
 	# Combat Logout: ghost oyuncu varsa geri yukle (DB'ye gitmeye gerek yok)
-	# Combat Logout: ghost oyuncu varsa geri yukle (DB'ye gitmeye gerek yok)
-	var gp: Dictionary = null
+	var gp = null
 	var gp_peer: int = -1
 	for k in ghost_players.keys():
 		var g: Dictionary = ghost_players[k]
