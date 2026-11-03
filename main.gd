@@ -2488,6 +2488,16 @@ func item_def(id: String) -> Dictionary:
 	return {}
 
 
+# Urun maliyeti [cr, uri] (qty adet). Droid: ayni turden kacinci droid alindigina gore (sunucuyla ayni).
+func item_cost(id: String, qty: int) -> Array:
+	var d := item_def(id)
+	if d.is_empty():
+		return [0, 0]
+	if DOData.DRONES.has(id):
+		return DOData.drone_price(id, inv_count(id), qty)
+	return [int(d.cr) * qty, int(d.uri) * qty]
+
+
 func item_key(id: String) -> String:
 	if DOData.LASERS.has(id):
 		return "las"
@@ -2509,12 +2519,13 @@ func inv_count(id: String) -> int:
 
 func item_icon(id: String) -> Texture2D:
 	var path := "res://assets/items/"
+	var iid: String = str(item_def(id).get("icon", id))   # yeni urunler en yakin mevcut urunun ikonunu kullanir
 	if DOData.LASERS.has(id):
-		path += "weapon_" + id
+		path += "weapon_" + iid
 	elif DOData.GENS.has(id):
-		path += "generator_" + id
+		path += "generator_" + iid
 	else:
-		path += "drone_" + id
+		path += "drone_" + iid
 	return _tex(path + ".png")
 
 
@@ -2951,7 +2962,9 @@ func ship_speed() -> float:
 
 
 func absorb() -> float:
-	var a := 0.8
+	# Emilim = hasarin kalkana giden orani (dmg * absorb kalkandan, kalani cana gider). Takili kalkan
+	# jeneratoru varsa onun degeri (en yuksegi) kullanilir; yoksa eski taban 0.8.
+	var a := -1.0
 	var c := cfg()
 	for id in c.gen:
 		var g: Dictionary = DOData.GENS[id]
@@ -2960,6 +2973,8 @@ func absorb() -> float:
 	for id in drone_items(c):
 		if DOData.GENS.has(id) and str(DOData.GENS[id].type) == "sh":
 			a = maxf(a, float(DOData.GENS[id].abs))
+	if a < 0.0:
+		a = 0.8
 	return minf(1.0, a + skill_bonus("shield_abs"))
 
 
@@ -3015,6 +3030,7 @@ func buy_ship(id: String) -> bool:
 	SV.owned.append(id)
 	toast("Satın alındı: " + str(d.name))
 	save_game()
+	_send_market(id, 1, int(d.cr), int(d.uri))
 	return true
 
 
@@ -3040,22 +3056,28 @@ func drones_owned() -> int:
 	return n
 
 
+# Sunucuya market islemi gonder (fiyati sunucu kendisi hesaplar; qty < 0 = satis). Bekleyen kayit,
+# sunucu reddederse yerel degisikligi geri almak icindir.
+func _send_market(id: String, qty: int, cr: int, uri: int) -> void:
+	if not Net.online:
+		return
+	var tx_id: String = "buy:" + str(Time.get_unix_time_from_system()) + ":" + str(randi())
+	SV["pending_purchase"] = {"id": id, "qty": qty, "cr": cr, "uri": uri, "tx_id": tx_id}
+	Net.send_purchase_item(id, qty, tx_id)
+
+
 func buy_item(id: String, qty: int) -> bool:
 	var d := item_def(id)
 	if DOData.DRONES.has(id) and drones_owned() + qty > DOData.MAX_DRONES:
 		toast("En fazla %d droid satın alabilirsin! (Sahip olunan: %d)" % [DOData.MAX_DRONES, drones_owned()])
 		return false
-	if d.is_empty() or not pay(int(d.cr) * qty, int(d.uri) * qty):
+	var cost: Array = item_cost(id, qty)
+	if d.is_empty() or int(cost[0]) < 0 or not pay(int(cost[0]), int(cost[1])):
 		return false
 	inv_dict(id)[id] = inv_count(id) + qty
 	toast("Satın alındı: %s x%d" % [str(d.name), qty])
 	save_game()
-	# Sunucuya da bildir (kalicilik icin)
-	if Net.online:
-		var tx_id: String = "buy:" + str(Time.get_unix_time_from_system()) + ":" + str(randi())
-		Net.send_purchase_item(id, qty, tx_id)
-		# Bekleyen alim kaydi (sunucu hatasi durumunda geri almak icin)
-		SV["_pending_purchase"] = {"id": id, "qty": qty, "cr": int(d.cr) * qty, "uri": int(d.uri) * qty, "tx_id": tx_id}
+	_send_market(id, qty, int(cost[0]), int(cost[1]))
 	return true
 
 
@@ -3069,12 +3091,19 @@ func sell_item(id: String) -> bool:
 		if (c[key] as Array).count(id) >= have:
 			(c[key] as Array).erase(id)
 	inv_dict(id)[id] = have - 1
-	SV.cr += int(int(d.cr) * 0.4)
-	SV.uri += int(int(d.uri) * 0.4)
+	# Iade %40, YENI fiyat uzerinden (droid: en son alinan droidin fiyati). Sunucu ayni kurali uygular.
+	var unit: Array = [int(d.cr), int(d.uri)]
+	if DOData.DRONES.has(id):
+		unit = DOData.drone_price(id, have - 1, 1)
+	var rcr := int(int(unit[0]) * DOData.SELL_RATE)
+	var ruri := int(int(unit[1]) * DOData.SELL_RATE)
+	SV.cr += rcr
+	SV.uri += ruri
 	ensure_loadout()
 	_clamp_vitals()
 	toast("Satıldı: " + str(d.name))
 	save_game()
+	_send_market(id, -1, -rcr, -ruri)
 	return true
 
 
@@ -3090,15 +3119,21 @@ func buy_form(code: String) -> bool:
 
 
 func buy_ammo(id: String, n: int) -> bool:
-	var price := 0
+	var cr := 0
+	var uri := 0
 	for a in DOData.AMMO:
 		if a.id == id:
-			price = int(a.price * n / 1000)
-	if not pay(price, 0):
+			var price := int(a.price * n / 1000)
+			if str(a.get("cur", "cr")) == "uri":
+				uri = price
+			else:
+				cr = price
+	if not pay(cr, uri):
 		return false
 	SV.ammo[id] = int(SV.ammo.get(id, 0)) + n
 	toast("+%d %s cephane" % [n, id.to_upper()])
 	save_game()
+	_send_market(id, n, cr, uri)
 	return true
 
 
@@ -4242,8 +4277,8 @@ func _set_fire(v: bool) -> void:
 		toast("Once bir hedef sec (dusmana tikla / Tab)")
 		return
 	fire = v
-	if not v:
-		target = null
+	# Ates birakilinca hedef kilidi KALIR. Hedef yalniz dusman olunce (tick), oyuncu bilerek
+	# birakinca (_stop_all: sag tik/Esc/geri) veya baska hedef secince degisir.
 
 
 # Roket secimi: R tusu / roket slotu / ROKET butonu otomatik atisi acar-kapatir.
@@ -4579,6 +4614,8 @@ const LASER_SPRITES := {
 	"x4": ["nv_x4", 156, 40, 4.5],       # beyaz-buz, kalin, nabizli
 	"sab": ["nv_sab", 156, 40, 4.4],     # turkuaz dalga
 	"rsb": ["nv_rsb", 156, 36, 4.6],     # altin simsek mizragi
+	"job": ["nv_x2", 156, 40, 4.4],      # JOB-100: gorsel MCB-25 (x2) ile ayni
+	"pib": ["nv_x4", 156, 40, 4.5],      # PIB-100: gorsel UCB-100 (x4) ile ayni
 	"n_streuner": ["nv_streuner", 132, 40, 3.6],
 	"n_streuner_boss": ["nv_streuner", 132, 40, 4.4],
 	"n_saimon": ["nv_streuner", 132, 40, 3.8],
@@ -4806,6 +4843,8 @@ const AMMO_HIT := {
 	"x3": {"p": 1.1, "sp": 7, "ring": 1.8},             # sarj halkasi
 	"x4": {"p": 1.5, "sp": 9, "ring": 2.2},             # belirgin patlama + halka
 	"rsb": {"p": 2.2, "sp": 13, "ring": 2.8},           # guclu, buyuk, parlak
+	"job": {"p": 0.9, "sp": 6},                          # x2 ile ayni
+	"pib": {"p": 1.5, "sp": 9, "ring": 2.2},             # x4 ile ayni
 }
 
 
@@ -5215,31 +5254,29 @@ func apply_pvp_reward(_victim: int, info: Dictionary = {}) -> void:
 
 # Sunucu tarafindan market alimi sonucu (c_purchase_item tarafige gonderilen istek)
 func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new_uri: int) -> void:
+	var pending: Dictionary = SV.get("pending_purchase", {})
 	if ok:
+		# Sunucunun hesapladigi bakiye esastir (istemci fiyatina guvenilmez).
 		SV.cr = new_cr
 		SV.uri = new_uri
 		SV.erase("pending_purchase")
 		save_game()
-	else:
-		# Sunucu reddetti: yerel olarak geri al (para iade, esi geri cikar)
-		var pending: Dictionary = SV.get("pending_purchase", {})
-		if pending.has("id") and pending.has("qty"):
-			var pid: String = str(pending.id)
-			var pqty: int = int(pending.qty)
-			var pcr: int = int(pending.cr)
-			var puri: int = int(pending.uri)
-			# Para iade
-			SV.cr = int(SV.cr) + pcr
-			SV.uri = int(SV.uri) + puri
-			# Esi geri cikar
-			var cur_qty: int = inv_count(pid)
-			if cur_qty >= pqty:
-				inv_dict(pid)[pid] = cur_qty - pqty
-			else:
-				inv_dict(pid)[pid] = 0
-			SV.erase("pending_purchase")
-			save_game()
-		toast("Alim basarisiz: " + error)
+		return
+	# Sunucu reddetti: yerel degisikligi geri al
+	if pending.has("id") and pending.has("qty"):
+		var pid: String = str(pending.id)
+		var pqty: int = int(pending.qty)
+		SV.cr = int(SV.cr) + int(pending.cr)     # alimda +, satista - (iade geri alinir)
+		SV.uri = int(SV.uri) + int(pending.uri)
+		if DOData.SHIPS.any(func(sh): return str(sh.id) == pid):
+			SV.owned.erase(pid)
+		elif DOData.AMMO.any(func(am): return str(am.id) == pid):
+			SV.ammo[pid] = maxi(0, int(SV.ammo.get(pid, 0)) - pqty)
+		else:
+			inv_dict(pid)[pid] = maxi(0, inv_count(pid) - pqty)   # satista pqty = -1 -> geri eklenir
+		SV.erase("pending_purchase")
+		toast("İşlem reddedildi: " + error)
+		save_game()
 
 
 # ---------- Gercek lazer cikis noktalari ----------

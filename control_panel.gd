@@ -897,9 +897,11 @@ func _item_card(grid: Control, id: String, desc: String) -> void:
 	var badge := ""
 	if have > 0:
 		badge = "Envanter: %d" % have
-	var btns := _shop_card(grid, game.item_icon(id), str(d.name), desc, int(d.cr), int(d.uri), badge)
+	var unit: Array = game.item_cost(id, 1)    # droid: sıradaki droidin fiyatı
+	var btns := _shop_card(grid, game.item_icon(id), str(d.name), desc, maxi(0, int(unit[0])), maxi(0, int(unit[1])), badge)
 	var q := shop_qty
-	var ok: bool = game.can_pay(int(d.cr) * q, int(d.uri) * q)
+	var tot: Array = game.item_cost(id, q)
+	var ok: bool = int(tot[0]) >= 0 and game.can_pay(int(tot[0]), int(tot[1]))
 	_buy_btn(btns, "AL x%d" % q, _shop_item.bind(id, q), ok, 100)
 	var sb := _buy_btn(btns, "SAT", _sell_item.bind(id), have > 0, 60, "Button")
 	sb.tooltip_text = "1 adet sat (satış iadesi: %40)"
@@ -961,15 +963,16 @@ func _refresh_shop() -> void:
 		"ammo":
 			for a in DOData.AMMO:
 				var h := _row_panel(shop_body)
-				h.add_child(_icon(game._tex("res://assets/ui/ammo_%s.png" % str(a.id)), 40))
+				h.add_child(_icon(game._tex("res://assets/ui/ammo_%s.png" % str(a.get("icon", a.id))), 40))
+				var a_uri: bool = str(a.get("cur", "cr")) == "uri"
 				var info := VBoxContainer.new()
 				info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 				info.add_child(_mk("%s  (hasar x%s)" % [str(a.name), str(a.mult)], 15, GOLD))
-				info.add_child(_mk("Elinde: %s     Fiyat: %s Kredi / 1.000" % [int(game.SV.ammo.get(a.id, 0)), game._n(a.price)], 12, TEXT2))
+				info.add_child(_mk("Elinde: %s     Fiyat: %s %s / 1.000" % [int(game.SV.ammo.get(a.id, 0)), game._n(a.price), "Uridium" if a_uri else "Kredi"], 12, TEXT2))
 				h.add_child(info)
 				for n in [1000, 10000, 50000]:
 					var cost := int(a.price * n / 1000)
-					_buy_btn(h, "+%s" % game._n(n), _shop_ammo.bind(str(a.id), int(n)), game.can_pay(cost, 0), 84)
+					_buy_btn(h, "+%s" % game._n(n), _shop_ammo.bind(str(a.id), int(n)), game.can_pay(0 if a_uri else cost, cost if a_uri else 0), 84)
 		"rockets":
 			var rocket_row := _row_panel(shop_body)
 			rocket_row.add_child(_icon(game._tex("res://assets/ui/rocket_r310.png"), 40))
