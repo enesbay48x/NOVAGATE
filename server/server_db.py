@@ -1499,6 +1499,12 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 float(msg.get("px", 0.0)),
                 float(msg.get("pz", 0.0)),
             )
+        elif method == "decrement_ammo":
+            resp = decrement_ammo(
+                int(msg.get("account_id", 0)),
+                str(msg.get("ammo_id", "")),
+                int(msg.get("quantity", 1)),
+            )
         elif method == "backup":
             backup_key = msg.get("backup_key", "")
             if isinstance(backup_key, str):
@@ -1552,6 +1558,47 @@ def save_player_position(account_id: int, map_name: str, px: float, pz: float) -
         except Exception:
             pass
         log.error("save_player_position hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+def decrement_ammo(account_id: int, ammo_id: str, quantity: int) -> dict:
+    """
+    Belirli bir merminin miktarini atomik olarak azaltir.
+    BEGIN IMMEDIATE ile korunur. Negatif yapilmaz, yetersiz durumda RED.
+    """
+    account_id = int(account_id)
+    quantity = int(quantity)
+    if quantity <= 0:
+        return {"ok": False, "error": "invalid_quantity"}
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT quantity FROM ammo WHERE account_id = ? AND ammo_id = ?",
+            (account_id, ammo_id),
+        ).fetchone()
+        if not row:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "ammo_not_found"}
+        current = int(row["quantity"])
+        if current < quantity:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "insufficient_ammo"}
+        new_qty = current - quantity
+        conn.execute(
+            "UPDATE ammo SET quantity = ? WHERE account_id = ? AND ammo_id = ?",
+            (new_qty, account_id, ammo_id),
+        )
+        conn.execute("COMMIT")
+        return {"ok": True, "ammo_id": ammo_id, "new_qty": new_qty}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("decrement_ammo hata: %s", e)
         return {"ok": False, "error": "internal"}
     finally:
         conn.close()
