@@ -623,3 +623,8 @@ func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new
 		g.save_game()
 	else:
 		g.toast("Alim basarisiz: " + error)
+
+
+func on_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
+	if g != null:
+		g.on_select_ammo_result(ok, ammo, error)
