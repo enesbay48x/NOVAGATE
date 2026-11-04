@@ -1592,6 +1592,11 @@ def save_player_ammo(account_id: int, ammo_delta: dict) -> dict:
         result_ammo: dict = {}
         for ammo_id, delta in ammo_delta.items():
             delta = int(delta)
+            # Eger ammo yoksa once INSERT (sifirla baslat), sonra UPDATE ile delta uygula
+            conn.execute(
+                "INSERT OR IGNORE INTO ammo (account_id, ammo_id, quantity) VALUES (?, ?, 0)",
+                (account_id, str(ammo_id)),
+            )
             conn.execute(
                 "UPDATE ammo SET quantity = MAX(0, quantity + ?) WHERE account_id = ? AND ammo_id = ?",
                 (delta, account_id, str(ammo_id)),
