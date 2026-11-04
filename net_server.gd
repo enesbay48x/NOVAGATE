@@ -458,6 +458,7 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_sv_pvp_kills": int(ps.get("pvp_kills", 0)),
 		"_sv_settings": str(ps.get("settings", "{}")),
 		"_sv_inventory": ps.get("inv", {}),  # doldurulabilir
+		"_sv_ammo": ps.get("ammo", {}),  # sunucu kaynagi: istemciye yazilmaz
 		"_sv_admin": int(ps.get("is_admin", 0)),   # admin yetkisi (sunucu tarafige)
 		"_sv_reg_ts": int(ps.get("reg_ts", 0)),    # kayit gunu (rutbe hesabi)
 		"_sv_rank_pen": float(ps.get("rank_pen", 0.0)),  # rutbe cezasi
@@ -502,7 +503,7 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 	# Mevcut account_id'yi koru, diger alanlari guncelle
 	var acct_id: int = int(players[peer].account_id)
 	var old_p: Dictionary = players[peer]
-	players[peer] = {"id": peer, "account_id": acct_id, "name": nm, "faction": clampi(faction, 1, 3), "ship": ship, "map": "",
+	players[peer] = {"id": peer, "account_id": acct_id, "name": nm, "faction": clampi(faction, 1, 3), "ship": old_p.get("ship", "phoenix"), "map": "",
 		"pos": Vector3.ZERO, "yaw": 0.0, "hp": 1.0, "mhp": 1.0, "sh": 0.0, "msh": 0.0, "spd": 0.0,
 		"in_safe": false, "ut": false, "chat_t": 0.0, "form": "std", "drn": [],
 		# koruma / catisma durumu (hepsi sunucu saatiyle; birbirinden ayri)
@@ -510,7 +511,7 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 		"jump_to": "", "jump_dl": -1.0, "respawn_ok": false, "group": 0}
 	# Token asamasinda yuklenen sunucu ekonomi/profil kopyasini KORU (odul kaybi olmasin).
 	for _k in ["_sv_cr", "_sv_uri", "_sv_xp", "_sv_hon", "_sv_sep", "_sv_kills",
-			"_sv_pvp_kills", "_sv_settings", "_sv_inventory", "_sv_admin",
+			"_sv_pvp_kills", "_sv_settings", "_sv_inventory", "_sv_ammo", "_sv_admin",
 			"_sv_rank", "_sv_reg_ts", "_sv_rank_pen", "_sv_quests", "_sv_owned", "_session_hash"]:
 		if old_p.has(_k):
 			players[peer][_k] = old_p[_k]
@@ -541,23 +542,30 @@ func on_ship(peer: int, ship: String) -> void:
 			ok = true
 			break
 	if not ok:
+		net.callv("rpc_id", [peer, "s_ship_result", false, str(players[peer].get("ship", "phoenix")), "Gecersiz gemi"])
 		return
 	var p: Dictionary = players[peer]
 	if str(p.ship) == ship:
+		net.callv("rpc_id", [peer, "s_ship_result", true, ship, "Zaten bu gemide"])
 		return
 	# Savasta gemi degistirme yasak (istemciye guvenilmez).
 	if float(p.combat_t) > clock or float(p.lock_t) > clock:
 		print("[ON_SHIP] account_id=%d gemi degistirme REDDEDILDI (savasta/kilitli)" % int(p.account_id))
+		net.callv("rpc_id", [peer, "s_ship_result", false, str(p.ship), "Savasta/kilitli gemi degistirilemez"])
 		return
 	# Sunucu tarafinda gemi secimi dogrulanir: police sadece admin icin (istemciye guvenilmez).
 	if ship == "police" and not bool(p.get("_sv_admin", 0)):
 		print("[ON_SHIP] account_id=%d police secimi REDDEDILDI (degil admin)" % int(p.account_id))
+		net.callv("rpc_id", [peer, "s_ship_result", false, str(p.ship), "Police sadece admin icin"])
 		return
 	p.ship = ship
 	# Aktif gemiyi veritabanina kalici olarak kaydet (istemciye guvenilmez).
 	var ship_resp: Dictionary = db_send("save_active_ship", {"account_id": int(p.account_id), "ship": ship})
 	if not ship_resp.has("ok") or not ship_resp["ok"]:
 		print("[ON_SHIP] active_ship kaydedilemedi: account_id=%d" % int(p.account_id))
+		net.callv("rpc_id", [peer, "s_ship_result", false, str(p.ship), "Veritabani hatasi: gemisi kaydedilemedi"])
+		return
+	net.callv("rpc_id", [peer, "s_ship_result", true, ship, ""])
 	if str(p.map) != "":
 		# s_pjoin: istemci oyuncuyu yeniden olusturur (yeni gemi modeli), digerlerine owned olmadan
 		_bcast(str(p.map), "s_pjoin", [_player_info(p)], peer)
@@ -909,6 +917,15 @@ func on_fire_vis(peer: int, kind: int, ref: int, nb: int, ammo: String) -> void:
 		fp["fire_tok"] = ftok
 		return
 	fp["fire_tok"] = ftok - 1.0
+	# Ammo kontrolu: yetersizse atisi reddet
+	var ammo_dict: Dictionary = fp.get("_sv_ammo", {})
+	var current_qty: int = int(ammo_dict.get(ammo, 0))
+	if current_qty < nb:
+		# Yetersiz mermi: atisi iptal et, istemciye gonderilmez
+		return
+	# Mermi yeterli: bellekte dusur (DB'ye yazma icin zamanlayici/on_disconnect beklenir)
+	ammo_dict[ammo] = current_qty - nb
+	fp["_sv_ammo"] = ammo_dict
 	_register_attack(players[peer])   # ates acmak (NPC ya da oyuncuya) korumayi derhal kaldirir
 	_bcast(str(players[peer].map), "s_fire", [peer, kind, ref, clampi(nb, 1, 10), ammo], peer)
 

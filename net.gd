@@ -754,3 +754,10 @@ func c_select_ammo(ammo: String) -> void:
 func s_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
 	if gm != null and online:
 		gm.on_select_ammo_result(ok, ammo, error)
+
+
+# ================================================================== GEMI DEGISTIRME SONUCI (sunucu -> istemci)
+@rpc("authority", "call_remote", "reliable")
+func s_ship_result(ok: bool, ship: String, error: String) -> void:
+	if gm != null and online:
+		gm.on_ship_result(ok, ship, error)
