@@ -967,21 +967,24 @@ func _refresh_shop() -> void:
 					_buy_btn(h, "+%s" % game._n(n), _shop_ammo.bind(str(a.id), int(n)), game.can_pay(0 if a_uri else cost, cost if a_uri else 0), 84)
 		_:
 			var cost: int = game.repair_cost()
-			_service_row("Tam Tamir", "Geminin canını ve kalkanını doldurur.", "TAMİR ET", _svc_repair, cost)
+			var repair_desc := "Geminin canını ve kalkanını doldurur.  Phoenix için ücretsiz, diğer gemiler 500 Uridyum."
+			_service_row("Tam Tamir", repair_desc, "TAMİR ET", _svc_repair, cost, true, cost > 0 or game.wrecked)
 			_service_row("Galaksi Haritası", "Kapılara uçmadan önce haritayı aç.", "AÇ", _open_galaxy, 0)
 
 
-func _service_row(title: String, desc: String, btn: String, cb: Callable, cost: int) -> void:
+func _service_row(title: String, desc: String, btn: String, cb: Callable, cost: int, in_uri: bool = false, usable: bool = true) -> void:
 	var h := _row_panel(shop_body)
 	var info := VBoxContainer.new()
 	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	info.add_child(_mk(title, 15, GOLD))
 	info.add_child(_wrap(desc, 12, TEXT2))
 	h.add_child(info)
-	var pr := _mk(_cost_txt(cost, 0) if cost > 0 else "Ücretsiz", 13, GREEN)
+	var cost_str: String = (_cost_txt(0, cost) if in_uri else _cost_txt(cost, 0)) if cost > 0 else "Ücretsiz"
+	var pr := _mk(cost_str, 13, GREEN)
 	pr.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	h.add_child(pr)
-	var b := _btn(btn, "ButtonPrimary", cb, Vector2(140, 36), game.can_pay(cost, 0), 12)
+	var affordable: bool = game.can_pay(0, cost) if in_uri else game.can_pay(cost, 0)
+	var b := _btn(btn, "ButtonPrimary", cb, Vector2(140, 36), affordable and usable, 12)
 	b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	h.add_child(b)
 
@@ -2377,12 +2380,157 @@ func _refresh_settings() -> void:
 
 	set_body.add_child(_wrap("Ses ayarları yok: bu projede ses/AudioBus kaynağı bulunmuyor.   •   Masaüstü: fare + klavye   •   Dokunmatik: ekrana dokunarak hareket/hedef seçimi", 11, DIM))
 
+	_build_account_settings()
+
 	set_body.add_child(_mk("KAYIT", 13, GOLD))
 	var br := HBoxContainer.new()
 	br.add_theme_constant_override("separation", 8)
 	set_body.add_child(br)
 	br.add_child(_btn("OYUNU KAYDET", "ButtonPrimary", _save_now, Vector2(200, 40), true, 13))
 	br.add_child(_btn("KAYDET VE ÇIK", "ButtonDanger", game._quit_game, Vector2(200, 40), true, 13))
+
+
+# ----------------------------------------------------------------------------
+#  HESAP: oyun-ici nick / sifre / sirket degistirme
+# ----------------------------------------------------------------------------
+var _acc_nick_in: LineEdit
+var _acc_pw_old: LineEdit
+var _acc_pw_new: LineEdit
+var _acc_pw_new2: LineEdit
+var _acc_pw_msg: Label
+var _acc_pw_busy := false
+var _acc_confirm: ConfirmationDialog
+
+
+func _acc_field(parent: Node, ph: String, secret: bool, max_len: int) -> LineEdit:
+	var e := LineEdit.new()
+	e.placeholder_text = ph
+	e.secret = secret
+	e.max_length = max_len
+	e.custom_minimum_size = Vector2(260, 34)
+	e.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	parent.add_child(e)
+	return e
+
+
+func _acc_card(parent: Node, title: String, desc: String) -> VBoxContainer:
+	var row := _row_panel(parent)
+	var v := VBoxContainer.new()
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_theme_constant_override("separation", 6)
+	v.add_child(_mk(title, 14, ICE_WHITE))
+	if desc != "":
+		v.add_child(_wrap(desc, 11, DIM))
+	row.add_child(v)
+	return v
+
+
+func _build_account_settings() -> void:
+	set_body.add_child(_mk("HESAP", 13, GOLD))
+	if not Net.online:
+		set_body.add_child(_wrap("Hesap ayarları yalnızca sunucuya bağlıyken kullanılabilir.", 11, DIM))
+		return
+
+	# --- Nick (cagri adi)
+	var nv := _acc_card(set_body, "Oyun içi isim (nick)", "Şu anki adın: %s.  3-16 karakter: harf, rakam, _ ve -.  24 saatte bir değiştirilebilir. Giriş adın (kullanıcı adı) değişmez." % str(game.SV.get("callsign", "Gezgin")))
+	var nh := HBoxContainer.new()
+	nh.add_theme_constant_override("separation", 8)
+	nv.add_child(nh)
+	_acc_nick_in = _acc_field(nh, "Yeni isim", false, 16)
+	nh.add_child(_btn("ADI DEĞİŞTİR", "ButtonPrimary", _acc_ask_nick, Vector2(150, 34), true, 12))
+
+	# --- Sifre
+	var pv := _acc_card(set_body, "Şifre değiştir", "Mevcut şifren sunucuda doğrulanır. Oyun açıkken şifre değişince bu oturum etkilenmez.")
+	_acc_pw_old = _acc_field(pv, "Mevcut şifre", true, 64)
+	_acc_pw_new = _acc_field(pv, "Yeni şifre (en az 4 karakter)", true, 64)
+	_acc_pw_new2 = _acc_field(pv, "Yeni şifre (tekrar)", true, 64)
+	var ph := HBoxContainer.new()
+	ph.add_theme_constant_override("separation", 8)
+	pv.add_child(ph)
+	ph.add_child(_btn("ŞİFREYİ DEĞİŞTİR", "ButtonPrimary", _acc_change_password, Vector2(170, 34), true, 12))
+	_acc_pw_msg = _wrap("", 11, DIM)
+	ph.add_child(_acc_pw_msg)
+
+	# --- Sirket
+	var cur_f: int = int(game.SV.get("faction", 1))
+	var fv := _acc_card(set_body, "Şirket değiştir", "Şu anki şirketin: %s.  7 günde bir değiştirilebilir; savaş sırasında yapılamaz. Yeni şirketinin üssünde doğarsın; XP, kredi ve gemilerin korunur." % str(DOData.FACTIONS.get(cur_f, {}).get("name", "-")))
+	var fh := HBoxContainer.new()
+	fh.add_theme_constant_override("separation", 8)
+	fv.add_child(fh)
+	for f in [1, 2, 3]:
+		if int(f) == cur_f:
+			continue
+		fh.add_child(_btn("%s ŞİRKETİNE GEÇ" % str(DOData.FACTIONS.get(int(f), {}).get("name", "?")).to_upper(), "ButtonDanger", _acc_ask_faction.bind(int(f)), Vector2(200, 34), true, 12))
+
+
+func _acc_dialog(text: String, cb: Callable) -> void:
+	if _acc_confirm == null or not is_instance_valid(_acc_confirm):
+		_acc_confirm = ConfirmationDialog.new()
+		_acc_confirm.title = "Onay"
+		_acc_confirm.ok_button_text = "Evet, değiştir"
+		_acc_confirm.cancel_button_text = "Vazgeç"
+		add_child(_acc_confirm)
+	for c in _acc_confirm.confirmed.get_connections():
+		_acc_confirm.confirmed.disconnect(c["callable"])
+	_acc_confirm.dialog_text = text
+	_acc_confirm.confirmed.connect(cb)
+	_acc_confirm.popup_centered(Vector2i(460, 150))
+
+
+func _acc_ask_nick() -> void:
+	var nm: String = _acc_nick_in.text.strip_edges()
+	if nm.length() < 3 or nm.length() > 16:
+		game.toast("İsim 3-16 karakter olmalı.")
+		return
+	_acc_dialog("Adın \"%s\" olarak değiştirilecek.\nİşlem sonrası oturum kapanır, yeniden giriş yapman gerekir." % nm, game.request_change_callsign.bind(nm))
+
+
+func _acc_ask_faction(f: int) -> void:
+	var fname: String = str(DOData.FACTIONS.get(f, {}).get("name", "?"))
+	_acc_dialog("%s şirketine geçmek istiyor musun?\nYeni şirketinin üssünde doğarsın ve 7 gün boyunca tekrar değiştiremezsin.\nİşlem sonrası oturum kapanır, yeniden giriş yapman gerekir." % fname, game.request_change_faction.bind(f))
+
+
+func _acc_set_pw_msg(text: String, err: bool) -> void:
+	if _acc_pw_msg != null and is_instance_valid(_acc_pw_msg):
+		_acc_pw_msg.text = text
+		_acc_pw_msg.add_theme_color_override("font_color", Color(1.0, 0.5, 0.45) if err else Color(0.45, 1.0, 0.6))
+
+
+func _acc_change_password() -> void:
+	if _acc_pw_busy:
+		return
+	var old_pw: String = _acc_pw_old.text
+	var new_pw: String = _acc_pw_new.text
+	if old_pw == "" or new_pw == "":
+		_acc_set_pw_msg("Tüm alanları doldur.", true)
+		return
+	if new_pw.length() < 4:
+		_acc_set_pw_msg("Yeni şifre en az 4 karakter olmalı.", true)
+		return
+	if new_pw != _acc_pw_new2.text:
+		_acc_set_pw_msg("Yeni şifreler eşleşmiyor.", true)
+		return
+	_acc_pw_busy = true
+	_acc_set_pw_msg("Değiştiriliyor…", false)
+	Net.change_password_via_tls(str(game.login_username), old_pw, new_pw, _acc_pw_done)
+
+
+func _acc_pw_done(ok: bool, error: String) -> void:
+	_acc_pw_busy = false
+	if ok:
+		_acc_pw_old.text = ""
+		_acc_pw_new.text = ""
+		_acc_pw_new2.text = ""
+		_acc_set_pw_msg("Şifren değiştirildi.", false)
+		game.toast("Şifren değiştirildi.")
+	else:
+		_acc_set_pw_msg(error, true)
+
+
+# main.gd -> sunucudan gelen nick / sirket hata sonucu (basari durumunda oturum kapanir)
+func on_account_result(_kind: String, _ok: bool, _error: String) -> void:
+	pass
+
 
 
 func _set_fullscreen(on: bool) -> void:
@@ -3084,120 +3232,176 @@ func _form_slot(code: String, active: bool) -> Button:
 
 
 func _refresh_equip_tab_droidler() -> void:
+	_clear(equip_content)
 	var c: Dictionary = game.cfg()
+	var drone_equip: Dictionary = game.SV.get("drone_equip", {})
+	if not drone_equip.has("flax"):
+		drone_equip["flax"] = {}
+	if not drone_equip.has("iris"):
+		drone_equip["iris"] = {}
+
+	equip_content.add_child(_mk("DROİDLER", 20, NEON_ORANGE, true))
+	equip_content.add_child(_line())
+
 	var split := HBoxContainer.new()
-	split.add_theme_constant_override("separation", 10)
+	split.add_theme_constant_override("separation", 12)
 	split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	equip_content.add_child(split)
 
-	# ---- sol: gemideki droidler ve slotları
+	# ===== SOL PANEL: DROİD YUVALARI =====
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 8)
 	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.size_flags_stretch_ratio = 1.35
 	split.add_child(left)
-	var fr := _sec_frame("Droidler")
-	left.add_child(fr[0])
-	var sc := ScrollContainer.new()
-	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	sc.custom_minimum_size = Vector2(0, 330)
-	sc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	fr[1].add_child(sc)
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 6)
-	grid.add_theme_constant_override("v_separation", 6)
-	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	sc.add_child(grid)
+
+	left.add_child(_mk("DROİD YUVALARI", 14, GOLD))
+	left.add_child(_line())
+
+	var droid_grid := GridContainer.new()
+	droid_grid.columns = 2
+	droid_grid.add_theme_constant_override("h_separation", 8)
+	droid_grid.add_theme_constant_override("v_separation", 8)
+	left.add_child(droid_grid)
 
 	var cur_drn: Array = c.drn
-	if cur_drn.is_empty():
-		grid.add_child(_wrap("Gemide droid yok. Sağdaki Droidler listesinden droide tıklayarak gemiye tak.", 11, DIM))
-	var drone_equip: Dictionary = c.get("drone_equip", {})
-	for i in range(cur_drn.size()):
-		var drone_id := str(cur_drn[i])
+	for i in c.drn.size():
+		var drone_id: String = str(c.drn[i])
 		var dd: Dictionary = DOData.DRONES[drone_id]
-		var slot_cap := int(dd.get("slots", 1))
-		# Benzersiz droid ID: "drone_type_index" (örn: "Iris_0", "Iris_1")
-		var drone_uid := "%s_%d" % [drone_id, i]
-		var cell := _panel("PanelInset")
-		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		grid.add_child(cell)
-		var v := VBoxContainer.new()
-		v.add_theme_constant_override("separation", 3)
-		cell.add_child(v)
-		v.add_child(_mk(str(dd.name), 11, NEON_ORANGE))
-		var h := HBoxContainer.new()
+		var slot_cap: int = dd.slots
+
+		# Droid başlık çubuğu
+		var hdr := HBoxContainer.new()
+		hdr.add_theme_constant_override("separation", 6)
+		droid_grid.add_child(hdr)
+		hdr.add_child(_icon(game.item_icon(drone_id), 28))
+		var d_lbl := _mk(str(dd.name), 14, NEON_ORANGE)
+		d_lbl.add_theme_font_size_override("font_size", 14)
+		hdr.add_child(d_lbl)
+		hdr.add_child(_mk("%d slot" % slot_cap, 11, DIM))
+
+		# Slot ızgara - her slot tek bir hücre olarak droid_grid'e eklenir
+		for si in slot_cap:
+			var slot_key := "slot_" + str(si)
+			var equipped_id: String = ""
+			if drone_equip.has(drone_id) and drone_equip[drone_id].has(slot_key):
+				equipped_id = str(drone_equip[drone_id][slot_key])
+
+			var tip_txt: String = "Boş slot"
+			if equipped_id != "":
+				tip_txt = str(game.item_def(equipped_id).name) + " - çıkarmak için tıkla"
+
+			var sb := _gear_slot(equipped_id, game._on_drone_slot_unequip.bind(drone_id, si), 44, "", tip_txt)
+			droid_grid.add_child(sb)
+
+	left.add_child(_line())
+
+	# =====================================================
+	# SAĞ PANEL: DROİD HANGARI
+	# =====================================================
+	var rp := _panel("PanelInset")
+	rp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	split.add_child(rp)
+	var right_col := VBoxContainer.new()
+	right_col.add_theme_constant_override("separation", 6)
+	rp.add_child(right_col)
+	right_col.add_child(_mk("DROİD HANGARI", 14, NEON_ORANGE))
+	right_col.add_child(_line())
+
+	# Lazer kategorisi
+	var laz_cat := VBoxContainer.new()
+	right_col.add_child(laz_cat)
+	laz_cat.add_child(_mk("LAZERLER", 12, NEON_ORANGE))
+	laz_cat.add_child(_line())
+	var laz_fl := _flow(6)
+	laz_cat.add_child(laz_fl)
+	var laz_any := false
+	for id in DOData.LASER_ORDER:
+		var sid: String = str(id)
+		var have: int = int(game.SV.inv.get(sid, 0))
+		if have <= 0:
+			continue
+		laz_any = true
+		var h := _row_panel(laz_fl)
 		h.add_theme_constant_override("separation", 6)
-		v.add_child(h)
-		h.add_child(_mod_slot(drone_id, _unequip_any.bind("drn", i), 34, "", _item_tip(drone_id, "Gemiden çıkarmak için tıkla / Sağ tık: menü"), true, "drn", i))
-		var fl := _flow(4)
-		h.add_child(fl)
-		for s in slot_cap:
-			var slot_key := "slot_" + str(s)
-			# sel_id artık unique ID kullanıyor: "drone_uid:slot_index"
-			var sel_id := "%s:%d" % [drone_uid, s]
-			if drone_equip.has(drone_uid) and (drone_equip[drone_uid] as Dictionary).has(slot_key):
-				var item_id := str(drone_equip[drone_uid][slot_key])
-				fl.add_child(_mod_slot(item_id, _unequip_any.bind("drone_" + drone_uid, s), 34, "", _item_tip(item_id, "Çıkarmak için tıkla / Sağ tık: menü"), true, "drone_" + drone_uid, s))
-			else:
-				var eb := _mod_slot("", _select_drone_slot.bind(sel_id), 34, "", "Boş droid slotu - hedef seçmek için tıkla")
-				if selected_drone_slot == sel_id:
-					for st in ["normal", "hover", "pressed", "hover_pressed"]:
-						eb.add_theme_stylebox_override(st, _sb(Color(0.04, 0.16, 0.09, 0.97), GREEN, 2, 3, Vector4(3, 3, 3, 3)))
-				fl.add_child(eb)
+		h.add_child(_icon(game.item_icon(sid), 32))
+		var info := VBoxContainer.new()
+		info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		info.add_theme_constant_override("separation", 0)
+		h.add_child(info)
+		info.add_child(_mk(str(game.item_def(sid).name), 13, ICE_WHITE))
+		info.add_child(_mk("Sahip: %d" % have, 11, DIM))
+		var tak_btn := _buy_btn(h, "TAK", game._on_equip_drone_from_inventory.bind(sid), true, 70)
+		tak_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 
-	# ---- sağ: hangar + formasyonlar
-	var right := VBoxContainer.new()
-	right.add_theme_constant_override("separation", 6)
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.size_flags_stretch_ratio = 1.0
-	split.add_child(right)
-	# Droidler gemiye DOGRUDAN takilir (uzantilarla ilgisi yok): hangardaki droidlere tikla -> gemiye takilir
-	var dcap: int = int(game.cap_of("drn"))
-	right.add_child(_collapse_head("Droidler   %d / %d" % [c.drn.size(), dcap], ext_open, _toggle_ext))
-	if ext_open:
-		var dg := _slot_grid(6)
-		right.add_child(dg)
-		var dids := _hangar_items(["drn"], c)
-		for sid in dids:
-			var dfree: int = int(game._free_count(c, "drn", sid))
-			dg.add_child(_mod_slot(sid, _on_equip.bind(sid), SLOT_SZ, "x%d" % dfree if dfree > 1 else "", _item_tip(sid, "Gemiye takmak için tıkla / Sağ tık: menü")))
-		for i in maxi(0, 6 - dids.size()):
-			dg.add_child(_mod_slot("", Callable(), SLOT_SZ))
-		right.add_child(_btn("Tüm droidleri kaldır", "ButtonSmall", _on_unequip_droids_ship, Vector2(0, 34), true, 11))
+	# Kalkan kategorisi
+	var gen_cat := VBoxContainer.new()
+	right_col.add_child(gen_cat)
+	gen_cat.add_child(_mk("KALKANLAR", 12, NEON_ORANGE))
+	gen_cat.add_child(_line())
+	var gen_fl := _flow(6)
+	gen_cat.add_child(gen_fl)
+	var gen_any := false
+	for id in DOData.GEN_ORDER:
+		var g: Dictionary = DOData.GENS[id]
+		if str(g.type) != "sh":
+			continue
+		var sid: String = str(id)
+		var have: int = int(game.SV.inv.get(sid, 0))
+		if have <= 0:
+			continue
+		gen_any = true
+		var h := _row_panel(gen_fl)
+		h.add_theme_constant_override("separation", 6)
+		h.add_child(_icon(game.item_icon(sid), 32))
+		var info := VBoxContainer.new()
+		info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		info.add_theme_constant_override("separation", 0)
+		h.add_child(info)
+		info.add_child(_mk(str(game.item_def(sid).name), 13, ICE_WHITE))
+		info.add_child(_mk("Sahip: %d" % have, 11, DIM))
+		var tak_btn := _buy_btn(h, "TAK", game._on_equip_drone_from_inventory.bind(sid), true, 70)
+		tak_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 
-	_hangar_panel(right, c, ["las", "gen"], true, _on_droid_modules_off, _on_droid_auto)
+	# Drone kapatıkları kategorisi
+	var drone_cat := VBoxContainer.new()
+	right_col.add_child(drone_cat)
+	drone_cat.add_child(_mk("DROİD KAPATIKLARI", 12, NEON_ORANGE))
+	drone_cat.add_child(_line())
+	var drone_fl := _flow(6)
+	drone_cat.add_child(drone_fl)
+	var drone_any := false
+	for id in DOData.DRONE_ORDER:
+		var sid: String = str(id)
+		var have: int = int(game.SV.inv.get(sid, 0))
+		if have <= 0:
+			continue
+		drone_any = true
+		var h := _row_panel(drone_fl)
+		h.add_theme_constant_override("separation", 6)
+		h.add_child(_icon(game.item_icon(sid), 32))
+		var info := VBoxContainer.new()
+		info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		info.add_theme_constant_override("separation", 0)
+		h.add_child(info)
+		info.add_child(_mk(str(game.item_def(sid).name), 13, ICE_WHITE))
+		info.add_child(_mk("Sahip: %d" % have, 11, DIM))
+		var tak_btn := _buy_btn(h, "TAK", game._on_equip_drone_from_inventory.bind(sid), true, 70)
+		tak_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 
-	right.add_child(_collapse_head("Formasyonlar", form_open, _toggle_form))
-	if form_open:
-		var fg := _slot_grid(6)
-		right.add_child(fg)
-		var n := 0
-		var cur_form := str(c.get("form", ""))
-		for code in DOData.FORM_ORDER:
-			if not (code in game.SV.forms):
-				continue
-			fg.add_child(_form_slot(str(code), cur_form == str(code)))
-			n += 1
-		for i in maxi(0, 6 - n):
-			fg.add_child(_mod_slot("", Callable(), SLOT_SZ))
+	if not laz_any and not gen_any and not drone_any:
+		right_col.add_child(_wrap("Takılabilir eşya yok. Mağaza sekmesinden satın alabilirsin.", 12, DIM))
 
-	_equip_bottom_bar("Eşyaya tıklayarak droide takabilir/çıkartabilirsiniz. Boş slota tıklayarak hedef seçebilirsiniz. Ek seçenekler için uzun tıklayın/sağ tıklayın")
+	equip_content.add_child(_btn("TÜMÜNÜ KALDIR", "ButtonDanger", game._on_unequip_all_drones, Vector2(170, 34), true, 12))
 
-
-# ============================================================================
-#  TEÇHİZAT  -  nadirlik renkli slotlar, özet kartları, filtreli envanter
-# ============================================================================
+# ---- Renk ve nadirlik ---------------------------------------------------
 const RARITY_COLS := [
-	Color(0.62, 0.70, 0.78),  # Sıradan
-	Color(0.35, 0.85, 0.50),  # Gelişmiş
-	Color(0.35, 0.65, 1.00),  # Nadir
-	Color(0.75, 0.45, 1.00),  # Epik
-	Color(1.00, 0.78, 0.25),  # Efsanevi
+	Color(0.62, 0.70, 0.78),
+	Color(0.35, 0.85, 0.50),
+	Color(0.35, 0.65, 1.00),
+	Color(0.75, 0.45, 1.00),
+	Color(1.00, 0.78, 0.25),
 ]
 const RARITY_NAMES := ["Sıradan", "Gelişmiş", "Nadir", "Epik", "Efsanevi"]
-
 
 func _rarity(id: String) -> int:
 	var order: Array = DOData.DRONE_ORDER
@@ -3212,7 +3416,6 @@ func _rarity(id: String) -> int:
 	if int(d.get("uri", 0)) > 0:
 		r = 4
 	return clampi(r, 0, 4)
-
 
 func _item_stat_text(id: String) -> String:
 	var d: Dictionary = game.item_def(id)
@@ -3246,6 +3449,7 @@ func _gear_slot(id: String, cb: Callable, sz := 58, badge := "", tip := "") -> B
 	b.expand_icon = true
 	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	b.focus_mode = Control.FOCUS_NONE
+	b.tooltip_text = tip
 	if id == "":
 		b.icon = game._tex("res://assets/items/hangar_slot.png")
 		b.disabled = true
@@ -3280,126 +3484,6 @@ func _gear_slot(id: String, cb: Callable, sz := 58, badge := "", tip := "") -> B
 		b.pressed.connect(cb)
 	return b
 
-
-func _loadout_summary(c: Dictionary) -> Dictionary:
-	var dmg := 0.0
-	var spd := 0.0
-	var sh := 0.0
-	var dd := 0.0
-	var ds := 0.0
-	for id in c.las:
-		dmg += float(DOData.LASERS[str(id)].dmg)
-	for id in c.gen:
-		var g: Dictionary = DOData.GENS[str(id)]
-		if str(g.type) == "spd":
-			spd += float(g.val)
-		else:
-			sh += float(g.val)
-	for id in c.drn:
-		var d: Dictionary = DOData.DRONES[str(id)]
-		dd += float(d.dmg)
-		ds += float(d.sh)
-	return {"dmg": dmg, "spd": spd, "sh": sh, "dd": dd, "ds": ds}
-
-
-# Bir ekipman türünün başlığı + doluluk çubuğu + slot ızgarası
-func _cap_section(parent: Node, key: String, title: String, col: Color, c: Dictionary) -> void:
-	var cap: int = game.cap_of(key)
-	var used: int = (c[key] as Array).size()
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 8)
-	parent.add_child(hb)
-	hb.add_child(_mk(title, 13, GOLD))
-	var sp := Control.new()
-	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hb.add_child(sp)
-	hb.add_child(_mk("%d / %d" % [used, cap], 13, GREEN if (cap > 0 and used >= cap) else DIM))
-	parent.add_child(_bar(float(used), float(maxi(cap, 1)), col, 4.0))
-	if cap <= 0:
-		parent.add_child(_wrap("Bu geminin bu türde yuvası yok.", 12, DIM))
-		return
-	var fl := _flow(6)
-	parent.add_child(fl)
-	for i in cap:
-		if i < used:
-			var sid: String = str(c[key][i])
-			fl.add_child(_gear_slot(sid, _on_unequip.bind(key, i), 58, "", _item_tip(sid, "Çıkarmak için tıkla")))
-		else:
-			fl.add_child(_gear_slot("", Callable()))
-
-
-func _filter_groups() -> Array:
-	match equip_filter:
-		"las":
-			return [DOData.LASER_ORDER]
-		"gen":
-			return [DOData.GEN_ORDER]
-		"drn":
-			return [DOData.DRONE_ORDER]
-	return [DOData.LASER_ORDER, DOData.GEN_ORDER, DOData.DRONE_ORDER]
-
-
-func _on_equip_filter(f: String) -> void:
-	equip_filter = f
-	_refresh_equip()
-
-
-func _filter_bar(parent: Node) -> void:
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 4)
-	parent.add_child(hb)
-	var grp := ButtonGroup.new()
-	for f in [["all", "HEPSİ"], ["las", "LAZER"], ["gen", "JENERATÖR"], ["drn", "DROİD"]]:
-		var b := _btn(str(f[1]), "ButtonSmall", _on_equip_filter.bind(str(f[0])), Vector2(0, 28), true, 11)
-		b.toggle_mode = true
-		b.button_group = grp
-		b.button_pressed = (equip_filter == str(f[0]))
-		hb.add_child(b)
-
-
-# Takılabilir (boşta) eşyaların satırları; en iyi eşya en üstte
-func _inv_rows(parent: Node, groups: Array, c: Dictionary) -> void:
-	var any := false
-	for group in groups:
-		var ids: Array = (group as Array).duplicate()
-		ids.reverse()
-		for id in ids:
-			var sid := str(id)
-			var have: int = game.inv_count(sid)
-			var key: String = game.item_key(sid)
-			var nfree: int = game._free_count(c, key, sid)
-			if have <= 0 or nfree <= 0:
-				continue
-			any = true
-			var col: Color = RARITY_COLS[_rarity(sid)]
-			var can: bool = (c[key] as Array).size() < game.cap_of(key)
-			var h := _row_panel(parent)
-			h.add_theme_constant_override("separation", 10)
-			h.add_child(_gear_slot(sid, _on_equip.bind(sid), 48, "x%d" % nfree if nfree > 1 else "", _item_tip(sid, "Takmak için tıkla")))
-			var info := VBoxContainer.new()
-			info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			info.add_theme_constant_override("separation", 0)
-			h.add_child(info)
-			info.add_child(_mk(str(game.item_def(sid).name), 14, col))
-			info.add_child(_mk(_item_stat_text(sid), 12, TEXT2))
-			info.add_child(_mk("Boşta %d / %d   •   %s" % [nfree, have, RARITY_NAMES[_rarity(sid)]], 11, DIM))
-			var tb := _buy_btn(h, "TAK", _on_equip.bind(sid), can, 76)
-			tb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	if not any:
-		parent.add_child(_wrap("Takılabilir eşya yok. Mağaza sekmesinden satın alabilirsin.", 12, DIM))
-
-
-func _on_drone_tak_clicked(item_id: String) -> void:
-	if selected_drone_slot == "":
-		game.toast("Önce bir droid slotu seçin!")
-		return
-	var parts: Array = selected_drone_slot.split(":")
-	if parts.size() < 2:
-		game.toast("Geçersiz slot seçimi!")
-		return
-	var target_drone_id: String = str(parts[0])
-	var slot_index: int = int(parts[1])
-	game.equip_drone_item(target_drone_id, slot_index, item_id)
 
 func _refresh_equip_tab_kaynaklar() -> void:
 	equip_content.add_child(_mk("KAYNAKLAR", 16, NEON_ORANGE))
