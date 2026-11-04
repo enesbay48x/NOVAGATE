@@ -27,11 +27,16 @@ jobs:
 
       - name: Install iOS export templates
         run: |
-          curl -fL -o ios_templates.zip "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/ios_template.zip"
+          # 4.7-stable release'de "ios_template.zip" yok; resmi export templates paketi kullaniliyor
+          curl -fL -o export_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_export_templates.tpz"
+          unzip -t export_templates.tpz > /dev/null
           mkdir -p /tmp/godot_templates
-          unzip -o -q ios_templates.zip -d /tmp/godot_templates
+          unzip -o -q export_templates.tpz -d /tmp/godot_templates
           IOS_ZIP=$(find /tmp/godot_templates -name "ios.zip" | head -1)
-          echo "Found iOS template: $IOS_ZIP"
+          if [ -z "$IOS_ZIP" ]; then
+            echo "::error::No ios.zip found in Godot 4.7-stable export templates archive"
+            exit 1
+          fi
           TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.7.stable"
           mkdir -p "$TEMPL_DIR"
           cp "$IOS_ZIP" "$TEMPL_DIR/ios.zip"
@@ -89,23 +94,31 @@ jobs:
       - name: Build unsigned .app with xcodebuild
         run: |
           cd export/ios
-          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -derivedDataPath ../build/derived \
+          rm -rf ../build
+          mkdir -p ../build
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos \
+            -derivedDataPath ../build/derived \
+            SYMROOT=../build/symroot \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM=""
-          # Search the entire build tree for the produced .app bundle
-          BUILT_APP=$(find "$PWD/../build" -name "*.app" -maxdepth 10 2>/dev/null | head -1)
+          # Build agacinda NOVAGATE.app dosyasini ara
+          BUILT_APP=$(find "$PWD/../build" -name "NOVAGATE.app" -maxdepth 15 2>/dev/null | head -1)
           if [ -z "$BUILT_APP" ]; then
-            echo "::error::No .app built by xcodebuild anywhere under $PWD/../build"
-            echo "=== Files under $PWD/../build ==="
-            find "$PWD/../build" -maxdepth 10 -type f 2>/dev/null | head -50 || true
+            echo "::warning::NOVAGATE.app bulunamadi, tum .app dosyalari listeleniyor:"
+            find "$PWD/../build" -name "*.app" -maxdepth 15 2>/dev/null || true
+            echo "=== Tum dosyalar build altinda ==="
+            find "$PWD/../build" -maxdepth 15 -type f 2>/dev/null | head -80 || true
+            echo "::error::No NOVAGATE.app built by xcodebuild under $PWD/../build"
             exit 1
           fi
-          echo "Built app: $BUILT_APP"
+          echo "Built app found: $BUILT_APP"
+          rm -rf "$PWD/../NOVAGATE-unsigned.app"
           cp -R "$BUILT_APP" "$PWD/../NOVAGATE-unsigned.app"
+          echo "Copied to: $PWD/../NOVAGATE-unsigned.app"
           echo "app_path=$PWD/../NOVAGATE-unsigned.app" >> $GITHUB_OUTPUT
 
       - name: Set iOS landscape orientation in .app bundle
@@ -134,7 +147,7 @@ jobs:
             exit 1
           fi
           echo "=== .app bundle contents ==="
-          find NOVAGATE-unsigned.app -maxdepth 3 -type f | sort | head -40
+          find NOVAGATE-unsigned.app -maxdepth 4 -type f | sort | head -60
           echo "Verified: NOVAGATE-unsigned.app is a real iOS app bundle"
 
       - name: Package unsigned .app into IPA
@@ -145,7 +158,7 @@ jobs:
           fi
           rm -rf Payload NOVAGATE-unsigned.ipa
           mkdir -p Payload
-          cp -R NOVAGATE-unsigned.app Payload/
+          cp -R NOVAGATE-unsigned.app Payload/NOVAGATE-unsigned.app
           zip -r NOVAGATE-unsigned.ipa Payload/
           echo "=== IPA contents ==="
           unzip -l NOVAGATE-unsigned.ipa
@@ -215,11 +228,13 @@ jobs:
           xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist
           if [ ! -d "../build/ios/NOVAGATE.app" ]; then
             echo "::error::Signed .app not found at ../build/ios/NOVAGATE.app"
+            echo "=== Files under ../build/ios ==="
+            find ../build/ios -maxdepth 5 -type f 2>/dev/null | head -50 || true
             exit 1
           fi
           rm -rf Payload NOVAGATE.ipa
           mkdir -p Payload
-          cp -R "../build/ios/NOVAGATE.app" Payload/
+          cp -R "../build/ios/NOVAGATE.app" Payload/NOVAGATE.app
           zip -r ../../NOVAGATE.ipa Payload/
           echo "=== Signed IPA contents ==="
           unzip -l ../../NOVAGATE.ipa | head -20

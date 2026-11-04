@@ -75,23 +75,34 @@ jobs:
       - name: Build unsigned .app with xcodebuild
         run: |
           cd export/ios
-          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -derivedDataPath ../build/derived \
+          # Deterministik ç˙ıkış klasoru: SYMROOT ile build ciktisini belli bir yere topla
+          rm -rf ../build
+          mkdir -p ../build
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos \
+            -derivedDataPath ../build/derived \
+            SYMROOT=../build/symroot \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM=""
-          # Search the entire build tree for the produced .app bundle
-          BUILT_APP=$(find "$PWD/../build" -name "*.app" -maxdepth 10 2>/dev/null | head -1)
+          # Build agacinda tum .app dosyalarini ara (recursive, derinlik sansirli)
+          BUILT_APP=$(find "$PWD/../build" -name "NOVAGATE.app" -maxdepth 15 2>/dev/null | head -1)
           if [ -z "$BUILT_APP" ]; then
-            echo "::error::No .app built by xcodebuild anywhere under $PWD/../build"
-            echo "=== Files under $PWD/../build ==="
-            find "$PWD/../build" -maxdepth 10 -type f 2>/dev/null | head -50 || true
+            # Proje ismiyle eslesmeyen ama generic .app varsa onlari da listele
+            echo "::warning::NOVAGATE.app bulunamadi, tum .app dosyalari listeleniyor:"
+            find "$PWD/../build" -name "*.app" -maxdepth 15 2>/dev/null || true
+            echo "=== Tum dosyalar build altinda ==="
+            find "$PWD/../build" -maxdepth 15 -type f 2>/dev/null | head -80 || true
+            echo "::error::No NOVAGATE.app built by xcodebuild under $PWD/../build"
             exit 1
           fi
-          echo "Built app: $BUILT_APP"
+          echo "Built app found: $BUILT_APP"
+          # Repo kokuya kopyala (her adim repo kokusunda basladigi icin $PWD/../ = repo kokudur)
+          rm -rf "$PWD/../NOVAGATE.app"
           cp -R "$BUILT_APP" "$PWD/../NOVAGATE.app"
+          echo "Copied to: $PWD/../NOVAGATE.app"
           echo "app_path=$PWD/../NOVAGATE.app" >> $GITHUB_OUTPUT
 
       - name: Verify real .app bundle
@@ -107,7 +118,7 @@ jobs:
             exit 1
           fi
           echo "=== .app bundle contents ==="
-          find NOVAGATE.app -maxdepth 3 -type f | sort | head -40
+          find NOVAGATE.app -maxdepth 4 -type f | sort | head -60
           echo "Verified: NOVAGATE.app is a real iOS app bundle"
 
       - name: Package unsigned .app into IPA
@@ -118,7 +129,7 @@ jobs:
           fi
           rm -rf Payload NOVAGATE.ipa
           mkdir -p Payload
-          cp -R NOVAGATE.app Payload/
+          cp -R NOVAGATE.app Payload/NOVAGATE.app
           zip -r NOVAGATE.ipa Payload/
           echo "=== IPA contents ==="
           unzip -l NOVAGATE.ipa
