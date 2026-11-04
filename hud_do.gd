@@ -866,6 +866,10 @@ func _fill_cell(c: DOCell, p: Dictionary, with_key: bool) -> void:
 
 
 func _use_item(p: Dictionary) -> void:
+	if game == null:
+		if mobile != null:
+			mobile._diag_show("HUD/GAME NULL")
+		return
 	if game.SV.is_empty():
 		return
 	var id := str(p.get("id", ""))
@@ -873,7 +877,9 @@ func _use_item(p: Dictionary) -> void:
 	match str(p.get("k", "")):
 		"las":
 			print("[HUD_DO DIAG] game.select_ammo cagiracak: id=", id)
+			mobile._diag_show("SELECT_AMMO ÇAĞRILDI id=" + id)
 			game.select_ammo(id)   # RSB kuralari (bekleyen secimini engelle + onceki muhimmadi kaydet) tek yerde isler
+			mobile._diag_show("SEÇİLİ=" + str(game.SV.sel))
 		"rkt":
 			game.toggle_rocket_auto()
 		"frm":
