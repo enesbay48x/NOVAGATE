@@ -27,13 +27,15 @@ jobs:
 
       - name: Install iOS export templates
         run: |
-          curl -L -o ios_templates.zip "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/ios_template.zip"
+          curl -fL -o ios_templates.zip "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/ios_template.zip"
           mkdir -p /tmp/godot_templates
           unzip -o -q ios_templates.zip -d /tmp/godot_templates
           IOS_ZIP=$(find /tmp/godot_templates -name "ios.zip" | head -1)
+          echo "Found iOS template: $IOS_ZIP"
           TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.7.stable"
           mkdir -p "$TEMPL_DIR"
           cp "$IOS_ZIP" "$TEMPL_DIR/ios.zip"
+          echo "Copied to: $TEMPL_DIR/ios.zip"
 
       - name: Check for Apple signing secrets
         id: check_secrets
@@ -88,18 +90,18 @@ jobs:
         run: |
           cd export/ios
           xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -derivedDataPath ../build/derived \
-            CONFIGURATION_BUILD_DIR="$PWD/../build/Release-iphoneos" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM=""
-          # Find the built .app at the exact output directory
-          BUILT_APP=$(find "$PWD/../build/Release-iphoneos" -name "*.app" -maxdepth 1 2>/dev/null | head -1)
+          # Search the entire build tree for the produced .app bundle
+          BUILT_APP=$(find "$PWD/../build" -name "*.app" -maxdepth 10 2>/dev/null | head -1)
           if [ -z "$BUILT_APP" ]; then
-            echo "::error::No .app built by xcodebuild in $PWD/../build/Release-iphoneos"
-            find "$PWD/../build" -maxdepth 5 -type d 2>/dev/null | head -30 || true
+            echo "::error::No .app built by xcodebuild anywhere under $PWD/../build"
+            echo "=== Files under $PWD/../build ==="
+            find "$PWD/../build" -maxdepth 10 -type f 2>/dev/null | head -50 || true
             exit 1
           fi
           echo "Built app: $BUILT_APP"
@@ -122,11 +124,17 @@ jobs:
       - name: Verify real .app bundle
         run: |
           if [ ! -d "NOVAGATE-unsigned.app" ]; then
-            echo "::error::NOVAGATE-unsigned.app not found"
+            echo "::error::NOVAGATE-unsigned.app not found at repo root"
+            echo "=== Files at repo root ==="
+            ls -la
+            exit 1
+          fi
+          if [ ! -f "NOVAGATE-unsigned.app/Info.plist" ]; then
+            echo "::error::NOVAGATE-unsigned.app/Info.plist missing - not a real app bundle"
             exit 1
           fi
           echo "=== .app bundle contents ==="
-          find NOVAGATE-unsigned.app -maxdepth 2 -type f | sort | head -30
+          find NOVAGATE-unsigned.app -maxdepth 3 -type f | sort | head -40
           echo "Verified: NOVAGATE-unsigned.app is a real iOS app bundle"
 
       - name: Package unsigned .app into IPA
@@ -140,7 +148,15 @@ jobs:
           cp -R NOVAGATE-unsigned.app Payload/
           zip -r NOVAGATE-unsigned.ipa Payload/
           echo "=== IPA contents ==="
-          unzip -l NOVAGATE-unsigned.ipa | head -20
+          unzip -l NOVAGATE-unsigned.ipa
+          if ! unzip -t NOVAGATE-unsigned.ipa > /dev/null; then
+            echo "::error::IPA zip integrity check failed"
+            exit 1
+          fi
+          if ! unzip -l NOVAGATE-unsigned.ipa | grep -q "Payload/NOVAGATE-unsigned.app/Info.plist"; then
+            echo "::error::IPA does not contain Payload/NOVAGATE-unsigned.app/Info.plist"
+            exit 1
+          fi
           echo "ipa_path=$(pwd)/NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
           echo "ipa_name=NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
           echo "Unsigned IPA created: NOVAGATE-unsigned.ipa"
@@ -197,9 +213,16 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER=""
           xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist
+          if [ ! -d "../build/ios/NOVAGATE.app" ]; then
+            echo "::error::Signed .app not found at ../build/ios/NOVAGATE.app"
+            exit 1
+          fi
+          rm -rf Payload NOVAGATE.ipa
           mkdir -p Payload
           cp -R "../build/ios/NOVAGATE.app" Payload/
           zip -r ../../NOVAGATE.ipa Payload/
+          echo "=== Signed IPA contents ==="
+          unzip -l ../../NOVAGATE.ipa | head -20
           echo "ipa_path=$(pwd)/../../NOVAGATE.ipa" >> $GITHUB_OUTPUT
           echo "ipa_name=NOVAGATE.ipa" >> $GITHUB_OUTPUT
 
