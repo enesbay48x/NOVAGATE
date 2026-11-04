@@ -213,6 +213,13 @@ func _grant_reward(p: Dictionary, event_id: String, source: String,
 	p["_sv_sep"] = int(res.get("new_sep", p.get("_sv_sep", 0)))
 	p["_sv_kills"] = int(res.get("new_kills", p.get("_sv_kills", 0)))
 	p["_sv_pvp_kills"] = int(res.get("new_pvp_kills", p.get("_sv_pvp_kills", 0)))
+	# grant_reward'dan gelen ammo delta'sini bellege ekle
+	if res.has("ammo"):
+		var _ammo_delta: Dictionary = res.get("ammo", {})
+		var _cur_ammo: Dictionary = p.get("_sv_ammo", {}).duplicate()
+		for _aid in _ammo_delta.keys():
+			_cur_ammo[str(_aid)] = int(_cur_ammo.get(str(_aid), 0)) + int(_ammo_delta[_aid])
+		p["_sv_ammo"] = _cur_ammo
 	return res
 
 
@@ -2120,6 +2127,13 @@ func on_purchase_item(peer: int, item_id: String, quantity: int, tx_id: String) 
 		# Bellekteki sunucu kopyasini guncelle
 		p["_sv_cr"] = int(resp.get("new_cr", p.get("_sv_cr", 0)))
 		p["_sv_uri"] = int(resp.get("new_uri", p.get("_sv_uri", 0)))
+		# Ammo guncellemesi (marketten mermi alinirsa)
+		if resp.has("new_ammo"):
+			var _new_ammo: Dictionary = resp.get("new_ammo", {})
+			var _cur_ammo: Dictionary = p.get("_sv_ammo", {}).duplicate()
+			for _aid in _new_ammo.keys():
+				_cur_ammo[str(_aid)] = int(_new_ammo[_aid])
+			p["_sv_ammo"] = _cur_ammo
 		if str(resp.get("kind", "")) == "ship" and not (item_id in p.get("_sv_owned", [])):
 			p["_sv_owned"].append(item_id)   # sunucu gemi dogrulamasi icin sahip listesi
 		# Mermi/envanter odulunu istemciye bildir

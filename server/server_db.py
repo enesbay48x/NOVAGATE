@@ -663,6 +663,12 @@ def purchase_item(account_id: int, item_id: str, quantity: int, tx_id: str,
                 "ON CONFLICT(account_id, ammo_id) DO UPDATE SET quantity = quantity + excluded.quantity",
                 (account_id, item_id, n),
             )
+            # Ammo'nun guncellenen miktarini response'a ekle (istemci bellek senkronizasyonu icin)
+            _new_ammo_row = conn.execute(
+                "SELECT quantity FROM ammo WHERE account_id = ? AND ammo_id = ?",
+                (account_id, item_id),
+            ).fetchone()
+            _new_ammo_qty = int(_new_ammo_row["quantity"]) if _new_ammo_row else 0
         else:
             delta = -n if selling else n
             conn.execute(
@@ -673,9 +679,13 @@ def purchase_item(account_id: int, item_id: str, quantity: int, tx_id: str,
 
         new_cr = int(pd["cr"]) - cost_cr + gain_cr
         new_uri = int(pd["uri"]) - cost_uri + gain_uri
+        _resp_ammo = {}
+        if kind == "ammo":
+            _resp_ammo = {item_id: _new_ammo_qty}
         response_payload = json.dumps({
             "ok": True, "item_id": item_id, "kind": kind, "quantity": quantity,
             "new_cr": new_cr, "new_uri": new_uri, "tx_id": tx_id,
+            "new_ammo": _resp_ammo,
         })
         conn.execute(
             "INSERT INTO transactions (account_id, tx_id, type, amount_cr, amount_uri, item_id, item_qty, status, request_payload, response_payload, created_at) "
