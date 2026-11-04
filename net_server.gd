@@ -174,13 +174,15 @@ func _players_in(map_name: String) -> Array:
 # ------------------------------------------------------------------ SUNUCU TARAFI ODUL KAYDI
 # Odul, istemciye bildirilmeden ONCE veritabanina atomik olarak yazilir. Ayni
 # event_id tekrar gelirse DB odulu ikinci kez vermez (idempotent).
-func _grant_reward(p: Dictionary, event_id: String, source: String,
+func _grant_reward(peer: int, p: Dictionary, event_id: String, source: String,
 		cr: int = 0, uri: int = 0, xp: float = 0.0, hon: float = 0.0,
 		kills: int = 0, sep: int = 0, pvp_kills: int = 0,
 		ammo: Dictionary = {}, items: Dictionary = {}, meta: Dictionary = {}) -> Dictionary:
 	var acct_id: int = int(p.get("account_id", 0))
 	if acct_id <= 0:
 		return {"ok": false, "error": "no_account"}
+	# Ateşten gelen bekleyen mermi deltasini once DB'ye flush et (odul oncesi)
+	_flush_player_ammo(peer)
 	var payload: Dictionary = {
 		"account_id": acct_id,
 		"event_id": event_id,
@@ -196,6 +198,8 @@ func _grant_reward(p: Dictionary, event_id: String, source: String,
 		"items": items,
 		"meta": meta,
 	}
+	# Flush pending ammo deltas to DB before reward
+	_flush_player_ammo(peer)
 	var res: Dictionary = db_send("grant_reward", payload)
 	# Kisa DB mesguliyetinde tekrar dene; basarisizsa istemciye odul bildirilmez.
 	var tries: int = 0
@@ -470,6 +474,7 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_sv_settings": str(ps.get("settings", "{}")),
 		"_sv_inventory": ps.get("inv", {}),  # doldurulabilir
 		"_sv_ammo": ps.get("ammo", {}),  # sunucu kaynagi: istemciye yazilmaz
+		"_sv_ammo_synced": ps.get("ammo", {}).duplicate(),  # DB'ye son yansilan deger (delta hesabi icin)
 		"_sv_admin": int(ps.get("is_admin", 0)),   # admin yetkisi (sunucu tarafige)
 		"_sv_reg_ts": int(ps.get("reg_ts", 0)),    # kayit gunu (rutbe hesabi)
 		"_sv_rank_pen": float(ps.get("rank_pen", 0.0)),  # rutbe cezasi
@@ -648,12 +653,7 @@ func on_disconnect(peer: int, release_lock: bool = true) -> void:
 			})
 	# Mermiyi kaydet (ayrilişte): eski oturum dusulmeden once DB'ye yazilmali
 	if p.has("account_id"):
-		var _ammo: Dictionary = p.get("_sv_ammo", {})
-		if _ammo.size() > 0:
-			db_send("save_player_ammo", {
-				"account_id": int(p.account_id),
-				"ammo_dict": _ammo,
-			})
+		_flush_player_ammo(peer)
 	# Combat Logout: oyuncuyu players'dan sil ve ghost_players'a al.
 	# Gemi haritada gorunur kalir; sure dolunca s_pleave yayıp kalmasi gerekirse silinir.
 	var acct_id: int = int(p.get("account_id", 0))
@@ -715,12 +715,7 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 					"pz": float(pos.z),
 				})
 				# Harita degisiminde ammo'yu da kaydet
-				var _ammo: Dictionary = p.get("_sv_ammo", {})
-				if _ammo.size() > 0:
-					db_send("save_player_ammo", {
-						"account_id": int(p.account_id),
-						"ammo_dict": _ammo,
-					})
+				_flush_player_ammo(peer)
 		p.map = ""
 		_maybe_free_world(old_map)
 	elif old_map == map_name:
@@ -965,6 +960,52 @@ func on_fire_vis(peer: int, kind: int, ref: int, nb: int, ammo: String) -> void:
 	_ammo_result_pending[peer] = {"ammo": ammo, "qty": int(ammo_dict.get(ammo, 0))}
 
 
+# Bir oyuncunun bellekteki degisikliklerini DB'ye delta olarak yansitir.
+# Delta = _sv_ammo[ammo_id] - _sv_ammo_synced[ammo_id]
+# DB'den donen guncel degeri hem _sv_ammo'ya hem _sv_ammo_synced'e yazar.
+# Disaridan degisim tespit ederse (result != memory_onu_once_delta) istemciye s_ammo_result gonderir.
+func _flush_player_ammo(peer: int) -> void:
+	if not players.has(peer):
+		return
+	var p: Dictionary = players[peer]
+	if not p.has("account_id"):
+		return
+	var acct_id: int = int(p.account_id)
+	var mem_ammo: Dictionary = p.get("_sv_ammo", {})
+	var synced_ammo: Dictionary = p.get("_sv_ammo_synced", {})
+	# Delta hesapla: sadece degisenleri gonder
+	var delta: Dictionary = {}
+	for aid in mem_ammo.keys():
+		var mem_qty: int = int(mem_ammo.get(aid, 0))
+		var synced_qty: int = int(synced_ammo.get(aid, 0))
+		var d: int = mem_qty - synced_qty
+		if d != 0:
+			delta[str(aid)] = d
+	if delta.size() == 0:
+		return  # Degisiklik yok
+	var resp: Dictionary = db_send("save_player_ammo", {
+		"account_id": acct_id,
+		"ammo_delta": delta,
+	})
+	if resp.has("ok") and resp.get("ok", false):
+		var new_ammo: Dictionary = resp.get("new_ammo", {})
+		var updated_ammo: Dictionary = mem_ammo.duplicate()
+		var updated_synced: Dictionary = synced_ammo.duplicate()
+		var changed: bool = false
+		for aid in new_ammo.keys():
+			var new_qty: int = int(new_ammo.get(aid, 0))
+			updated_ammo[str(aid)] = new_qty
+			updated_synced[str(aid)] = new_qty
+			if int(mem_ammo.get(aid, 0)) != new_qty:
+				changed = true  # Disaridan degisim var
+		p["_sv_ammo"] = updated_ammo
+		p["_sv_ammo_synced"] = updated_synced
+		if changed:
+			# Disaridan degisim var: istemciye guncel degeri gonder
+			for aid in new_ammo.keys():
+				net.callv("rpc_id", [peer, "s_ammo_result", true, aid, int(new_ammo.get(aid, 0)), ""])
+
+
 func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
 	# Ghost player attacker: renew timer
 	if not players.has(peer):
@@ -1104,7 +1145,7 @@ func on_died(victim: int, killer: int) -> void:
 		# PvP odulu de DB'ye yazilir; ayni olum olayi tekrar islenemez.
 		var event_id: String = "pvp:%s:%d:%d:%d" % [reward_run_id, next_pvp_seq, int(k.get("account_id", 0)), victim]
 		next_pvp_seq += 1
-		var pvp_res: Dictionary = _grant_reward(k, event_id, "reward_pvp",
+		var pvp_res: Dictionary = _grant_reward(killer, k, event_id, "reward_pvp",
 			0, 0, 0.0, 100.0, 0, 0, 1, {}, {}, {"victim": int(v.get("account_id", 0)), "map": map_name})
 		if pvp_res.has("ok") and pvp_res.get("ok", false):
 			_to(killer, "s_pvp_reward", [victim, pvp_res])
@@ -1362,7 +1403,7 @@ func on_box_take(peer: int, id: int) -> void:
 		return
 	var reward: Dictionary = _roll_box_reward()
 	var event_id: String = "box:%s:%d:%d" % [reward_run_id, id, acct_id]
-	var res: Dictionary = _grant_reward(p, event_id, "reward_box",
+	var res: Dictionary = _grant_reward(peer, p, event_id, "reward_box",
 		int(reward.cr), int(reward.uri), 0.0, 0.0, 0, 0, 0,
 		reward.ammo, reward.items, {"map": map_name, "box_id": id})
 	if not res.has("ok") or res.get("ok", false) == false:
@@ -1519,7 +1560,7 @@ func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 			if acct_id <= 0:
 				continue
 			var event_id: String = "npc:%s:%d:%d" % [reward_run_id, int(e.uid), acct_id]
-			var res: Dictionary = _grant_reward(rp, event_id, "reward_npc",
+			var res: Dictionary = _grant_reward(int(r), rp, event_id, "reward_npc",
 				per_cr, per_uri, float(per_xp), float(per_hon), 1, per_sep, 0,
 				{}, {}, {"map": str(w.name), "npc": str(e.id), "uid": int(e.uid)})
 			if res.has("ok") and res.get("ok", false):
@@ -1600,7 +1641,7 @@ func _cubikon_reward(w: Dictionary, e: Dictionary) -> void:
 		var hon: int = roundi(float(DOData.NPCS["cubikon"].hon) * pct)
 		var sep: int = int(round(float(uri) * float(SkillTree.SEPROM_PER_URI)))
 		var event_id: String = "npc:%s:%d:%d" % [reward_run_id, int(e.uid), acct_id]
-		var res: Dictionary = _grant_reward(p, event_id, "reward_npc",
+		var res: Dictionary = _grant_reward(pid, p, event_id, "reward_npc",
 			cr, uri, float(xp), float(hon), 1, sep, 0,
 			{}, {}, {"map": str(w.name), "npc": "cubikon", "uid": int(e.uid), "share": pct})
 		if res.has("ok") and res.get("ok", false):
@@ -1777,15 +1818,8 @@ func tick(dt: float) -> void:
 			if not players.has(pid):
 				_dirty_ammo_peers.erase(pid)
 				continue
-			var p: Dictionary = players[pid]
-			if p.has("account_id"):
-				var _ammo: Dictionary = p.get("_sv_ammo", {})
-				if _ammo.size() > 0:
-					db_send("save_player_ammo", {
-						"account_id": int(p.account_id),
-						"ammo_dict": _ammo,
-					})
-				_dirty_ammo_peers.erase(pid)
+			_flush_player_ammo(pid)
+			_dirty_ammo_peers.erase(pid)
 
 
 
@@ -1796,13 +1830,20 @@ func tick(dt: float) -> void:
 		if g.timer <= 0.0:
 			var gp_p: Dictionary = g.p
 			var gp_map: String = str(gp_p.map)
-			# Ghost'un ammo'sunu DB'ye yaz
+			# Ghost'un ammo'sunu DB'ye yaz (delta olarak)
 			if gp_p.has("account_id"):
-				var _ghost_ammo: Dictionary = gp_p.get("_sv_ammo", {})
-				if _ghost_ammo.size() > 0:
+				var _ghost_mem: Dictionary = gp_p.get("_sv_ammo", {})
+				var _ghost_sync: Dictionary = gp_p.get("_sv_ammo_synced", {})
+				var _ghost_delta: Dictionary = {}
+				for aid in _ghost_mem.keys():
+					var mq: int = int(_ghost_mem.get(aid, 0))
+					var sq: int = int(_ghost_sync.get(aid, 0))
+					if mq - sq != 0:
+						_ghost_delta[str(aid)] = mq - sq
+				if _ghost_delta.size() > 0:
 					db_send("save_player_ammo", {
 						"account_id": int(gp_p.account_id),
-						"ammo_dict": _ghost_ammo,
+						"ammo_delta": _ghost_delta,
 					})
 			if gp_map != "":
 				_bcast(gp_map, "s_pleave", [gp])
@@ -2179,6 +2220,8 @@ func on_purchase_item(peer: int, item_id: String, quantity: int, tx_id: String) 
 	if acct_id <= 0:
 		net.callv("rpc_id", [peer, "s_purchase_result", false, "no_account", tx_id, 0, 0])
 		return
+	# Ateşten gelen bekleyen mermi deltasini once DB'ye flush et (satın alim oncesi)
+	_flush_player_ammo(peer)
 	var resp: Dictionary = db_send("purchase_item", {
 		"account_id": acct_id,
 		"item_id": item_id,

@@ -1513,16 +1513,10 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 float(msg.get("px", 0.0)),
                 float(msg.get("pz", 0.0)),
             )
-        elif method == "decrement_ammo":
-            resp = decrement_ammo(
-                int(msg.get("account_id", 0)),
-                str(msg.get("ammo_id", "")),
-                int(msg.get("quantity", 1)),
-            )
         elif method == "save_player_ammo":
             resp = save_player_ammo(
                 int(msg.get("account_id", 0)),
-                msg.get("ammo_dict", {}),
+                msg.get("ammo_delta", {}),
             )
         elif method == "backup":
             backup_key = msg.get("backup_key", "")
@@ -1582,69 +1576,33 @@ def save_player_position(account_id: int, map_name: str, px: float, pz: float) -
         conn.close()
 
 
-def decrement_ammo(account_id: int, ammo_id: str, quantity: int) -> dict:
+def save_player_ammo(account_id: int, ammo_delta: dict) -> dict:
     """
-    Belirli bir merminin miktarini atomik olarak azaltir.
-    BEGIN IMMEDIATE ile korunur. Negatif yapilmaz, yetersiz durumda RED.
-    """
-    account_id = int(account_id)
-    quantity = int(quantity)
-    if quantity <= 0:
-        return {"ok": False, "error": "invalid_quantity"}
-    conn = get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT quantity FROM ammo WHERE account_id = ? AND ammo_id = ?",
-            (account_id, ammo_id),
-        ).fetchone()
-        if not row:
-            conn.execute("ROLLBACK")
-            return {"ok": False, "error": "ammo_not_found"}
-        current = int(row["quantity"])
-        if current < quantity:
-            conn.execute("ROLLBACK")
-            return {"ok": False, "error": "insufficient_ammo"}
-        new_qty = current - quantity
-        conn.execute(
-            "UPDATE ammo SET quantity = ? WHERE account_id = ? AND ammo_id = ?",
-            (new_qty, account_id, ammo_id),
-        )
-        conn.execute("COMMIT")
-        return {"ok": True, "ammo_id": ammo_id, "new_qty": new_qty}
-    except Exception as e:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        log.error("decrement_ammo hata: %s", e)
-        return {"ok": False, "error": "internal"}
-    finally:
-        conn.close()
-
-
-def save_player_ammo(account_id: int, ammo_dict: dict) -> dict:
-    """
-    Oyuncunun tum mermisini atomik olarak kaydeder (oturum sonu/dual session
-    guvenligi icin). Her bir ammo_id'nin miktarini UPSERT ile yazar.
+    Oyuncunun mermi degisikliklerini atomik olarak DB'ye yansitir (delta tabanli).
+    ammo_delta: {ammo_id: delta_miktar} (pozitif = ekleme, negatif = cikarma)
+    Her bir ammo_id icin: quantity = MAX(0, quantity + delta)
+    DB'den donen guncel degeri dondurur.
     """
     account_id = int(account_id)
-    if not isinstance(ammo_dict, dict):
+    if not isinstance(ammo_delta, dict):
         return {"ok": False, "error": "invalid_ammo_dict"}
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        for ammo_id, qty in ammo_dict.items():
-            qty = int(qty)
-            if qty < 0:
-                qty = 0
+        result_ammo: dict = {}
+        for ammo_id, delta in ammo_delta.items():
+            delta = int(delta)
             conn.execute(
-                "INSERT INTO ammo (account_id, ammo_id, quantity) VALUES (?, ?, ?) "
-                "ON CONFLICT(account_id, ammo_id) DO UPDATE SET quantity = excluded.quantity",
-                (account_id, str(ammo_id), qty),
+                "UPDATE ammo SET quantity = MAX(0, quantity + ?) WHERE account_id = ? AND ammo_id = ?",
+                (delta, account_id, str(ammo_id)),
             )
+            row = conn.execute(
+                "SELECT quantity FROM ammo WHERE account_id = ? AND ammo_id = ?",
+                (account_id, str(ammo_id)),
+            ).fetchone()
+            result_ammo[str(ammo_id)] = int(row["quantity"]) if row else 0
         conn.execute("COMMIT")
-        return {"ok": True}
+        return {"ok": True, "new_ammo": result_ammo}
     except Exception as e:
         try:
             conn.execute("ROLLBACK")
