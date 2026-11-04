@@ -52,6 +52,7 @@ var cur_cat := "lasers"
 var _cat_sig := ""
 var _quick_loaded := false
 var _rows_on := true
+var mid_btns: Array = []     # orta sira: kategori dugmeleri + market (cubuk gizlenince bunlar da gizlenir)
 
 var f_reg: SystemFont
 var f_bold: SystemFont
@@ -116,6 +117,8 @@ class DOWin extends Control:
 	# DarkOrbit penceresi: window.swf'in 8 parcali cercevesi (sol ust 41x36, sag ust 81x36, alt 20 px)
 	const HEAD := 36.0
 	const BOT := 20.0
+	const MODERN := true          # false = eski bitmap cerceve (assets/hud/frame)
+	const HDR := 32.0
 	const BODY_COL := Color(0.02, 0.05, 0.08, 0.80)
 	var title := ""
 	var subtitle := ""
@@ -143,8 +146,19 @@ class DOWin extends Control:
 		body.size = Vector2(sz.x, sz.y - HEAD - BOT)
 		body.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		add_child(body)
-		add_child(_btn("close", Vector2(sz.x - 26.0, 9), hide))
-		add_child(_btn("min", Vector2(sz.x - 48.0, 9), hide))
+		if MODERN:
+			add_child(_mbtn("close", Vector2(sz.x - 26.0, 7), hide))
+			add_child(_mbtn("min", Vector2(sz.x - 48.0, 7), hide))
+		else:
+			add_child(_btn("close", Vector2(sz.x - 26.0, 9), hide))
+			add_child(_btn("min", Vector2(sz.x - 48.0, 9), hide))
+
+	func _mbtn(n: String, pos: Vector2, cb: Callable) -> TextureButton:
+		var b := DOWinBtn.new()
+		b.kind = n
+		b.position = pos
+		b.pressed.connect(cb)
+		return b
 
 	func _btn(n: String, pos: Vector2, cb: Callable) -> TextureButton:
 		var b := TextureButton.new()
@@ -164,6 +178,7 @@ class DOWin extends Control:
 		for c in get_children():
 			if c is TextureButton:
 				c.position.x = sz.x - 26.0 - 22.0 * n
+				c.position.y = 7.0 if MODERN else 9.0
 				n += 1
 		queue_redraw()
 
@@ -189,8 +204,40 @@ class DOWin extends Control:
 		if _drag and mb != null and not mb.pressed:
 			_drag = false
 
+	func _draw_modern() -> void:
+		var sz := size
+		var c := 8.0
+		var poly := PackedVector2Array([Vector2(c, 0), Vector2(sz.x, 0), Vector2(sz.x, sz.y - c), Vector2(sz.x - c, sz.y), Vector2(0, sz.y), Vector2(0, c)])
+		var sh := PackedVector2Array()
+		for p in poly:
+			sh.append(p + Vector2(2, 3))
+		draw_colored_polygon(sh, Color(0, 0, 0, 0.35))
+		var top := Color(0.065, 0.105, 0.15, 0.90)
+		var bot := Color(0.02, 0.04, 0.07, 0.94)
+		draw_polygon(poly, PackedColorArray([top, top, bot, bot, bot, top]))
+		var hl := Color(0.14, 0.26, 0.36, 0.97)
+		var hd := Color(0.06, 0.12, 0.18, 0.97)
+		draw_polygon(PackedVector2Array([Vector2(c, 0), Vector2(sz.x, 0), Vector2(sz.x, HDR), Vector2(0, HDR), Vector2(0, c)]), PackedColorArray([hl, hl, hd, hd, hl]))
+		draw_line(Vector2(c, 1.0), Vector2(sz.x - 1.0, 1.0), Color(1, 1, 1, 0.12), 1.0)
+		draw_line(Vector2(0, HDR), Vector2(sz.x, HDR), Color(0.22, 0.62, 0.82, 0.85), 1.0)
+		draw_line(Vector2(0, HDR), Vector2(56, HDR), Color(0.55, 0.92, 1.0), 2.0)
+		var ln := poly.duplicate()
+		ln.append(poly[0])
+		draw_polyline(ln, Color(0.2, 0.5, 0.66, 0.95), 1.0, true)
+		var ac := Color(0.45, 0.88, 1.0, 0.75)
+		draw_line(Vector2(sz.x - 14, sz.y - 2), Vector2(sz.x - 2, sz.y - 2), ac, 1.5)
+		draw_line(Vector2(sz.x - 2, sz.y - 14), Vector2(sz.x - 2, sz.y - 2), ac, 1.5)
+		draw_rect(Rect2(10, 13, 5, 5), Color(0.95, 0.76, 0.25))
+		if title != "":
+			draw_string(_font, Vector2(22, 21), title.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, sz.x - 120.0, 11, Color(0.88, 0.94, 0.98))
+		if subtitle != "":
+			draw_string(_font, Vector2(0, 21), subtitle, HORIZONTAL_ALIGNMENT_RIGHT, sz.x - 60.0, 10, Color(0.75, 0.88, 0.95))
+
 	func _draw() -> void:
 		var sz := size
+		if MODERN:
+			_draw_modern()
+			return
 		if not _tex.has("tl"):
 			draw_rect(Rect2(Vector2.ZERO, sz), BODY_COL)
 			draw_rect(Rect2(Vector2.ZERO, sz), Color(0.18, 0.52, 0.65), false, 1.0)
@@ -216,6 +263,43 @@ class DOWin extends Control:
 			draw_string(_font, Vector2(0, 22), subtitle, HORIZONTAL_ALIGNMENT_RIGHT, sz.x - 60.0, 10, Color(0.75, 0.88, 0.95))
 
 
+class DOWinBtn extends TextureButton:
+	# Modern kucuk pencere dugmesi: kapat (x) / kucult (-)
+	var kind := "close"
+
+	func _init() -> void:
+		size = Vector2(18, 18)
+		focus_mode = Control.FOCUS_NONE
+		mouse_entered.connect(queue_redraw)
+		mouse_exited.connect(queue_redraw)
+		button_down.connect(queue_redraw)
+		button_up.connect(queue_redraw)
+
+	func _draw() -> void:
+		var s := size
+		var hov := is_hovered()
+		var bg := Color(0.09, 0.17, 0.24, 0.92)
+		var fg := Color(0.62, 0.8, 0.9)
+		var bd := Color(0.22, 0.5, 0.65, 0.9)
+		if hov:
+			fg = Color(1, 1, 1)
+			if kind == "close":
+				bg = Color(0.65, 0.17, 0.17, 0.96)
+				bd = Color(1.0, 0.45, 0.4)
+			else:
+				bg = Color(0.16, 0.36, 0.5, 0.96)
+				bd = Color(0.5, 0.9, 1.0)
+		if is_pressed():
+			bg = bg.darkened(0.3)
+		draw_rect(Rect2(Vector2.ZERO, s), bg)
+		draw_rect(Rect2(Vector2(0.5, 0.5), s - Vector2.ONE), bd, false, 1.0)
+		if kind == "close":
+			draw_line(Vector2(5.5, 5.5), Vector2(12.5, 12.5), fg, 1.6, true)
+			draw_line(Vector2(12.5, 5.5), Vector2(5.5, 12.5), fg, 1.6, true)
+		else:
+			draw_line(Vector2(5, 12), Vector2(13, 12), fg, 1.8)
+
+
 class DOBar extends Control:
 	# window.swf'in gercek bar izi (127) + dolgu (170'ten renklendirilmis)
 	var value := 1.0
@@ -226,8 +310,10 @@ class DOBar extends Control:
 	var smooth_up := false   # dolarken bar yumusakca yukselir (tamir animasyonu); dusus anlik
 	var rep := false          # tamir aktif: yesil parlama + kucuk "+" simgesi
 	var shown := 1.0
+	var _kind := "blue"
 
 	func setup(kind: String) -> void:
+		_kind = kind
 		_font = SystemFont.new()
 		_font.font_names = PackedStringArray(["Verdana", "Tahoma", "Segoe UI", "Arial"])
 		_font.font_weight = 700
@@ -272,15 +358,29 @@ class DOBar extends Control:
 
 	func _draw() -> void:
 		var s := size
-		if _track != null:
-			draw_style_box(_track, Rect2(Vector2.ZERO, s))
-		else:
-			draw_rect(Rect2(Vector2.ZERO, s), Color(0.02, 0.04, 0.06))
 		var w := (s.x - 6.0) * clampf(shown if smooth_up else value, 0.0, 1.0)
-		if w >= 10.0 and _fill != null:
-			draw_style_box(_fill, Rect2(3.0, 3.0, w, s.y - 6.0))
-		elif w > 0.0:
-			draw_rect(Rect2(3.0, 3.0, w, s.y - 6.0), Color(0.3, 0.7, 0.3))
+		if DOWin.MODERN:
+			draw_rect(Rect2(Vector2.ZERO, s), Color(0.015, 0.03, 0.05, 0.95))
+			if w > 0.0:
+				var lite := Color(0.36, 0.62, 1.0)
+				var dark := Color(0.12, 0.3, 0.72)
+				if _kind == "green":
+					lite = Color(0.45, 0.88, 0.32)
+					dark = Color(0.14, 0.5, 0.16)
+				var fr := Rect2(3.0, 3.0, w, s.y - 6.0)
+				draw_polygon(PackedVector2Array([fr.position, Vector2(fr.end.x, fr.position.y), fr.end, Vector2(fr.position.x, fr.end.y)]), PackedColorArray([lite, lite, dark, dark]))
+				draw_line(Vector2(fr.position.x, fr.position.y + 1.0), Vector2(fr.end.x, fr.position.y + 1.0), Color(1, 1, 1, 0.28), 1.0)
+				draw_rect(Rect2(fr.end.x - 1.0, fr.position.y, 1.0, fr.size.y), Color(1, 1, 1, 0.35))
+			draw_rect(Rect2(Vector2(0.5, 0.5), s - Vector2.ONE), Color(0.2, 0.42, 0.55, 0.95), false, 1.0)
+		else:
+			if _track != null:
+				draw_style_box(_track, Rect2(Vector2.ZERO, s))
+			else:
+				draw_rect(Rect2(Vector2.ZERO, s), Color(0.02, 0.04, 0.06))
+			if w >= 10.0 and _fill != null:
+				draw_style_box(_fill, Rect2(3.0, 3.0, w, s.y - 6.0))
+			elif w > 0.0:
+				draw_rect(Rect2(3.0, 3.0, w, s.y - 6.0), Color(0.3, 0.7, 0.3))
 		if smooth_up and (rep or shown < value - 0.001):
 			var pul := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.012)
 			if w > 0.0:
@@ -345,20 +445,30 @@ class DOIconBtn extends Control:
 	func _draw() -> void:
 		var s := size
 		var c := 7.0 if s.x > 34.0 else 6.0
-		var fill := Color(0.05, 0.09, 0.12, 0.93)
+		var gold := Color(0.95, 0.76, 0.25)
+		var o := _oct(s, c, 0.0)
+		var top := Color(0.10, 0.17, 0.23, 0.95)
+		var bot := Color(0.04, 0.08, 0.12, 0.97)
+		if _hover:
+			top = Color(0.16, 0.27, 0.36, 0.97)
+			bot = Color(0.06, 0.12, 0.18, 0.97)
+		if selected:
+			top = Color(0.20, 0.19, 0.10, 0.97)
+			bot = Color(0.08, 0.07, 0.04, 0.97)
 		if _down:
-			fill = Color(0.03, 0.06, 0.08, 0.96)
-		elif _hover:
-			fill = Color(0.09, 0.15, 0.2, 0.95)
-		draw_colored_polygon(_oct(s, c, 0.0), fill)
-		draw_colored_polygon(PackedVector2Array([Vector2(s.x * 0.45, s.y), Vector2(s.x, s.y * 0.45), Vector2(s.x, s.y - c), Vector2(s.x - c, s.y)]), Color(1, 1, 1, 0.035))
-		var bc := Color(0.92, 0.74, 0.22) if selected else (Color(0.3, 0.7, 0.9) if _hover else Color(0.16, 0.5, 0.66))
-		var o := _oct(s, c, 0.5)
-		o.append(o[0])
-		draw_polyline(o, bc, 1.5 if selected else 1.0, true)
-		var o2 := _oct(s, c - 1.0, 2.5)
-		o2.append(o2[0])
-		draw_polyline(o2, Color(bc.r, bc.g, bc.b, 0.3), 1.0, true)
+			top = bot
+		draw_polygon(o, PackedColorArray([top, top, top, bot, bot, bot, bot, top]))
+		var bc := gold if selected else (Color(0.42, 0.82, 1.0) if _hover else Color(0.2, 0.46, 0.62))
+		if _hover or selected:
+			var og := _oct(s, c, -0.5)
+			og.append(og[0])
+			draw_polyline(og, Color(bc.r, bc.g, bc.b, 0.22), 3.0, true)
+		var ob := _oct(s, c, 0.5)
+		ob.append(ob[0])
+		draw_polyline(ob, bc, 1.5 if selected else 1.0, true)
+		draw_line(Vector2(c + 1.0, 1.5), Vector2(s.x - c - 1.0, 1.5), Color(1, 1, 1, 0.13), 1.0)
+		if selected:
+			draw_rect(Rect2(s.x * 0.28, s.y - 3.0, s.x * 0.44, 2.0), gold)
 		var ic: Texture2D = icon_h if (_hover and icon_h != null) else icon
 		if ic != null:
 			draw_texture_rect(ic, Rect2(Vector2.ZERO, s), false)
@@ -504,11 +614,9 @@ class DOCell extends Control:
 		var s := size
 		var c := 5.0
 		var pts_oct := PackedVector2Array([Vector2(c, 0), Vector2(s.x - c, 0), Vector2(s.x, c), Vector2(s.x, s.y - c), Vector2(s.x - c, s.y), Vector2(c, s.y), Vector2(0, s.y - c), Vector2(0, c)])
-		draw_colored_polygon(pts_oct, Color(0.075, 0.1, 0.125, 0.95) if not _hover else Color(0.1, 0.14, 0.18, 0.96))
-		var y := 8.0
-		while y < s.y - 3.0:
-			draw_line(Vector2(3, y), Vector2(s.x - 3.0, y), Color(0, 0, 0, 0.22), 1.0)
-			y += 3.0
+		var ct := Color(0.11, 0.16, 0.21, 0.96) if not _hover else Color(0.16, 0.24, 0.32, 0.97)
+		var cb := Color(0.04, 0.07, 0.10, 0.97)
+		draw_polygon(pts_oct, PackedColorArray([ct, ct, ct, cb, cb, cb, cb, ct]))
 		var bc := Color(0.92, 0.74, 0.22) if selected else Color(0.16, 0.5, 0.66)
 		var ln := pts_oct.duplicate()
 		ln.append(pts_oct[0])
@@ -641,7 +749,9 @@ func _build_user() -> void:
 	u_ep = _stat(b, 12, 82, "EP", Color(1, 1, 1))
 	u_ep.size.x = 200.0
 	u_hon = _stat(b, 12, 98, "Honor", Color(1.0, 0.63, 0.24))
-	u_uri = _stat(b, 146, 98, "Uridium", Color(0.84, 0.63, 1.0))
+	u_hon.size.x = 54.0   # Honor kisa kalir; Uridium degeri 14 haneye kadar sigsin diye sola/genis alindi
+	u_uri = _stat(b, 120, 98, "Uridium", Color(0.84, 0.63, 1.0))
+	u_uri.size.x = 116.0
 	u_cr = _stat(b, 12, 114, "Kredi", Color(1.0, 0.88, 0.4))
 	u_cfg = _lbl(b, Vector2(146, 114), 10, Color(0.7, 1.0, 0.8), 134.0)
 
@@ -703,7 +813,7 @@ func _build_menu() -> void:
 	# DarkOrbit ust menu: sol ust 11 dugme, sag ust 3 dugme
 	top_left = Control.new()
 	top_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top_left.size = Vector2(8 * 39, 38)
+	top_left.size = Vector2(8 * 42, 38)
 	add_child(top_left)
 	var defs := [
 		["log", "Sistem mesajlari", _open_log, null],
@@ -718,12 +828,12 @@ func _build_menu() -> void:
 	for i in defs.size():
 		var d: Array = defs[i]
 		var b := _ibtn(d[0], "features", d[1], d[2])
-		b.position = Vector2(i * 39, 0)
+		b.position = Vector2(i * 42, 0)
 		top_left.add_child(b)
 		menu_btns.append([b, d[3]])
 	top_right = Control.new()
 	top_right.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top_right.size = Vector2(3 * 39, 38)
+	top_right.size = Vector2(3 * 42, 38)
 	add_child(top_right)
 	var defs2 := [
 		["fullscreen", "Tam ekran", _toggle_fullscreen],
@@ -733,7 +843,7 @@ func _build_menu() -> void:
 	for i in defs2.size():
 		var d2: Array = defs2[i]
 		var b2 := _ibtn(d2[0], "features", d2[1], d2[2])
-		b2.position = Vector2(i * 39, 0)
+		b2.position = Vector2(i * 42, 0)
 		top_right.add_child(b2)
 
 
@@ -777,10 +887,13 @@ func _on_cat(cat: String, name_: String) -> void:
 
 func _set_rows(v: bool) -> void:
 	_rows_on = v
+	# Cubugu gizle: ust sira (esyalar) + orta sira (kategoriler) kapanir; alt hizli slotlar (1-0) HER ZAMAN kalir.
 	for c in top_cells:
 		c.visible = v
+	for b in mid_btns:
+		b.visible = v
 	for c in quick_cells:
-		c.visible = v
+		c.visible = true
 
 
 func _items_for(cat: String) -> Array:
@@ -942,6 +1055,7 @@ func _save_quick() -> void:
 	for p in quick:
 		arr.append("" if p.is_empty() else "%s:%s" % [str(p["k"]), str(p["id"])])
 	game.SV["quickbar"] = arr
+	Net.send_quickbar(JSON.stringify(arr))   # sunucuya da kaydet: cikis-giriste silinmesin
 	game.save_game()
 
 
@@ -995,6 +1109,7 @@ func _build_actionbar() -> void:
 		b.position = Vector2(i * PITCH, 42)
 		abar.add_child(b)
 		cat_btns[d[0]] = b
+		mid_btns.append(b)
 	cat_btns.erase("buy_now")
 	for i in QUICK_N:
 		var q := _cell(Vector2(i * PITCH, 84))

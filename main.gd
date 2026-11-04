@@ -1299,6 +1299,7 @@ const ACCOUNTS_PATH := "user://novagate_accounts.json"
 const FACTION_SM_LOGO := {1: "mmo", 2: "eic", 3: "vru"}   # assets/ui/logo_sm_<anahtar>.png (isim yanindaki kucuk logo)
 
 var save_path: String = ""          # giris yapan hesabin kayit dosyasi
+var login_username: String = ""      # TLS girisinde yazilan kullanici adi (callsign/nick'ten farkli olabilir)
 var account_name: String = ""       # giris yapan hesabin gorunen adi
 var account_faction: int = 0        # hesabin kilitli sirketi (1=MMO, 2=EIC, 3=VRU)
 var auth_box: VBoxContainer
@@ -1861,6 +1862,7 @@ func _auth_submit() -> void:
 		return
 	# Giris: TLS ile auth_service'ye gonder
 	lbl_auth_msg.text = "Sunucuya dogrulaniyor..."
+	login_username = nm   # giris adi (nick degisse de sabit); sifre degistirmede kullanilir
 	Net.login_via_tls(nm, pw)
 
 
@@ -1924,6 +1926,7 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 		"xp": float(ps.get("xp", 0.0)),
 		"hon": float(ps.get("hon", 0.0)),
 		"seprom": int(ps.get("sep", 0)),
+		"wrecked": int(ps.get("wrecked", 0)) != 0,
 		"pvp_kills": int(ps.get("pvp_kills", 0)),
 		"rank_pen": float(ps.get("rank_pen", 0.0)),
 		"ship": str(ps.get("ship", "phoenix")),
@@ -1958,6 +1961,11 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 		SV.settings = {}
 	if typeof(SV.drone_equip) != TYPE_DICTIONARY:
 		SV.drone_equip = {}
+	# Alt hizli slot cubugu sunucuda settings.quickbar olarak saklanir (cikis-giriste silinmesin)
+	SV["logdisks"] = int(SV.settings.get("logdisks", 0))
+	SV["rd_resets"] = int(SV.settings.get("rd_resets", 0))
+	if typeof(SV.settings.get("quickbar", null)) == TYPE_ARRAY:
+		SV["quickbar"] = SV.settings["quickbar"]
 	SV.forms = Array(SV.get("forms", ["std"]))
 	if SV.forms.is_empty():
 		SV.forms = ["std"]
@@ -2041,8 +2049,9 @@ func _on_company_chosen(f: int) -> void:
 			lbl_auth_msg.text = "Sunucuya baglanilamadi: " + Net.last_error
 			_company_back()
 			return
-		Net.login_via_tls(pending_name, reg_pass)
-	)
+		login_username = pending_name
+		Net.login_via_tls(pending_name, reg_pass))
+
 	req.request(url, headers, HTTPClient.METHOD_POST, reg_body)
 
 
@@ -2388,6 +2397,12 @@ func buy_logdisk(n: int) -> bool:
 	if n <= 0:
 		toast("Zaten 50 Ar-Ge puanına ulaştın.")
 		return false
+	if Net.online:
+		if int(SV.uri) < n * SkillTree.LOGDISK_URI:
+			toast("Yetersiz Uridium!")
+			return false
+		Net.send_skill_op("logdisk", str(n))   # sunucu dusurur ve kaydeder; sonuc on_skill_result'ta uygulanir
+		return true
 	if not pay(0, n * SkillTree.LOGDISK_URI):
 		return false
 	var before := rd_total()
@@ -2411,6 +2426,12 @@ func spend_skill_point(skill_id: String) -> bool:
 		toast("Önce ön koşul yeteneklerini geliştir.")
 		return false
 	var cost := SkillTree.level_cost(sk, rank + 1)
+	if Net.online:
+		if int(SV.cr) < int(cost.cr) or int(SV.get("seprom", 0)) < int(cost.sep):
+			toast("Yetersiz bakiye: %s Kredi + %s Seprom gerekli." % [_n(float(cost.cr)), _n(float(cost.sep))])
+			return false
+		Net.send_skill_op("skill", skill_id)
+		return true
 	if int(SV.cr) < int(cost.cr) or int(SV.get("seprom", 0)) < int(cost.sep):
 		toast("Yetersiz bakiye: %s Kredi + %s Seprom gerekli." % [_n(float(cost.cr)), _n(float(cost.sep))])
 		return false
@@ -2426,6 +2447,35 @@ func spend_skill_point(skill_id: String) -> bool:
 	return true
 
 
+# Sunucudan yetenek agaci sonucu (kesin bakiye + yetenekler). Istemci bunlari AYNEN uygular.
+func on_skill_result(op: String, ok: bool, error: String, skills_json: String, logdisks: int, rd_resets: int, new_cr: int, new_uri: int, new_sep: int) -> void:
+	var parsed = JSON.parse_string(skills_json)
+	SV.cr = new_cr
+	SV.uri = new_uri
+	SV.seprom = new_sep
+	if not ok:
+		var msg := {"puan_yok": "Ar-Ge puanın yok.", "on_kosul": "Önce ön koşul yeteneklerini geliştir.", "max_puan": "Zaten 50 Ar-Ge puanına ulaştın.", "insufficient_funds": "Yetersiz bakiye."}
+		toast(str(msg.get(error, "Yetenek işlemi yapılamadı (%s)." % error)))
+	else:
+		var old_hp := max_hp()
+		if typeof(parsed) == TYPE_DICTIONARY:
+			SV.skills = parsed
+		SV.logdisks = logdisks
+		SV.rd_resets = rd_resets
+		match op:
+			"logdisk":
+				toast("Log Disk alındı  (Ar-Ge puanı: %d)" % rd_total())
+			"skill":
+				toast("Yetenek yükseltildi.")
+			"reset":
+				toast("Pilot Bio sıfırlandı. Ar-Ge puanların yeniden dağıtılabilir.")
+		if P != null:
+			P.hp = minf(P.hp + maxf(0.0, max_hp() - old_hp), max_hp())
+		_clamp_vitals()
+	if base_menu != null and is_instance_valid(base_menu):
+		base_menu.refresh()
+
+
 func reset_cost_uri() -> int:
 	return SkillTree.RESET_BASE_URI * (1 << clampi(int(SV.get("rd_resets", 0)), 0, 20))
 
@@ -2434,6 +2484,12 @@ func reset_skills() -> bool:
 	if rd_spent() <= 0:
 		toast("Sıfırlanacak yetenek yok.")
 		return false
+	if Net.online:
+		if int(SV.uri) < reset_cost_uri():
+			toast("Yetersiz Uridium!")
+			return false
+		Net.send_skill_op("reset", "")
+		return true
 	if not pay(0, reset_cost_uri()):
 		return false
 	SV.skills = {}
@@ -3089,6 +3145,9 @@ func _apply_ship(id: String) -> void:
 	var pos: Vector3 = P.node.position
 	_make_player()
 	P.node.position = pos
+	if wrecked:
+		P.hp = 0.0
+		P.sh = 0.0
 	drone_sig = ""
 	toast("Gemi değişti: " + ship_def().name)
 	save_game()   # yeni geminin ekipmani da sunucuya senkronlanir
@@ -3100,6 +3159,8 @@ func on_ship_result(ok: bool, ship: String, error: String) -> void:
 		toast(error)
 	if ship in SV.owned and str(SV.get("ship", "")) != ship and P != null:
 		_apply_ship(ship)   # onaylandi ya da reddedildi ve istemci sunucudan ayristi -> sunucudaki gemiye esitle
+	if wrecked:
+		_refresh_repair_overlay()   # gemi degisince tamir ucreti de degisir (Phoenix ucretsiz)
 	if base_menu != null:
 		refresh_base()
 
@@ -3247,17 +3308,320 @@ func buy_rockets(n: int) -> bool:
 
 
 func service_repair() -> void:
-	var cost := int((max_hp() - P.hp) / 40.0)
-	if not pay(cost, 0):
+	if P == null:
 		return
-	P.hp = max_hp()
-	P.sh = max_sh()
-	reset_cfg_shields()
-	toast("Gemi tamir edildi.")
+	if not wrecked and P.hp >= max_hp() - 0.5:
+		toast("Gemi zaten sağlam.")
+		return
+	request_repair()
 
 
+# Hasarli gemi icin tamir ucreti (Uridium). Hasar yoksa 0.
 func repair_cost() -> int:
-	return int((max_hp() - P.hp) / 40.0)
+	if P == null or (not wrecked and P.hp >= max_hp() - 0.5):
+		return 0
+	return repair_cost_uri()
+
+
+# ============================================================================
+#  ENKAZ / TAMIR  (gemi patlayinca)
+#  Patlayan gemi ust bolgesinde CAN 0 ile dogar ve tamir edilene kadar kullanilamaz.
+#  Tamir ucreti: Phoenix UCRETSIZ, diger tum gemiler 500 Uridium. Ucret sunucuda dusulur (server_db.repair_ship).
+# ============================================================================
+const SPAWN_HP_ZERO := true                    # false: eski davranis (tam canla dogus)
+const REPAIR_COST_URI := 500                   # sunucudaki REPAIR_COST_URI ile ayni olmali
+const REPAIR_FREE_SHIPS: Array = ["phoenix"]   # ucretsiz tamir edilen gemiler
+
+var wrecked := false
+var _repair_layer: CanvasLayer = null
+var _repair_ship_lbl: Label
+var _repair_cost_lbl: Label
+var _repair_bal_lbl: Label
+var _repair_msg: Label
+var _repair_btn: Button
+var _repair_alt_btn: Button
+var _repair_busy := false
+var _repair_busy_t := 0.0
+var _repair_tx := ""
+
+
+func repair_cost_uri() -> int:
+	return 0 if str(SV.get("ship", "phoenix")) in REPAIR_FREE_SHIPS else REPAIR_COST_URI
+
+
+func _enter_wreck() -> void:
+	wrecked = true
+	SV["wrecked"] = true
+	_stop_all()
+	if base_menu != null and is_instance_valid(base_menu) and base_menu.visible:
+		base_menu.visible = false   # acik kontrol paneli kapanir; tamir uyarisi onde gorunur
+	if P != null:
+		P.hp = 0.0
+		P.sh = 0.0
+	_repair_busy = false
+	if _repair_layer == null or not is_instance_valid(_repair_layer):
+		_build_repair_overlay()
+	_repair_set_msg("", false)
+	_refresh_repair_overlay()
+	_repair_layer.visible = true
+	_repair_btn.grab_focus()
+
+
+func request_repair() -> void:
+	if _repair_busy or P == null:
+		return
+	var cost := repair_cost_uri()
+	if int(SV.get("uri", 0)) < cost:
+		if wrecked:
+			_repair_set_msg("Yetersiz Uridium.", true)
+			_refresh_repair_overlay()
+		else:
+			toast("Yetersiz Uridium!")
+		return
+	if Net.online:
+		_repair_tx = "rep-%d-%d" % [int(Time.get_unix_time_from_system() * 1000.0), randi() % 100000]
+		_repair_busy = true
+		_repair_busy_t = 8.0
+		Net.send_repair(_repair_tx)
+		if wrecked:
+			_repair_set_msg("", false)
+			_refresh_repair_overlay()
+		return
+	if not pay(0, cost):
+		return
+	_finish_repair(cost)
+
+
+func on_repair_result(ok: bool, error: String, tx_id: String, cost: int, new_uri: int) -> void:
+	if tx_id != _repair_tx:
+		return
+	print("[TAMIR] sonuc ok=%s hata=%s ucret=%d eski_uri=%d sunucu_uri=%d" % [ok, error, cost, int(SV.get("uri", 0)), new_uri])
+	_repair_busy = false
+	if new_uri >= 0:
+		SV.uri = new_uri
+	if ok:
+		_finish_repair(cost)
+		return
+	if error == "tamir_gerekmiyor":
+		_finish_repair(0)   # sunucuya gore hasar yok: ucret alinmadi
+		return
+	var msg := "Yetersiz Uridium." if error == "insufficient_funds" else "Tamir yapılamadı (%s). Tekrar dene." % error
+	if wrecked:
+		_repair_set_msg(msg, true)
+		_refresh_repair_overlay()
+	else:
+		toast(msg)
+
+
+func _finish_repair(cost: int) -> void:
+	wrecked = false
+	_repair_busy = false
+	SV.erase("wrecked")
+	if P != null:
+		P.hp = max_hp()
+		P.sh = max_sh()
+		reset_cfg_shields()
+	last_hit = clock   # tamirden hemen sonra otomatik tamir beklemesi (REP-4) bastan baslar
+	if _repair_layer != null and is_instance_valid(_repair_layer):
+		_repair_layer.visible = false
+	toast("Gemi tamir edildi." if cost <= 0 else "Gemi tamir edildi.  (-%s Uridium)" % _n(cost))
+	save_game()
+
+
+# Uridiumu yetmeyen oyuncu enkazda takilmasin: ucretsiz Phoenix'e gecip onu tamir edebilir.
+func _repair_switch_phoenix() -> void:
+	if "phoenix" in SV.owned and not _repair_busy:
+		equip_ship("phoenix")
+
+
+func _repair_set_msg(text: String, is_err: bool) -> void:
+	if _repair_msg == null:
+		return
+	_repair_msg.text = text
+	_repair_msg.visible = text != ""
+	_repair_msg.add_theme_color_override("font_color", Color(1.0, 0.55, 0.45) if is_err else Color(0.7, 0.85, 1.0))
+
+
+func _refresh_repair_overlay() -> void:
+	if _repair_layer == null or not is_instance_valid(_repair_layer):
+		return
+	var cost := repair_cost_uri()
+	var bal := int(SV.get("uri", 0))
+	var enough := bal >= cost
+	_repair_ship_lbl.text = str(ship_def().name).to_upper()
+	_repair_cost_lbl.text = "ÜCRETSİZ" if cost == 0 else "%s Uridium" % _n(cost)
+	_repair_cost_lbl.add_theme_color_override("font_color", Color(0.45, 1.0, 0.6) if cost == 0 else Color(1.0, 0.82, 0.3))
+	_repair_bal_lbl.text = "%s Uridium" % _n(bal)
+	_repair_bal_lbl.add_theme_color_override("font_color", Color(0.85, 0.92, 1.0) if enough else Color(1.0, 0.5, 0.45))
+	_repair_btn.disabled = _repair_busy or not enough
+	if _repair_busy:
+		_repair_btn.text = "TAMİR EDİLİYOR…"
+	else:
+		_repair_btn.text = "TAMİR ET" if cost == 0 else "TAMİR ET  —  %s Uridium" % _n(cost)
+	var can_swap: bool = (not enough) and str(SV.get("ship", "")) != "phoenix" and ("phoenix" in SV.owned)
+	_repair_alt_btn.visible = can_swap
+	_repair_alt_btn.disabled = _repair_busy
+	if not enough and _repair_msg.text == "":
+		if can_swap:
+			_repair_set_msg("Yetersiz Uridium. Ücretsiz tamir için Phoenix'e geçebilirsin.", true)
+		else:
+			_repair_set_msg("Yetersiz Uridium.", true)
+
+
+func _rp_label(text: String, size: int, col: Color, align: int = HORIZONTAL_ALIGNMENT_LEFT) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.horizontal_alignment = align
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", col)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return l
+
+
+func _rp_style(bg: Color, border: Color) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = bg
+	sb.border_color = border
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(4)
+	sb.content_margin_left = 16
+	sb.content_margin_right = 16
+	sb.content_margin_top = 10
+	sb.content_margin_bottom = 10
+	return sb
+
+
+func _rp_button(text: String, primary: bool, cb: Callable) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(0, 46)
+	b.add_theme_font_size_override("font_size", 15)
+	b.add_theme_color_override("font_color", Color(1, 1, 1))
+	b.add_theme_color_override("font_disabled_color", Color(0.55, 0.6, 0.68))
+	var base := Color(0.10, 0.45, 0.80) if primary else Color(0.12, 0.17, 0.24)
+	var edge := Color(0.35, 0.75, 1.0) if primary else Color(0.30, 0.40, 0.52)
+	b.add_theme_stylebox_override("normal", _rp_style(base, edge))
+	b.add_theme_stylebox_override("hover", _rp_style(base.lightened(0.15), edge.lightened(0.2)))
+	b.add_theme_stylebox_override("pressed", _rp_style(base.darkened(0.2), edge))
+	b.add_theme_stylebox_override("focus", _rp_style(base.lightened(0.08), Color(1, 1, 1, 0.9)))
+	b.add_theme_stylebox_override("disabled", _rp_style(Color(0.09, 0.11, 0.15), Color(0.2, 0.25, 0.32)))
+	b.pressed.connect(cb)
+	return b
+
+
+func _build_repair_overlay() -> void:
+	_repair_layer = CanvasLayer.new()
+	_repair_layer.layer = 90
+	add_child(_repair_layer)
+	var root := Control.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_STOP   # arkadaki arayuze / dunyaya tiklanmasini engeller
+	_repair_layer.add_child(root)
+	var dim := ColorRect.new()
+	dim.color = Color(0.01, 0.015, 0.04, 0.74)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(dim)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(center)
+	var card := PanelContainer.new()
+	card.custom_minimum_size = Vector2(440, 0)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.035, 0.06, 0.10, 0.97)
+	sb.border_color = Color(0.25, 0.35, 0.48)
+	sb.set_border_width_all(1)
+	sb.border_width_top = 4
+	sb.border_color = Color(1.0, 0.36, 0.28)
+	sb.set_corner_radius_all(6)
+	sb.set_content_margin_all(26)
+	sb.shadow_color = Color(0, 0, 0, 0.6)
+	sb.shadow_size = 24
+	card.add_theme_stylebox_override("panel", sb)
+	center.add_child(card)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 10)
+	card.add_child(v)
+
+	v.add_child(_rp_label("SİSTEM UYARISI", 12, Color(1.0, 0.55, 0.30)))
+	v.add_child(_rp_label("GEMİ İMHA EDİLDİ", 30, Color(1, 1, 1)))
+	v.add_child(_rp_label("Gövde bütünlüğü kritik. Göreve dönmek için geminin tamir edilmesi gerekiyor.", 13, Color(0.65, 0.74, 0.85)))
+	var sep := ColorRect.new()
+	sep.color = Color(0.25, 0.35, 0.48, 0.8)
+	sep.custom_minimum_size = Vector2(0, 1)
+	v.add_child(sep)
+
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 24)
+	grid.add_theme_constant_override("v_separation", 8)
+	v.add_child(grid)
+	var dim_col := Color(0.55, 0.64, 0.76)
+	grid.add_child(_rp_label("Gemi", 13, dim_col))
+	_repair_ship_lbl = _rp_label("", 14, Color(1, 1, 1), HORIZONTAL_ALIGNMENT_RIGHT)
+	_repair_ship_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_child(_repair_ship_lbl)
+	grid.add_child(_rp_label("Gövde bütünlüğü", 13, dim_col))
+	var hull := _rp_label("%0", 14, Color(1.0, 0.45, 0.4), HORIZONTAL_ALIGNMENT_RIGHT)
+	hull.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_child(hull)
+	grid.add_child(_rp_label("Tamir ücreti", 13, dim_col))
+	_repair_cost_lbl = _rp_label("", 16, Color(1.0, 0.82, 0.3), HORIZONTAL_ALIGNMENT_RIGHT)
+	_repair_cost_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_child(_repair_cost_lbl)
+	grid.add_child(_rp_label("Bakiyen", 13, dim_col))
+	_repair_bal_lbl = _rp_label("", 14, Color(0.85, 0.92, 1.0), HORIZONTAL_ALIGNMENT_RIGHT)
+	_repair_bal_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_child(_repair_bal_lbl)
+
+	_repair_msg = _rp_label("", 13, Color(1.0, 0.55, 0.45))
+	_repair_msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_repair_msg.custom_minimum_size = Vector2(388, 0)
+	_repair_msg.visible = false
+	v.add_child(_repair_msg)
+
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, 4)
+	gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	v.add_child(gap)
+	_repair_btn = _rp_button("TAMİR ET", true, request_repair)
+	v.add_child(_repair_btn)
+	_repair_alt_btn = _rp_button("PHOENIX'E GEÇ  (ÜCRETSİZ TAMİR)", false, _repair_switch_phoenix)
+	_repair_alt_btn.visible = false
+	v.add_child(_repair_alt_btn)
+	_repair_layer.visible = false
+
+
+# ============================================================================
+#  HESAP AYARLARI: nick / sirket degistirme (sifre degistirme: Net.change_password_via_tls)
+#  Sunucu isi dogrular (savasta olmaz, bekleme sureleri); basarili olunca oturum kapanir ve yeniden giris gerekir.
+# ============================================================================
+func request_change_callsign(new_name: String) -> void:
+	if not Net.online:
+		toast("Bu işlem için sunucuya bağlı olmalısın.")
+		return
+	Net.send_change_callsign(new_name.strip_edges())
+
+
+func request_change_faction(f: int) -> void:
+	if not Net.online:
+		toast("Bu işlem için sunucuya bağlı olmalısın.")
+		return
+	Net.send_change_faction(f)
+
+
+func on_account_result(kind: String, ok: bool, error: String, value: String) -> void:
+	if ok:
+		if kind == "callsign":
+			toast("Çağrı adın değişti: %s" % value)
+		else:
+			toast("Şirket değişti. Yeni üssünde yeniden giriş yapılacak.")
+		return   # sunucu ardindan oturumu kapatir (s_disconnect) -> menu
+	toast(error if error != "" else "İşlem yapılamadı.")
+	if base_menu != null and is_instance_valid(base_menu):
+		base_menu.on_account_result(kind, ok, error)
+
 
 
 # Muhimmat secim merkezi (HUD hucreleri ve hizli slotlar buradan gecmeli).
@@ -3451,6 +3815,9 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 		P.hp = maxf(1.0, max_hp() * float((rs as Dictionary).get("hp_r", 1.0)))
 		P.sh = clampf(max_sh() * float((rs as Dictionary).get("sh_r", 1.0)), 0.0, max_sh())
 	SV.erase("_resume")
+	wrecked = false
+	if bool(SV.get("wrecked", false)) and P != null:
+		_enter_wreck()   # tamir edilmeden cikis-giris yapilsa da gemi enkaz kalir
 	_loadout_sig = ""
 	_sync_loadout()   # sunucudaki kayitla esitle (yeni hesapta otomatik donanim da kalici olur)
 	toast("Hoş geldin! Tıkla: hareket/hedef  |  Ctrl/Boşluk: lazer  |  R: roket  |  J: kapı  |  M: harita")
@@ -4181,8 +4548,8 @@ func spawn_npc(id: String, at: Variant = null):
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if not running:
-		return
+	if not running or wrecked:
+		return   # enkaz gemi: tamir edilene kadar hareket / atis / kisayol yok
 	# Mobil arayuz acikken dunya girdisi (hareket / hedef / zoom) mobile_hud.gd tarafindan yonetilir.
 	# Dokunma ayni anda sahte fare olayina da cevrildigi icin burada tekrar islenmez (cift tetikleme olmasin).
 	if dohud != null and dohud.mobile_ui_on():
@@ -5145,6 +5512,8 @@ func popup_txt(text: String, pos: Vector3, col: Color) -> void:
 
 
 func hurt(dmg: float, pierce_shield := false) -> void:
+	if wrecked:
+		return   # enkaz (tamir bekleyen) gemi tekrar patlamaz
 	if extras != null and extras.shield_active():
 		extras.shield_absorb(dmg)   # 3 Saniyelik Koruma: hasar tamamen engellenir
 		return
@@ -5179,12 +5548,14 @@ func _die() -> void:
 	P.sh = max_sh()
 	reset_cfg_shields()
 	load_map(f.home, w2g(hm.base.x, hm.base.y) + Vector3(10, 0, 10))
+	if SPAWN_HP_ZERO:
+		_enter_wreck()   # can 0 ile dogar; tamir edilene kadar gemi kullanilamaz
 
 
-# Sunucu baglantisi koptu: kaydet ve ana menuye don.
-func net_lost() -> void:
+# Sunucu baglantisi koptu: kaydet ve ana menuye don. reason: sunucunun verdigi sebep (bos ise genel mesaj).
+func net_lost(reason: String = "") -> void:
 	running = false
-	toast("Sunucu bağlantısı koptu! Menüye dönülüyor...")
+	toast(reason if reason != "" else "Sunucu bağlantısı koptu! Menüye dönülüyor...")
 	save_game()
 	get_tree().create_timer(2.5).timeout.connect(func() -> void: get_tree().reload_current_scene())
 
@@ -5773,6 +6144,17 @@ func _calc_view_rect() -> void:
 
 
 func _update_game(dt: float) -> void:
+	if wrecked:
+		_stop_all()
+		if P != null:
+			P.hp = 0.0
+			P.sh = 0.0
+		if _repair_busy:
+			_repair_busy_t -= dt
+			if _repair_busy_t <= 0.0:
+				_repair_busy = false
+				_repair_set_msg("Sunucudan yanıt alınamadı. Tekrar dene.", true)
+				_refresh_repair_overlay()
 	rocket_cd = maxf(0.0, rocket_cd - dt)
 	rsb_cd = maxf(0.0, rsb_cd - dt)
 	extras.tick(dt)
@@ -5848,7 +6230,11 @@ func _update_game(dt: float) -> void:
 
 	var mhp := max_hp()
 	var rep_k := 1.0 + skill_bonus("repair")
-	if prot_kind == SafeZone.BASE:   # hizli onarim yalnizca ust bolgesinde (kapi korumasi onarim vermez)
+	if wrecked:
+		repairing = false   # enkaz: ne ust bolgesi onarimi ne otomatik tamir calisir; yalniz ucretli tamir
+		P.hp = 0.0
+		P.sh = 0.0
+	elif prot_kind == SafeZone.BASE:   # hizli onarim yalnizca ust bolgesinde (kapi korumasi onarim vermez)
 		repairing = false
 		P.hp =minf(mhp, P.hp + mhp * 0.2 * rep_k * dt)
 		P.sh = minf(max_sh(), P.sh + max_sh() * 0.2 * dt)

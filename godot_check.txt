@@ -1,0 +1,112 @@
+Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org
+
+[make_ship] phoenix: burun yonu isaretciden, donus=-180 derece
+===== HASAR TESTLERİ =====
+
+Tek Lazer Testleri:
+LF-1 x LCB-10: 65.0
+LF-1 x MCB-25: 130.0
+LF-1 x MCB-50: 195.0
+LF-1 x UCB-100: 260.0
+LF-1 x SAB-50: 130.0
+LF-1 x RSB-75: 390.0
+LF-1 x JOB-100: 130.0
+LF-1 x PIB-100: 260.0
+MP-1 x LCB-10: 70.0
+MP-1 x MCB-25: 140.0
+MP-1 x MCB-50: 210.0
+MP-1 x UCB-100: 280.0
+MP-1 x SAB-50: 140.0
+MP-1 x RSB-75: 420.0
+MP-1 x JOB-100: 140.0
+MP-1 x PIB-100: 280.0
+LF-2 x LCB-10: 140.0
+LF-2 x MCB-25: 280.0
+LF-2 x MCB-50: 420.0
+LF-2 x UCB-100: 560.0
+LF-2 x SAB-50: 280.0
+LF-2 x RSB-75: 840.0
+LF-2 x JOB-100: 280.0
+LF-2 x PIB-100: 560.0
+LF-3 x LCB-10: 150.0
+LF-3 x MCB-25: 300.0
+LF-3 x MCB-50: 450.0
+LF-3 x UCB-100: 600.0
+LF-3 x SAB-50: 300.0
+LF-3 x RSB-75: 900.0
+LF-3 x JOB-100: 300.0
+LF-3 x PIB-100: 600.0
+LF-4 x LCB-10: 200.0
+LF-4 x MCB-25: 400.0
+LF-4 x MCB-50: 600.0
+LF-4 x UCB-100: 800.0
+LF-4 x SAB-50: 400.0
+LF-4 x RSB-75: 1200.0
+LF-4 x JOB-100: 400.0
+LF-4 x PIB-100: 800.0
+
+Çoklu Lazer Testleri:
+LF-1 x 1 lazer: 65.0
+LF-1 x 2 lazer: 130.0
+LF-1 x 3 lazer: 195.0
+LF-1 x 4 lazer: 260.0
+LF-1 x 5 lazer: 325.0
+LF-1 x 6 lazer: 390.0
+LF-1 x 7 lazer: 455.0
+LF-1 x 8 lazer: 520.0
+LF-1 x 9 lazer: 585.0
+LF-1 x 10 lazer: 650.0
+MP-1 x 1 lazer: 70.0
+MP-1 x 2 lazer: 140.0
+MP-1 x 3 lazer: 210.0
+MP-1 x 4 lazer: 280.0
+MP-1 x 5 lazer: 350.0
+MP-1 x 6 lazer: 420.0
+MP-1 x 7 lazer: 490.0
+MP-1 x 8 lazer: 560.0
+MP-1 x 9 lazer: 630.0
+MP-1 x 10 lazer: 700.0
+LF-2 x 1 lazer: 140.0
+LF-2 x 2 lazer: 280.0
+LF-2 x 3 lazer: 420.0
+LF-2 x 4 lazer: 560.0
+LF-2 x 5 lazer: 700.0
+LF-2 x 6 lazer: 840.0
+LF-2 x 7 lazer: 980.0
+LF-2 x 8 lazer: 1120.0
+LF-2 x 9 lazer: 1260.0
+LF-2 x 10 lazer: 1400.0
+LF-3 x 1 lazer: 150.0
+LF-3 x 2 lazer: 300.0
+LF-3 x 3 lazer: 450.0
+LF-3 x 4 lazer: 600.0
+LF-3 x 5 lazer: 750.0
+LF-3 x 6 lazer: 900.0
+LF-3 x 7 lazer: 1050.0
+LF-3 x 8 lazer: 1200.0
+LF-3 x 9 lazer: 1350.0
+LF-3 x 10 lazer: 1500.0
+LF-4 x 1 lazer: 200.0
+LF-4 x 2 lazer: 400.0
+LF-4 x 3 lazer: 600.0
+LF-4 x 4 lazer: 800.0
+LF-4 x 5 lazer: 1000.0
+LF-4 x 6 lazer: 1200.0
+LF-4 x 7 lazer: 1400.0
+LF-4 x 8 lazer: 1600.0
+LF-4 x 9 lazer: 1800.0
+LF-4 x 10 lazer: 2000.0
+
+Droid Testleri (lf4 + x1):
+LF-4 + X1 + 0 droid: 200.0
+LF-4 + X1 + 1 droid: 210.0
+LF-4 + X1 + 2 droid: 220.0
+LF-4 + X1 + 3 droid: 230.0
+LF-4 + X1 + 4 droid: 240.0
+LF-4 + X1 + 5 droid: 250.0
+LF-4 + X1 + 6 droid: 260.0
+LF-4 + X1 + 7 droid: 270.0
+LF-4 + X1 + 8 droid: 280.0
+LF-4 + X1 + 9 droid: 290.0
+LF-4 + X1 + 10 droid: 300.0
+===== TEST BİTTİ =====

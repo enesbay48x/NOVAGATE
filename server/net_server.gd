@@ -289,6 +289,7 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"in_safe": false, "ut": false, "chat_t": 0.0, "form": "std", "drn": [],
 		"zone": 0, "prot": 0, "lock_t": -1.0e9, "arr_t": -1.0e9, "combat_t": -1.0e9, "last_dmg_t": -1.0e9,
 		"jump_to": "", "jump_dl": -1.0, "respawn_ok": false, "group": 0,
+		"wrecked": int(ps.get("wrecked", 0)) != 0,   # patlayan gemi tamir edilene kadar enkaz (DB'de kalici)
 		# Sunucu tarafige ait oyuncu verisi (istemciye gosterilmez)
 		"_sv_cr": int(ps.get("cr", 0)),
 		"_sv_uri": int(ps.get("uri", 0)),
@@ -302,6 +303,9 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_sv_admin": int(ps.get("is_admin", 0)),   # admin yetkisi (sunucu tarafige)
 		"_sv_reg_ts": int(ps.get("reg_ts", 0)),    # kayit gunu (rutbe hesabi)
 		"_sv_rank_pen": float(ps.get("rank_pen", 0.0)),  # rutbe cezasi
+		"_sv_skills": ps.get("skills", {}),
+		"_sv_logdisks": int((ps.get("settings", {}) as Dictionary).get("logdisks", 0)) if typeof(ps.get("settings", {})) == TYPE_DICTIONARY else 0,
+		"_sv_rd_resets": int((ps.get("settings", {}) as Dictionary).get("rd_resets", 0)) if typeof(ps.get("settings", {})) == TYPE_DICTIONARY else 0,
 		"_sv_quests": ps.get("quests", {}),    # gorevler (rutbe hesabi)
 		"_sv_rank": 0,    # rutbe rozeti (1..21), _calculate_ranks ile doldurulur
 		"_sv_owned": ps.get("owned", [str(ps.get("ship", "phoenix"))]),  # sahip oldugu gemiler
@@ -539,6 +543,94 @@ func on_save_loadout(peer: int, ship: String, loads_json: String, cfgi: int, seq
 		print("[LOADOUT] kaydedilemedi: account_id=%d (%s)" % [int(p.account_id), str(resp.get("error", "?"))])
 		return
 	_to(peer, "s_loadout_result", [ship, JSON.stringify(resp.get("loads", [])), int(resp.get("cfg_index", 0)), seq])
+
+
+# Yetenek agaci: kurallar (puan, on kosul, maliyet) burada dogrulanir, bedel DB'de atomik dusulur.
+func on_skill_op(peer: int, op: String, arg: String) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]):
+		return
+	var p: Dictionary = players[peer]
+	var acct: int = int(p.get("account_id", 0))
+	var skills: Dictionary = (p.get("_sv_skills", {}) as Dictionary).duplicate()
+	var disks: int = int(p.get("_sv_logdisks", 0))
+	var resets: int = int(p.get("_sv_rd_resets", 0))
+	var d_cr := 0
+	var d_uri := 0
+	var d_sep := 0
+	var err := ""
+	var total_pts: int = mini(SkillTree.MAX_POINTS, SkillTree.points_for_disks(disks))
+	var spent := 0
+	for sk in SkillTree.SKILLS:
+		spent += clampi(int(skills.get(str(sk.id), 0)), 0, int(sk.pts))
+	match op:
+		"logdisk":
+			var n: int = clampi(int(arg), 1, 100000)
+			n = mini(n, int(SkillTree.CUM[SkillTree.MAX_POINTS]) - disks)
+			if n <= 0:
+				err = "max_puan"
+			else:
+				d_uri = n * SkillTree.LOGDISK_URI
+				disks += n
+		"skill":
+			var sk: Dictionary = SkillTree.find(arg)
+			var rank: int = int(skills.get(arg, 0))
+			if sk.is_empty() or rank >= int(sk.pts):
+				err = "gecersiz_yetenek"
+			elif spent >= total_pts:
+				err = "puan_yok"
+			else:
+				for rk in (sk.req as Dictionary).keys():
+					if int(skills.get(str(rk), 0)) < int((sk.req as Dictionary)[rk]):
+						err = "on_kosul"
+				if err == "":
+					var cost: Dictionary = SkillTree.level_cost(sk, rank + 1)
+					d_cr = int(cost.cr)
+					d_sep = int(cost.sep)
+					skills[arg] = rank + 1
+		"reset":
+			if spent <= 0:
+				err = "sifirlanacak_yok"
+			else:
+				d_uri = SkillTree.RESET_BASE_URI * (1 << clampi(resets, 0, 20))
+				skills = {}
+				resets += 1
+		_:
+			err = "gecersiz_islem"
+	if err != "":
+		_to(peer, "s_skill_result", [op, false, err, JSON.stringify(p.get("_sv_skills", {})), int(p.get("_sv_logdisks", 0)), int(p.get("_sv_rd_resets", 0)), int(p.get("_sv_cr", 0)), int(p.get("_sv_uri", 0)), int(p.get("_sv_sep", 0))])
+		return
+	var resp: Dictionary = db_send("apply_skill_change", {"account_id": acct, "d_cr": d_cr, "d_uri": d_uri, "d_sep": d_sep, "skills": skills, "logdisks": disks, "rd_resets": resets})
+	if resp.has("ok") and resp["ok"]:
+		p["_sv_skills"] = skills
+		p["_sv_logdisks"] = disks
+		p["_sv_rd_resets"] = resets
+		p["_sv_cr"] = int(resp.get("new_cr", 0))
+		p["_sv_uri"] = int(resp.get("new_uri", 0))
+		p["_sv_sep"] = int(resp.get("new_sep", 0))
+		_to(peer, "s_skill_result", [op, true, "", JSON.stringify(skills), disks, resets, int(p["_sv_cr"]), int(p["_sv_uri"]), int(p["_sv_sep"])])
+	else:
+		var e: String = str(resp.get("error", "bilinmeyen"))
+		print("[YETENEK] basarisiz: account_id=%d op=%s hata=%s" % [acct, op, e])
+		_to(peer, "s_skill_result", [op, false, e, JSON.stringify(p.get("_sv_skills", {})), int(p.get("_sv_logdisks", 0)), int(p.get("_sv_rd_resets", 0)), int(resp.get("new_cr", p.get("_sv_cr", 0))), int(resp.get("new_uri", p.get("_sv_uri", 0))), int(resp.get("new_sep", p.get("_sv_sep", 0)))])
+
+
+# Alt hizli slot cubugu (10 slot, "tur:id" metinleri). Istemciye guvenilmez: uzunluk/bicim sunucuda suzulur.
+func on_save_quickbar(peer: int, qb_json: String) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]) or qb_json.length() > 800:
+		return
+	var parsed = JSON.parse_string(qb_json)
+	if typeof(parsed) != TYPE_ARRAY or parsed.size() > 10:
+		return
+	var clean: Array = []
+	for v in parsed:
+		var s: String = str(v)
+		if s.length() > 40 or (s != "" and s.count(":") != 1):
+			s = ""
+		clean.append(s)
+	var p: Dictionary = players[peer]
+	var resp: Dictionary = db_send("save_quickbar", {"account_id": int(p.account_id), "quickbar": clean})
+	if not resp.has("ok") or not resp["ok"]:
+		print("[QUICKBAR] kaydedilemedi: account_id=%d (%s)" % [int(p.account_id), str(resp.get("error", "?"))])
 
 
 
@@ -977,7 +1069,11 @@ func on_died(victim: int, killer: int) -> void:
 	v.lock_t = -1.0e9
 	v.combat_t = -1.0e9
 	v.arr_t = -1.0e9
+	v.last_dmg_t = -1.0e9   # patlayan gemi artik savasta sayilmaz (Phoenix'e gecis / tamir hemen yapilabilsin)
 	v.respawn_ok = true
+	v["wrecked"] = true   # yeniden dogus: can 0, tamir edilmeden gemi kullanilamaz (cikis-giris ile kacilamaz)
+	if int(v.get("account_id", 0)) > 0:
+		db_send("set_wrecked", {"account_id": int(v.account_id), "wrecked": true})
 	if killer != 0 and players.has(killer) and killer != victim and int(players[killer].faction) != int(v.faction):
 		var k: Dictionary = players[killer]
 		print("[SUNUCU] %s -> %s (PvP)" % [str(k.name), str(v.name)])
@@ -2003,6 +2099,102 @@ func _update_guard(w: Dictionary, e: Dictionary, dt: float) -> void:
 	else:
 		_face(e, to_slot, dt)
 	_clamp_pos(w, e)
+# ------------------------------------------------------------------ GEMI TAMIRI (patlayan / hasarli gemi)
+# Ucret SUNUCUDA hesaplanir ve DB'den atomik dusulur: Phoenix ucretsiz, diger gemiler 500 Uridium.
+func on_repair(peer: int, tx_id: String) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]):
+		return
+	var p: Dictionary = players[peer]
+	tx_id = tx_id.strip_edges()
+	var acct_id: int = int(p.get("account_id", 0))
+	var cur_uri: int = int(p.get("_sv_uri", 0))
+	if acct_id <= 0 or tx_id.length() < 4 or tx_id.length() > 64:
+		_to(peer, "s_repair_result", [false, "gecersiz_istek", tx_id, 0, cur_uri])
+		return
+	if not bool(p.get("wrecked", false)) and float(p.hp) >= float(p.mhp) - 1.0:
+		_to(peer, "s_repair_result", [false, "tamir_gerekmiyor", tx_id, 0, cur_uri])
+		return
+	var resp: Dictionary = db_send("repair_ship", {"account_id": acct_id, "tx_id": tx_id})
+	if resp.has("ok") and resp.get("ok", false):
+		p["_sv_uri"] = int(resp.get("new_uri", cur_uri))
+		p["wrecked"] = false
+		p.hp = p.mhp
+		p.sh = p.msh
+		print("[SUNUCU] tamir: account_id=%d gemi=%s ucret=%d Uridium" % [acct_id, str(resp.get("ship", "?")), int(resp.get("cost", 0))])
+		_to(peer, "s_repair_result", [true, "", tx_id, int(resp.get("cost", 0)), int(p["_sv_uri"])])
+	else:
+		var err: String = str(resp.get("error", "bilinmeyen"))
+		print("[SUNUCU] tamir basarisiz: account_id=%d hata=%s" % [acct_id, err])
+		_to(peer, "s_repair_result", [false, err, tx_id, int(resp.get("cost", 0)), int(resp.get("new_uri", cur_uri))])
+
+
+# ------------------------------------------------------------------ HESAP AYARLARI: nick / sirket degistirme
+func _wait_text(sec: int) -> String:
+	if sec >= 86400:
+		return "%d gün" % int(ceil(float(sec) / 86400.0))
+	if sec >= 3600:
+		return "%d saat" % int(ceil(float(sec) / 3600.0))
+	return "%d dakika" % maxi(1, int(ceil(float(sec) / 60.0)))
+
+
+func _account_err_text(resp: Dictionary) -> String:
+	match str(resp.get("error", "")):
+		"gecersiz_isim": return "İsim 3-16 karakter olmalı; yalnızca harf, rakam, _ ve - kullanılabilir."
+		"isim_kullanimda": return "Bu isim başka bir oyuncu tarafından kullanılıyor."
+		"ayni_isim": return "Bu zaten şu anki adın."
+		"gecersiz_sirket": return "Geçersiz şirket."
+		"ayni_sirket": return "Zaten bu şirkettesin."
+		"bekleme": return "Tekrar değiştirmek için %s beklemelisin." % _wait_text(int(resp.get("kalan_sn", 0)))
+		"busy_retry", "db_baglanti_yok": return "Sunucu meşgul, biraz sonra tekrar dene."
+	return "İşlem yapılamadı."
+
+
+# Isim / sirket degisince oturum kapatilir (istemci yeniden giris yapar). save_pos=false: eski haritadaki konum
+# DB'ye yazilmaz (sirket degisiminde yeni ev haritasi korunur). Hayalet gemi birakilmaz (force_remove).
+func _account_relogin(peer: int, reason: String, save_pos: bool) -> void:
+	if not players.has(peer):
+		return
+	if not save_pos:
+		players[peer].pos = Vector3.ZERO
+	net.callv("rpc_id", [peer, "s_disconnect", reason])
+	on_disconnect(peer, true, true)
+	var mp = net.multiplayer.multiplayer_peer
+	if mp != null:
+		mp.disconnect_peer(peer)
+
+
+func on_change_callsign(peer: int, new_name: String) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]):
+		return
+	var p: Dictionary = players[peer]
+	if _in_combat(p):
+		_to(peer, "s_account_result", ["callsign", false, "Savaş sırasında isim değiştirilemez.", ""])
+		return
+	var resp: Dictionary = db_send("change_callsign", {"account_id": int(p.get("account_id", 0)), "callsign": new_name.strip_edges()})
+	if resp.has("ok") and resp.get("ok", false):
+		print("[SUNUCU] nick degisti: account_id=%d -> %s" % [int(p.account_id), str(resp.callsign)])
+		_to(peer, "s_account_result", ["callsign", true, "", str(resp.callsign)])
+		_account_relogin(peer, "Çağrı adın değişti. Yeni adınla yeniden giriş yap.", true)
+	else:
+		_to(peer, "s_account_result", ["callsign", false, _account_err_text(resp), ""])
+
+
+func on_change_faction(peer: int, faction: int) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]):
+		return
+	var p: Dictionary = players[peer]
+	if _in_combat(p):
+		_to(peer, "s_account_result", ["faction", false, "Savaş sırasında şirket değiştirilemez.", ""])
+		return
+	var resp: Dictionary = db_send("change_faction", {"account_id": int(p.get("account_id", 0)), "faction": faction})
+	if resp.has("ok") and resp.get("ok", false):
+		print("[SUNUCU] sirket degisti: account_id=%d -> %d" % [int(p.account_id), faction])
+		_to(peer, "s_account_result", ["faction", true, "", str(faction)])
+		_account_relogin(peer, "Şirketin değişti. Yeni şirketinin üssünde yeniden giriş yap.", false)
+	else:
+		_to(peer, "s_account_result", ["faction", false, _account_err_text(resp), ""])
+
+
 # ------------------------------------------------------------------ MARKET ALIMI (istemciden gelen istek)
 func on_purchase_item(peer: int, item_id: String, quantity: int, tx_id: String) -> void:
 	if not players.has(peer):

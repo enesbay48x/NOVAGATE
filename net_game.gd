@@ -633,6 +633,15 @@ func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new
 		g.toast("Alim basarisiz: " + error)
 
 
+# ------------------------------------------------------------------ tamir / hesap ayarlari sonuclari (sunucu -> istemci)
+func on_repair_result(ok: bool, error: String, tx_id: String, cost: int, new_uri: int) -> void:
+	g.on_repair_result(ok, error, tx_id, cost, new_uri)
+
+
+func on_account_result(kind: String, ok: bool, error: String, value: String) -> void:
+	g.on_account_result(kind, ok, error, value)
+
+
 # ------------------------------------------------------------------ gemi / ekipman / muhimmat sonuclari (sunucu -> istemci)
 func on_ship_result(ok: bool, ship: String, error: String) -> void:
 	g.on_ship_result(ok, ship, error)

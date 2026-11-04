@@ -220,6 +220,8 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN ban_reason TEXT DEFAULT NULL",
             # Seprom (bonus/NPC odulu) mevcut player_data tablosuna eklenir; eski veriler korunur.
             "ALTER TABLE player_data ADD COLUMN sep INTEGER NOT NULL DEFAULT 0",
+            # Patlayan gemi: tamir edilene kadar enkaz (can 0) durumu; cikis-giris ile kacilamaz.
+            "ALTER TABLE player_data ADD COLUMN wrecked INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 conn.execute(col_sql)
@@ -448,6 +450,7 @@ def load_player_state(account_id: int) -> dict | None:
             "xp": pd["xp"],
             "hon": pd["hon"],
             "sep": pd["sep"] if "sep" in pd.keys() else 0,
+            "wrecked": int(pd["wrecked"]) if "wrecked" in pd.keys() else 0,
             "pvp_kills": pd["pvp_kills"],
             "rank_pen": pd["rank_pen"],
             "ship": active_ship,
@@ -1194,6 +1197,183 @@ def save_active_ship(account_id: int, ship_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# GEMI TAMIRI (SUNUCU-OTORITER): patlayan / hasarli gemi tamiri
+#   Phoenix ucretsiz, diger tum gemiler 500 uridyum. Ucret DB'den atomik dusulur,
+#   ayni (account_id, tx_id) ikinci kez islenmez (cift tahsilat olmaz).
+# ---------------------------------------------------------------------------
+REPAIR_COST_URI = 500
+REPAIR_FREE_SHIPS = ("phoenix",)
+
+
+def set_wrecked(account_id: int, wrecked: bool) -> dict:
+    conn = get_db()
+    try:
+        conn.execute("UPDATE player_data SET wrecked = ?, updated_at = ? WHERE account_id = ?",
+                     (1 if wrecked else 0, now_ts(), account_id))
+        conn.commit()
+        return {"ok": True}
+    except Exception as e:
+        log.error("set_wrecked hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+def repair_ship(account_id: int, tx_id: str) -> dict:
+    tx_id = str(tx_id)[:64]
+    if not tx_id:
+        return {"ok": False, "error": "invalid_tx"}
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT response_payload FROM transactions WHERE account_id = ? AND tx_id = ?",
+            (account_id, tx_id),
+        ).fetchone()
+        if existing:
+            conn.execute("ROLLBACK")
+            return json.loads(existing["response_payload"])
+        pd = conn.execute("SELECT cr, uri, ship FROM player_data WHERE account_id = ?", (account_id,)).fetchone()
+        if not pd:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "account_not_found"}
+        ship = str(pd["ship"])
+        cost = 0 if ship in REPAIR_FREE_SHIPS else REPAIR_COST_URI
+        if int(pd["uri"]) < cost:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "insufficient_funds", "cost": cost, "new_uri": int(pd["uri"])}
+        now = now_ts()
+        new_uri = int(pd["uri"]) - cost
+        conn.execute("UPDATE player_data SET uri = ?, wrecked = 0, updated_at = ? WHERE account_id = ?", (new_uri, now, account_id))
+        payload = json.dumps({"ok": True, "ship": ship, "cost": cost,
+                              "new_cr": int(pd["cr"]), "new_uri": new_uri, "tx_id": tx_id})
+        conn.execute(
+            "INSERT INTO transactions (account_id, tx_id, type, amount_cr, amount_uri, item_id, item_qty, status, request_payload, response_payload, created_at) "
+            "VALUES (?, ?, 'repair', 0, ?, ?, 1, 'committed', '{}', ?, ?)",
+            (account_id, tx_id, -cost, ship, payload, now),
+        )
+        conn.execute("COMMIT")
+        return json.loads(payload)
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("repair_ship hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# NICK (CAGRI ADI) VE SIRKET DEGISTIRME  (oyun-ici ayarlar menusu)
+#   Kimlik bilgisi novagate_auth.db'de durur; oyun DB'si girişte oradan senkronlanir.
+#   Burada iki DB de ayni anda guncellenir. Giris adi (username) DEGISMEZ.
+# ---------------------------------------------------------------------------
+CALLSIGN_MIN, CALLSIGN_MAX = 3, 16
+CALLSIGN_CHANGE_COOLDOWN_S = 24 * 3600          # nick: 24 saatte bir
+FACTION_CHANGE_COOLDOWN_S = 7 * 24 * 3600       # sirket: 7 gunde bir
+FACTION_HOME_MAP = {1: "1-1", 2: "2-1", 3: "3-1"}
+
+
+def _auth_db() -> sqlite3.Connection:
+    path = os.environ.get("NOVAGATE_AUTH_DB_PATH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "novagate_auth.db")
+    c = sqlite3.connect(path, timeout=10.0)
+    c.row_factory = sqlite3.Row
+    for col in ("callsign_changed_at", "faction_changed_at"):
+        try:
+            c.execute("ALTER TABLE accounts ADD COLUMN %s INTEGER DEFAULT 0" % col)
+            c.commit()
+        except Exception:
+            pass
+    return c
+
+
+def _valid_callsign(name: str) -> bool:
+    if not (CALLSIGN_MIN <= len(name) <= CALLSIGN_MAX):
+        return False
+    return all(ch.isalnum() or ch in "_-" for ch in name) and name.isascii()
+
+
+def change_callsign(account_id: int, new_name: str) -> dict:
+    new_name = str(new_name).strip()
+    if not _valid_callsign(new_name):
+        return {"ok": False, "error": "gecersiz_isim"}
+    a = _auth_db()
+    try:
+        row = a.execute("SELECT callsign, callsign_changed_at FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not row:
+            return {"ok": False, "error": "hesap_yok"}
+        if row["callsign"].lower() == new_name.lower() and row["callsign"] == new_name:
+            return {"ok": False, "error": "ayni_isim"}
+        left = int(row["callsign_changed_at"] or 0) + CALLSIGN_CHANGE_COOLDOWN_S - now_ts()
+        if left > 0:
+            return {"ok": False, "error": "bekleme", "kalan_sn": left}
+        clash = a.execute(
+            "SELECT 1 FROM accounts WHERE id != ? AND (callsign = ? COLLATE NOCASE OR username = ? COLLATE NOCASE)",
+            (account_id, new_name, new_name),
+        ).fetchone()
+        if clash:
+            return {"ok": False, "error": "isim_kullanimda"}
+        a.execute("UPDATE accounts SET callsign = ?, callsign_changed_at = ? WHERE id = ?", (new_name, now_ts(), account_id))
+        a.commit()
+    except sqlite3.OperationalError as e:
+        log.error("change_callsign auth DB: %s", e)
+        return {"ok": False, "error": "busy_retry"}
+    finally:
+        a.close()
+    g = get_db()
+    try:
+        g.execute("UPDATE accounts SET callsign = ? WHERE id = ?", (new_name, account_id))
+        g.commit()
+    finally:
+        g.close()
+    return {"ok": True, "callsign": new_name}
+
+
+def change_faction(account_id: int, new_faction: int) -> dict:
+    new_faction = int(new_faction)
+    if new_faction not in FACTION_HOME_MAP:
+        return {"ok": False, "error": "gecersiz_sirket"}
+    a = _auth_db()
+    try:
+        row = a.execute("SELECT faction, faction_changed_at FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not row:
+            return {"ok": False, "error": "hesap_yok"}
+        if int(row["faction"]) == new_faction:
+            return {"ok": False, "error": "ayni_sirket"}
+        left = int(row["faction_changed_at"] or 0) + FACTION_CHANGE_COOLDOWN_S - now_ts()
+        if left > 0:
+            return {"ok": False, "error": "bekleme", "kalan_sn": left}
+        a.execute("UPDATE accounts SET faction = ?, faction_changed_at = ? WHERE id = ?", (new_faction, now_ts(), account_id))
+        a.commit()
+    except sqlite3.OperationalError as e:
+        log.error("change_faction auth DB: %s", e)
+        return {"ok": False, "error": "busy_retry"}
+    finally:
+        a.close()
+    g = get_db()
+    try:
+        g.execute("BEGIN IMMEDIATE")
+        g.execute("UPDATE accounts SET faction = ? WHERE id = ?", (new_faction, account_id))
+        # Yeni sirketin ev haritasinda dogar (eski sirket haritasinda kalamaz).
+        g.execute("UPDATE player_data SET map_name = ?, px = 0.0, pz = 0.0, updated_at = ? WHERE account_id = ?",
+                  (FACTION_HOME_MAP[new_faction], now_ts(), account_id))
+        g.execute("COMMIT")
+    except Exception as e:
+        try:
+            g.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("change_faction game DB: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        g.close()
+    return {"ok": True, "faction": new_faction, "home_map": FACTION_HOME_MAP[new_faction]}
+
+
+
+# ---------------------------------------------------------------------------
 # AKTIF GEMI + EKIPMAN (KONFIGURASYON) KALICILIGI  -- tum dogrulama SUNUCUDA
 # ---------------------------------------------------------------------------
 # Gemi basina yuva sayilari (data.gd SHIPS ile ayni; droid yuvasi her gemide 10).
@@ -1253,6 +1433,95 @@ def _sanitize_cfg(raw, ship_id: str, inv: dict) -> dict:
             if clean:
                 out["drone_equip"][uid] = clean
     return out
+
+
+def apply_skill_change(account_id: int, d_cr: int, d_uri: int, d_sep: int, skills, logdisks: int, rd_resets: int) -> dict:
+    """Yetenek agaci islemi (log disk / yetenek / sifirlama): bedel bakiyeden ATOMIK dusulur, yetenekler +
+    logdisks + rd_resets kalici yazilir. Kurallar (on kosul, puan, maliyet) Godot sunucusunda dogrulanir;
+    burada bakiye yeterliligi ve veri bicimi dogrulanir."""
+    d_cr, d_uri, d_sep = int(d_cr), int(d_uri), int(d_sep)
+    if min(d_cr, d_uri, d_sep) < 0 or not isinstance(skills, dict) or len(skills) > 64:
+        return {"ok": False, "error": "invalid"}
+    clean = {}
+    for k, v in skills.items():
+        k = str(k)
+        v = int(v)
+        if 0 < len(k) <= 40 and 0 < v <= 10:
+            clean[k] = v
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        pd = conn.execute("SELECT cr, uri, COALESCE(sep, 0) AS sep, settings FROM player_data WHERE account_id = ?", (account_id,)).fetchone()
+        if not pd:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "account_not_found"}
+        if int(pd["cr"]) < d_cr or int(pd["uri"]) < d_uri or int(pd["sep"]) < d_sep:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "insufficient_funds", "new_cr": int(pd["cr"]), "new_uri": int(pd["uri"]), "new_sep": int(pd["sep"])}
+        try:
+            st = json.loads(pd["settings"] or "{}")
+        except Exception:
+            st = {}
+        if not isinstance(st, dict):
+            st = {}
+        st["logdisks"] = max(0, int(logdisks))
+        st["rd_resets"] = max(0, int(rd_resets))
+        new_cr, new_uri, new_sep = int(pd["cr"]) - d_cr, int(pd["uri"]) - d_uri, int(pd["sep"]) - d_sep
+        conn.execute("UPDATE player_data SET cr = ?, uri = ?, sep = ?, settings = ?, updated_at = ? WHERE account_id = ?",
+                     (new_cr, new_uri, new_sep, json.dumps(st), now_ts(), account_id))
+        conn.execute("DELETE FROM player_skills WHERE account_id = ?", (account_id,))
+        for k, v in clean.items():
+            conn.execute("INSERT INTO player_skills (account_id, skill_id, rank) VALUES (?, ?, ?)", (account_id, k, v))
+        conn.execute("COMMIT")
+        return {"ok": True, "new_cr": new_cr, "new_uri": new_uri, "new_sep": new_sep}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("apply_skill_change hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+def save_quickbar(account_id: int, quickbar) -> dict:
+    """Alt hizli slot cubugunu (10 slot, 'tur:id') player_data.settings JSON'una yazar; girista geri gelir."""
+    if not isinstance(quickbar, list) or len(quickbar) > 10:
+        return {"ok": False, "error": "invalid"}
+    clean = []
+    for v in quickbar:
+        s = str(v)[:40]
+        parts = s.split(":")
+        ok = s == "" or (len(parts) == 2 and all(p and len(p) <= 24 and all(ch.isalnum() or ch in "_-" for ch in p) for p in parts))
+        clean.append(s if ok else "")
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT settings FROM player_data WHERE account_id = ?", (account_id,)).fetchone()
+        if not row:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "account_not_found"}
+        try:
+            st = json.loads(row["settings"] or "{}")
+        except Exception:
+            st = {}
+        if not isinstance(st, dict):
+            st = {}
+        st["quickbar"] = clean
+        conn.execute("UPDATE player_data SET settings = ?, updated_at = ? WHERE account_id = ?",
+                     (json.dumps(st), now_ts(), account_id))
+        conn.execute("COMMIT")
+        return {"ok": True}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("save_quickbar hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
 
 
 def save_loadout(account_id: int, ship_id: str, loads, cfg_index: int) -> dict:
@@ -1631,6 +1900,14 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 str(msg.get("ship", "")),
                 bool(msg.get("add", False)),
             )
+        elif method == "set_wrecked":
+            resp = set_wrecked(int(msg.get("account_id", 0)), bool(msg.get("wrecked", False)))
+        elif method == "repair_ship":
+            resp = repair_ship(int(msg.get("account_id", 0)), str(msg.get("tx_id", "")))
+        elif method == "change_callsign":
+            resp = change_callsign(int(msg.get("account_id", 0)), str(msg.get("callsign", "")))
+        elif method == "change_faction":
+            resp = change_faction(int(msg.get("account_id", 0)), int(msg.get("faction", 0)))
         elif method == "save_active_ship":
             resp = save_active_ship(int(msg.get("account_id", 0)), str(msg.get("ship", "")))
         elif method == "save_loadout":
@@ -1640,6 +1917,12 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 msg.get("loads", []),
                 int(msg.get("cfg_index", 0)),
             )
+        elif method == "apply_skill_change":
+            resp = apply_skill_change(
+                int(msg.get("account_id", 0)), int(msg.get("d_cr", 0)), int(msg.get("d_uri", 0)), int(msg.get("d_sep", 0)),
+                msg.get("skills", {}), int(msg.get("logdisks", 0)), int(msg.get("rd_resets", 0)))
+        elif method == "save_quickbar":
+            resp = save_quickbar(int(msg.get("account_id", 0)), msg.get("quickbar", []))
         elif method == "save_selected_ammo":
             resp = save_selected_ammo(int(msg.get("account_id", 0)), str(msg.get("ammo", "")))
         elif method == "save_player_position":

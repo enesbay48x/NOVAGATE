@@ -370,6 +370,9 @@ def handle_client(conn_stream: ssl.SSLSocket, addr: tuple, instance_id: str) -> 
 # ayrı bir HTTPS sunucusu calistirir. Godot istemcisi HTTPRequest ile
 # https://127.0.0.1:8444/login adresine POST yapar.
 # ---------------------------------------------------------------------------
+_PW_FAILS: dict = {}   # kullanici -> basarisiz sifre degistirme zamanlari (10 dk icinde en fazla 5)
+
+
 def _start_https_login_server() -> None:
     import http.server
     import socketserver
@@ -380,6 +383,8 @@ def _start_https_login_server() -> None:
                 self._handle_login()
             elif self.path == "/register":
                 self._handle_register()
+            elif self.path == "/change_password":
+                self._handle_change_password()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -466,6 +471,54 @@ def _start_https_login_server() -> None:
                 self.wfile.write(body_bytes)
             except Exception as e:
                 log.error("HTTPS register error: %s", e)
+                self.send_response(500)
+                self.end_headers()
+
+        def _handle_change_password(self):
+            """Oyun-ici sifre degistirme: eski sifre dogrulanir, yeni sifre Argon2id ile saklanir."""
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length).decode("utf-8"))
+                username = str(data.get("username", ""))
+                old_pw = str(data.get("old_password", ""))
+                new_pw = str(data.get("new_password", ""))
+                key = username.lower()
+                now = time.time()
+                fails = [t for t in _PW_FAILS.get(key, []) if now - t < 600]
+                _PW_FAILS[key] = fails
+                if len(fails) >= 5:
+                    resp = {"ok": False, "error": "cok_fazla_deneme"}
+                elif len(new_pw) < 4 or len(new_pw) > 128:
+                    resp = {"ok": False, "error": "sifre_en_az_4_karakter"}
+                elif new_pw == old_pw:
+                    resp = {"ok": False, "error": "yeni_sifre_ayni"}
+                else:
+                    result = authenticate_user(username, old_pw)
+                    if result is None or not result.get("ok", True):
+                        fails.append(now)
+                        _PW_FAILS[key] = fails
+                        resp = {"ok": False, "error": "eski_sifre_yanlis"}
+                    else:
+                        from argon2 import PasswordHasher
+                        new_hash = PasswordHasher().hash(new_pw)
+                        conn = get_db()
+                        try:
+                            conn.execute("UPDATE accounts SET password_hash = ? WHERE id = ?",
+                                         (new_hash, result["account_id"]))
+                            conn.commit()
+                        finally:
+                            conn.close()
+                        _PW_FAILS.pop(key, None)
+                        log.info("sifre degistirildi: account_id=%s", result["account_id"])
+                        resp = {"ok": True}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                body_bytes = json.dumps(resp).encode("utf-8")
+                self.send_header("Content-Length", str(len(body_bytes)))
+                self.end_headers()
+                self.wfile.write(body_bytes)
+            except Exception as e:
+                log.error("HTTPS change_password error: %s", e)
                 self.send_response(500)
                 self.end_headers()
 

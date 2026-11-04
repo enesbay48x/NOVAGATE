@@ -166,6 +166,8 @@ func icon(id: String) -> Texture2D:
 func use(id: String) -> bool:
 	if game == null or not game.running or game.P == null or game.SV.is_empty():
 		return false
+	if game.wrecked:
+		return false   # enkaz gemi: tamir edilene kadar ozel esya kullanilamaz
 	if not DEFS.has(id):
 		return false
 	var dn: String = str(DEFS[id].name)

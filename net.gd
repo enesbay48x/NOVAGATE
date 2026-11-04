@@ -4,7 +4,7 @@ extends Node
 #   Sunucu : godot --headless --path <proje> -- --server --port=7777
 #   Istemci: oyunun ana menusunde "Cok oyunculu" kutusunu isaretle, sunucu adresini yaz.
 
-const PROTO := 7   # 7: grup sistemi + s_npc_reward RPC; 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: sunucu otoriter guvenli bolge + kapi dogrulamasi; 4: bonus kutular
+const PROTO := 8   # 8: tamir (c_repair/s_repair_result), nick/sirket degistirme (c_change_*/s_account_result); 7: grup sistemi + s_npc_reward RPC; 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: sunucu otoriter guvenli bolge + kapi dogrulamasi; 4: bonus kutular
 # ---- OTOMATIK BAGLANTI ----------------------------------------------------------
 # Yayin sunucusunun adresi (ornek: "54.x.x.x:7777" veya "oyun.alanadi.com:7777").
 # Doluysa: giris ekranindaki "Cok oyunculu" kutusu ve adres alani gizlenir, oyun giris yapinca
@@ -88,6 +88,40 @@ func login_via_tls(username: String, password: String) -> void:
 	var body: String = JSON.stringify({"username": username, "password": password})
 	var headers: PackedStringArray = ["Content-Type: application/json"]
 	auth_http_request.request(url, headers, HTTPClient.METHOD_POST, body)
+
+
+# Oyun-ici sifre degistirme. cb(ok: bool, error: String) ile sonuc doner. Eski sifre sunucuda dogrulanir.
+func change_password_via_tls(username: String, old_pw: String, new_pw: String, cb: Callable) -> void:
+	var req := HTTPRequest.new()
+	add_child(req)
+	if tls_opts != null:
+		req.set_tls_options(tls_opts)
+	req.timeout = 10.0
+	req.request_completed.connect(func(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+		req.queue_free()
+		if result != HTTPRequest.RESULT_SUCCESS or code != 200:
+			cb.call(false, "Sunucuya ulaşılamadı.")
+			return
+		var data = JSON.parse_string(body.get_string_from_utf8())
+		if typeof(data) != TYPE_DICTIONARY:
+			cb.call(false, "Geçersiz sunucu yanıtı.")
+			return
+		if bool(data.get("ok", false)):
+			cb.call(true, "")
+			return
+		match str(data.get("error", "")):
+			"eski_sifre_yanlis": cb.call(false, "Mevcut şifre yanlış.")
+			"sifre_en_az_4_karakter": cb.call(false, "Yeni şifre en az 4 karakter olmalı.")
+			"yeni_sifre_ayni": cb.call(false, "Yeni şifre mevcut şifreyle aynı olamaz.")
+			"cok_fazla_deneme": cb.call(false, "Çok fazla hatalı deneme. 10 dakika sonra tekrar dene.")
+			_: cb.call(false, "Şifre değiştirilemedi.")
+	)
+	var url := "https://%s:%d/change_password" % [AUTH_HOST, AUTH_HTTPS_PORT]
+	var payload: String = JSON.stringify({"username": username, "old_password": old_pw, "new_password": new_pw})
+	var headers: PackedStringArray = ["Content-Type: application/json"]
+	if req.request(url, headers, HTTPClient.METHOD_POST, payload) != OK:
+		req.queue_free()
+		cb.call(false, "İstek gönderilemedi.")
 
 
 func _on_auth_http_completed(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -301,6 +335,21 @@ func send_ship(ship: String) -> void:
 		rpc_id(1, "c_ship", ship)
 
 
+func send_repair(tx_id: String) -> void:
+	if online:
+		rpc_id(1, "c_repair", tx_id)
+
+
+func send_change_callsign(new_name: String) -> void:
+	if online:
+		rpc_id(1, "c_change_callsign", new_name)
+
+
+func send_change_faction(faction: int) -> void:
+	if online:
+		rpc_id(1, "c_change_faction", faction)
+
+
 # Kapidan atlama istegi: izni SUNUCU verir (s_jump_result). Istemci kendi basina harita degistiremez.
 func send_jump(to_map: String) -> void:
 	if online:
@@ -363,6 +412,18 @@ func send_select_ammo(ammo: String) -> void:
 func send_loadout(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
 	if online:
 		rpc_id(1, "c_save_loadout", ship, loads_json, cfgi, seq)
+
+
+# Yetenek agaci islemi: op = "logdisk" (arg=adet) | "skill" (arg=yetenek id) | "reset". Sunucu dogrular, sonuc s_skill_result ile gelir.
+func send_skill_op(op: String, arg: String) -> void:
+	if online:
+		rpc_id(1, "c_skill_op", op, arg)
+
+
+# Alt hizli slot cubugu (1-0 tuslari) sunucuda kalici saklanir; girista settings.quickbar olarak geri gelir.
+func send_quickbar(qb_json: String) -> void:
+	if online:
+		rpc_id(1, "c_save_quickbar", qb_json)
 
 
 # ch: 0 genel, 1 sirket, 2 grup
@@ -555,7 +616,7 @@ func s_disconnect(reason: String) -> void:
 		multiplayer.multiplayer_peer.close()
 		multiplayer.multiplayer_peer = null
 	if game != null and is_instance_valid(game):
-		game.net_lost()
+		game.net_lost(reason)
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -758,6 +819,39 @@ func s_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new_
 		gm.on_purchase_result(ok, error, tx_id, new_cr, new_uri)
 
 
+# ================================================================== TAMIR (client -> sunucu)
+# Ucret (Phoenix ucretsiz, digerleri 500 uridyum) ve enkaz durumu SUNUCUDA dogrulanir.
+@rpc("any_peer", "call_remote", "reliable")
+func c_repair(tx_id: String) -> void:
+	if is_server and srv != null:
+		srv.on_repair(multiplayer.get_remote_sender_id(), tx_id)
+
+
+@rpc("authority", "call_remote", "reliable")
+func s_repair_result(ok: bool, error: String, tx_id: String, cost: int, new_uri: int) -> void:
+	if gm != null and online:
+		gm.on_repair_result(ok, error, tx_id, cost, new_uri)
+
+
+# ================================================================== HESAP AYARLARI: nick / sirket (client -> sunucu)
+@rpc("any_peer", "call_remote", "reliable")
+func c_change_callsign(new_name: String) -> void:
+	if is_server and srv != null:
+		srv.on_change_callsign(multiplayer.get_remote_sender_id(), new_name)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func c_change_faction(faction: int) -> void:
+	if is_server and srv != null:
+		srv.on_change_faction(multiplayer.get_remote_sender_id(), faction)
+
+
+@rpc("authority", "call_remote", "reliable")
+func s_account_result(kind: String, ok: bool, error: String, value: String) -> void:
+	if gm != null and online:
+		gm.on_account_result(kind, ok, error, value)
+
+
 # ================================================================== MUHIMMAT SECIMI (client -> sunucu)
 @rpc("any_peer", "call_remote", "reliable")
 func c_select_ammo(ammo: String) -> void:
@@ -770,6 +864,26 @@ func c_select_ammo(ammo: String) -> void:
 func c_save_loadout(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
 	if is_server and srv != null:
 		srv.on_save_loadout(multiplayer.get_remote_sender_id(), ship, loads_json, cfgi, seq)
+
+
+# ================================================================== YETENEK AGACI (client -> sunucu -> client)
+@rpc("any_peer", "call_remote", "reliable")
+func c_skill_op(op: String, arg: String) -> void:
+	if is_server and srv != null:
+		srv.on_skill_op(multiplayer.get_remote_sender_id(), op, arg)
+
+
+@rpc("authority", "call_remote", "reliable")
+func s_skill_result(op: String, ok: bool, error: String, skills_json: String, logdisks: int, rd_resets: int, new_cr: int, new_uri: int, new_sep: int) -> void:
+	if gm != null and online:
+		gm.g.on_skill_result(op, ok, error, skills_json, logdisks, rd_resets, new_cr, new_uri, new_sep)
+
+
+# ================================================================== HIZLI SLOT CUBUGU KAYDI (client -> sunucu)
+@rpc("any_peer", "call_remote", "reliable")
+func c_save_quickbar(qb_json: String) -> void:
+	if is_server and srv != null:
+		srv.on_save_quickbar(multiplayer.get_remote_sender_id(), qb_json)
 
 
 # ================================================================== EKIPMAN KAYDI SONUCU (sunucu -> client)
