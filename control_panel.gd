@@ -1126,6 +1126,8 @@ func _on_form(code: String) -> void:
 
 
 func _on_auto() -> void:
+	if game.equip_block():
+		return
 	game.auto_equip(game.cfg(), game.active_cfg_idx())
 	game._clamp_vitals()
 	game.save_game()

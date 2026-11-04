@@ -1,0 +1,120 @@
+--- /tmp/a_main.gd	2026-11-04 02:34:55.815913372 +0000
++++ /tmp/b_main.gd	2026-11-04 02:34:55.817303121 +0000
+@@ -1968,6 +1968,8 @@
+ 	if typeof(SV.maps_visited) != TYPE_ARRAY:
+ 		SV.maps_visited = []
+ 
++	if typeof(ps.get("resume")) == TYPE_DICTIONARY:
++		SV["_resume"] = ps.get("resume")   # Combat Logout: sure dolmadan donen oyuncu gemisini mevcut can/kalkanla gorur
+ 	print("[ISTEMCI] SV hazirlandi: account_id=%d, callsign=%s, ship=%s" % [acct_id, callsign, ps.get("ship", "phoenix")])
+ 	# Oyunu baslat (zaten ENet baglantisi var, sadece oyun baslat)
+ 	_start_run(false, true)
+@@ -3039,16 +3041,74 @@
+ func equip_ship(id: String) -> void:
+ 	if not (id in SV.owned) or SV.ship == id:
+ 		return
++	if Net.online:
++		# Online: gemi (hangar) degisimine SUNUCU karar verir (savas yasagi, sahiplik, kalici kayit). Onay gelince uygulanir.
++		Net.send_ship(id)
++		return
++	_apply_ship(id)
++
++
++func _apply_ship(id: String) -> void:
+ 	SV.ship = id
+ 	ensure_loadout()
+ 	var pos: Vector3 = P.node.position
+ 	_make_player()
+ 	P.node.position = pos
+ 	drone_sig = ""
+-	if net_on:
+-		Net.send_ship(str(SV.ship))
+ 	toast("Gemi değişti: " + ship_def().name)
+-	save_game()
++	save_game()   # yeni geminin ekipmani da sunucuya senkronlanir
++
++
++# Sunucudan gelen gemi degistirme sonucu. ship = SUNUCUDA aktif olan gemi.
++func on_ship_result(ok: bool, ship: String, error: String) -> void:
++	if not ok:
++		toast(error)
++	if ship in SV.owned and str(SV.get("ship", "")) != ship and P != null:
++		_apply_ship(ship)   # onaylandi ya da reddedildi ve istemci sunucudan ayristi -> sunucudaki gemiye esitle
++	if base_menu != null:
++		refresh_base()
++
++
++# ---- Ekipman kaydi (sunucu dogrular; istemci yalnizca degisiklik oldugunda gonderir) ----
++var _loadout_sig := ""
++var _loadout_seq := 0
++
++
++func _sync_loadout() -> void:
++	if not Net.online or SV.is_empty() or not SV.has("loads"):
++		return
++	var sid := str(SV.get("ship", "phoenix"))
++	var ls = SV.loads.get(sid, null)
++	if typeof(ls) != TYPE_ARRAY or (ls as Array).is_empty():
++		return
++	var js := JSON.stringify(ls)
++	var sig := "%s|%d|%s" % [sid, int(SV.get("cfgi", 0)), js]
++	if sig == _loadout_sig:
++		return
++	_loadout_sig = sig
++	_loadout_seq += 1
++	Net.send_loadout(sid, js, int(SV.get("cfgi", 0)), _loadout_seq)
++
++
++# Sunucunun suzdugu (gecerli) ekipman listesi. Yalnizca en son istege ait yanit uygulanir (eski yanit yeni degisikligi ezmez).
++func on_loadout_result(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
++	if seq != _loadout_seq or ship != str(SV.get("ship", "")):
++		return
++	var parsed = JSON.parse_string(loads_json)
++	if typeof(parsed) != TYPE_ARRAY:
++		return
++	var sent = SV.loads.get(ship, [])
++	if JSON.stringify(parsed) == JSON.stringify(sent) and cfgi == int(SV.get("cfgi", 0)):
++		return   # sunucu ayni seyi onayladi
++	SV.loads[ship] = parsed
++	SV.cfgi = cfgi
++	ensure_loadout()
++	_loadout_sig = "%s|%d|%s" % [ship, int(SV.get("cfgi", 0)), JSON.stringify(SV.loads.get(ship, []))]
++	_clamp_vitals()
++	_update_drones(0.0)
++	toast("Ekipman sunucuda düzeltildi.")
++	if base_menu != null:
++		refresh_base()
+ 
+ 
+ func drones_owned() -> int:
+@@ -3189,7 +3249,7 @@
+ # Ekranda yalnizca ODUL yazilari gorunur (hasar sayilari ayri cizilir). Diger tum bildirimler sohbet gunlugune
+ # yazilir ama ekrana cikmaz. Baska bir yazi gostermek icin asagidaki _toast_visible() kosullarina ekle.
+ func _toast_visible(t: String) -> bool:
+-	return t.begins_with("Bonus kutu") or t.begins_with("Görev ödülü") or t.begins_with("Seviye ") or t.begins_with("Atlama engellendi") \
++	return t.begins_with("Bonus kutu") or t.begins_with("Görev ödülü") or t.begins_with("Seviye ") or t.begins_with("Atlama engellendi") or t.begins_with("Savaşta") or t.begins_with("Muhimmat degistirilemedi") \
+ 		or (t.begins_with("+") and t.contains("XP"))
+ 
+ 
+@@ -3261,6 +3321,7 @@
+ 	SV.map = cur
+ 	SV.px = P.node.position.x
+ 	SV.pz = P.node.position.z
++	_sync_loadout()
+ 	if save_path == "":
+ 		return
+ 	var f := FileAccess.open(save_path, FileAccess.WRITE)
+@@ -3350,6 +3411,13 @@
+ 		arrive = Vector3(SV.px, 0, SV.pz)
+ 	load_map(SV.map, arrive)
+ 	running = true
++	var rs = SV.get("_resume", null)
++	if typeof(rs) == TYPE_DICTIONARY and P != null:
++		P.hp = maxf(1.0, max_hp() * float((rs as Dictionary).get("hp_r", 1.0)))
++		P.sh = clampf(max_sh() * float((rs as Dictionary).get("sh_r", 1.0)), 0.0, max_sh())
++	SV.erase("_resume")
++	_loadout_sig = ""
++	_sync_loadout()   # sunucudaki kayitla esitle (yeni hesapta otomatik donanim da kalici olur)
+ 	toast("Hoş geldin! Tıkla: hareket/hedef  |  Ctrl/Boşluk: lazer  |  R: roket  |  J: kapı  |  M: harita")
+ 
+ 

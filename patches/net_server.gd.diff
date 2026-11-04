@@ -1,0 +1,585 @@
+--- /tmp/a_net_server.gd	2026-11-04 02:34:55.807943496 +0000
++++ /tmp/b_net_server.gd	2026-11-04 02:34:55.809516673 +0000
+@@ -20,7 +20,8 @@
+ var db_instance_id: String = ""
+ 
+ var ghosts: Dictionary = {}     # oyuncu adi -> kopma aninda kilit/catisma sayaclari (cikip girerek sifirlanmasin)
+-var ghost_players: Dictionary = {}   # peer -> {p: Dictionary, timer: float, reason: str} (combat logout: gemi haritada kalir)
++# Combat Logout: baglantisi kopan oyuncu `players` icinde AYNI kayitla kalir (ghost=true, ghost_t=kalan sn). Boylece gemi
++# haritada gorunur, NPC/oyuncular saldirabilir, harita (NPC'ler) bosalmaz. Sure/hasar sunucuda tutulur.
+ var safe_t: float = 0.0
+ var prot_sync_t: float = 0.0
+ const SAFE_DT := 0.1            # koruma durumunu yeniden hesaplama araligi (sn)
+@@ -149,13 +150,13 @@
+ func _bcast(map_name: String, method: String, args: Array, except_peer: int = 0) -> void:
+ 	for pid in players.keys():
+ 		var p: Dictionary = players[pid]
+-		if str(p.map) != map_name or int(pid) == except_peer:
++		if str(p.map) != map_name or int(pid) == except_peer or bool(p.get("ghost", false)):
+ 			continue
+ 		net.callv("rpc_id", [int(pid), method] + args)
+ 
+ 
+ func _to(peer: int, method: String, args: Array) -> void:
+-	if players.has(peer):
++	if players.has(peer) and not bool(players[peer].get("ghost", false)):
+ 		net.callv("rpc_id", [peer, method] + args)
+ 
+ 
+@@ -259,66 +260,10 @@
+ 	# Bu sunucuda ayni hesabin eski oturumu varsa ONCE onu kaydedip dusur (yeni oturum
+ 	# ancak ondan sonra DB'den veri yukler -> konum/envanter/bakiye kaybi olmaz).
+ 	for old_pid in players.keys().duplicate():
+-		if int(old_pid) != peer_id and int(players[old_pid].get("account_id", -1)) == acct_id:
++		if int(old_pid) != peer_id and int(players[old_pid].get("account_id", -1)) == acct_id and not _is_ghost(players[old_pid]):
+ 			print("[SUNUCU] Eski oturum dusuruluyor: account_id=%d, eski_peer=%d" % [acct_id, int(old_pid)])
+ 			_kick_session(int(old_pid), "Hesabına başka bir cihazdan girildi")
+ 
+-	# Combat Logout: ghost oyuncu varsa geri yukle (DB'ye gitmeye gerek yok)
+-	var gp = null
+-	var gp_peer: int = -1
+-	for k in ghost_players.keys():
+-		var g: Dictionary = ghost_players[k]
+-		if int(g.p.get("account_id", -1)) == acct_id:
+-			gp = g
+-			gp_peer = k
+-			break
+-	if gp != null:
+-		players[peer_id] = gp.p
+-		players[peer_id]["id"] = peer_id
+-		ghost_players.erase(gp_peer)
+-		print("[COMBAT LOGOUT] %s geri yuklendi (peer=%d, acct=%d)" % [str(players[peer_id].get("name", "Gezgin")), peer_id, acct_id])
+-		# Haritadaki digerlerine guncellenen bilgi gonder
+-		if str(players[peer_id].get("map", "")) != "" and worlds.has(str(players[peer_id].get("map", ""))):
+-			_bcast(str(players[peer_id].get("map", "")), "s_pjoin", [_player_info(players[peer_id])], peer_id)
+-		# player_state_json olustur (Vector3 pos JSON'a donusturulemez, px/pz kullan)
+-		var gp_p: Dictionary = players[peer_id]
+-		var ps_json: Dictionary = {
+-			"callsign": str(gp_p.get("name", "Gezgin")),
+-			"faction": int(gp_p.get("faction", 1)),
+-			"ship": str(gp_p.get("ship", "phoenix")),
+-			"map": str(gp_p.get("map", "")),
+-			"px": float(gp_p.get("px", 0.0)),
+-			"pz": float(gp_p.get("pz", 0.0)),
+-			"hp": float(gp_p.get("hp", 1.0)),
+-			"mhp": float(gp_p.get("mhp", 1.0)),
+-			"sh": float(gp_p.get("sh", 0.0)),
+-			"msh": float(gp_p.get("msh", 0.0)),
+-			"spd": float(gp_p.get("spd", 0.0)),
+-			"form": str(gp_p.get("form", "std")),
+-			"drn": (gp_p.get("drn", []) as Array).duplicate(),
+-			"owned": (gp_p.get("_sv_owned", []) as Array).duplicate(),
+-			"cr": int(gp_p.get("_sv_cr", 0)),
+-			"uri": int(gp_p.get("_sv_uri", 0)),
+-			"xp": float(gp_p.get("_sv_xp", 0.0)),
+-			"hon": float(gp_p.get("_sv_hon", 0.0)),
+-			"pvp_kills": int(gp_p.get("_sv_pvp_kills", 0)),
+-			"kills": int(gp_p.get("_sv_kills", 0)),
+-			"reg_ts": int(gp_p.get("_sv_reg_ts", 0)),
+-			"rank_pen": float(gp_p.get("_sv_rank_pen", 0.0)),
+-			"quests": gp_p.get("_sv_quests", {}),
+-			"settings": gp_p.get("_sv_settings", "{}"),
+-			"inv": gp_p.get("_sv_inventory", {}),
+-			"forms": gp_p.get("forms", ["std"]),
+-			"loads": gp_p.get("loads", {}),
+-			"cfgi": int(gp_p.get("cfgi", 0)),
+-		}
+-		return [true, "Kimlik dogrulandi (ghost geri yuklendi)", acct_id,
+-			str(gp_p.get("name", "Gezgin")),
+-			int(gp_p.get("faction", 1)),
+-			JSON.stringify(ps_json)]
+-
+-
+-
+ 	# 3. Oyuncu durumunu veritabanindan yukle
+ 	var state_resp: Dictionary = db_send("load_player_state", {
+ 		"account_id": acct_id,
+@@ -339,7 +284,7 @@
+ 		"ship": str(ps.get("ship", "phoenix")),
+ 		"map": "",
+ 		"pos": Vector3.ZERO, "yaw": 0.0,
+-		"hp": float(ps.get("cr", 0)),  # gecici, on_node ile duzeltilecek
++		"hp": 1.0,  # gecici; ilk c_state ile duzelir (eskiden bakiye yaziliyordu: hayalet gemi olurse olumsuz olurdu)
+ 		"mhp": 1.0, "sh": 0.0, "msh": 0.0, "spd": 0.0,
+ 		"in_safe": false, "ut": false, "chat_t": 0.0, "form": "std", "drn": [],
+ 		"zone": 0, "prot": 0, "lock_t": -1.0e9, "arr_t": -1.0e9, "combat_t": -1.0e9, "last_dmg_t": -1.0e9,
+@@ -369,6 +314,33 @@
+ 		db_send("admin_ship", {"account_id": int(p.account_id), "ship": "police", "add": true})
+ 		print("[ADMIN SHIP] account_id=%d callsign=%s police owned'e eklendi (giris aninda)" % [int(p.account_id), str(p.name)])
+ 
++	# Combat Logout: sure dolmadan tekrar baglandiysa ayni hesabin hayalet gemisini MEVCUT durumuyla devral
++	# (harita, konum, can, kalkan, savas sayaclari). Eski kimlik haritadakilerden silinir.
++	var ghost_id: int = -1
++	for gk in players.keys():
++		if int(gk) != peer_id and _is_ghost(players[gk]) and int(players[gk].get("account_id", -1)) == acct_id:
++			ghost_id = int(gk)
++			break
++	if ghost_id != -1:
++		var gp: Dictionary = players[ghost_id]
++		var gmap: String = str(gp.map)
++		for gkey in ["pos", "yaw", "hp", "mhp", "sh", "msh", "spd", "in_safe", "zone", "prot", "lock_t", "arr_t",
++				"combat_t", "last_dmg_t", "last_pvp_t", "form", "drn", "sel"]:
++			if gp.has(gkey):
++				p[gkey] = gp[gkey]
++		p["_resume"] = {"map": gmap, "x": float((gp.pos as Vector3).x), "z": float((gp.pos as Vector3).z)}
++		players.erase(ghost_id)
++		if gmap != "":
++			_bcast(gmap, "s_pleave", [ghost_id])
++			ps["map"] = gmap
++			ps["px"] = float((gp.pos as Vector3).x)
++			ps["pz"] = float((gp.pos as Vector3).z)
++		var mhp_g: float = maxf(float(gp.get("mhp", 1.0)), 1.0)
++		var msh_g: float = float(gp.get("msh", 0.0))
++		ps["resume"] = {"hp_r": clampf(float(gp.get("hp", mhp_g)) / mhp_g, 0.01, 1.0),
++			"sh_r": clampf(float(gp.get("sh", 0.0)) / msh_g, 0.0, 1.0) if msh_g > 0.0 else 1.0}
++		print("[COMBAT LOGOUT] %s tekrar baglandi, gemi mevcut durumuyla devralindi (eski_peer=%d, yeni_peer=%d, harita=%s)" % [str(p.name), ghost_id, peer_id, gmap])
++
+ 	print("[SUNUCU] Token dogrulandi: peer=%d, account_id=%d, callsign=%s" % [peer_id, acct_id, str(ps.get("callsign", "Gezgin"))])
+ 
+ 	# 5. Basarili sonuc dondur
+@@ -428,50 +400,149 @@
+ 	return [true, "Hos geldin, %s!" % nm]
+ 
+ 
+-func on_ship(peer: int, ship: String) -> void:
++# ------------------------------------------------------------------ COMBAT LOGOUT / SAVAS DURUMU (sunucu kontrollu)
++func _is_ghost(p: Dictionary) -> bool:
++	return bool(p.get("ghost", false))
++
++
++# Oyuncu savasta mi? (saldirdi / saldirildi / hasar aldi). Tum sayaclar sunucu saatiyle tutulur.
++func _in_combat(p: Dictionary) -> bool:
++	return float(p.combat_t) > clock or float(p.lock_t) > clock or float(p.last_dmg_t) + DOData.COMBAT_SEC > clock
++
++
++# Cikis suresi (sn): PvP -> COMBAT_LOGOUT_PVP_SEC, NPC saldirisi/savas -> COMBAT_LOGOUT_NPC_SEC, savas disi -> COMBAT_LOGOUT_SAFE_SEC.
++func _logout_seconds(p: Dictionary) -> float:
++	if float(p.get("last_pvp_t", -1.0e9)) + DOData.COMBAT_SEC > clock:
++		return DOData.COMBAT_LOGOUT_PVP_SEC
++	if _in_combat(p):
++		return DOData.COMBAT_LOGOUT_NPC_SEC
++	return DOData.COMBAT_LOGOUT_SAFE_SEC
++
++
++# Hayalet gemi hasar alir: sure YENILENIR, kalkan/can sunucuda dusurulur, can 0 olursa normal olum akisi calisir.
++func _ghost_damage(peer: int, dmg: float, killer: int, from_pvp: bool) -> void:
++	if not players.has(peer) or dmg <= 0.0:
++		return
++	var g: Dictionary = players[peer]
++	if not _is_ghost(g):
++		return
++	g.ghost_t = DOData.COMBAT_LOGOUT_PVP_SEC if from_pvp else DOData.COMBAT_LOGOUT_NPC_SEC
++	g.last_dmg_t = clock
++	g.combat_t = clock + DOData.COMBAT_SEC
++	if from_pvp:
++		g.last_pvp_t = clock
++	var a: float = minf(float(g.sh), dmg * DOData.GHOST_SHIELD_ABSORB)
++	g.sh = float(g.sh) - a
++	g.hp = float(g.hp) - (dmg - a)
++	if float(g.hp) <= 0.0:
++		print("[COMBAT LOGOUT] %s hayalet gemisi yok edildi (acct=%d)" % [str(g.name), int(g.get("account_id", 0))])
++		on_died(peer, killer)            # normal olum: kill mesaji + PvP odulu
++		_finalize_ghost(peer, true)      # patlama: s_pleave; yeniden giriste ev haritasinda dogar
++
++
++# Hayalet gemiyi guvenle kaldir ve durumunu kaydet. died=true: gemi yok edildi -> kayitli konum ev ussu (yeniden dogus).
++func _finalize_ghost(peer: int, died: bool = false) -> void:
+ 	if not players.has(peer):
+ 		return
++	var g: Dictionary = players[peer]
++	if not _is_ghost(g):
++		return
++	var m: String = str(g.map)
++	players.erase(peer)
++	if m != "":
++		_bcast(m, "s_pleave", [peer])
++	if g.has("account_id") and m != "":
++		if died:
++			db_send("save_player_position", {"account_id": int(g.account_id),
++				"map_name": str(DOData.FACTIONS[int(g.faction)].home), "px": 0.0, "pz": 0.0})
++		else:
++			var pos: Vector3 = g.pos
++			if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
++				db_send("save_player_position", {"account_id": int(g.account_id), "map_name": m,
++					"px": float(pos.x), "pz": float(pos.z)})
++	if m != "":
++		_maybe_free_world(m)
++	print("[COMBAT LOGOUT] %s haritadan kaldirildi (%s, acct=%d)" % [str(g.name), "yok edildi" if died else "sure doldu", int(g.get("account_id", 0))])
++
++
++func on_ship(peer: int, ship: String) -> void:
++	# Gemi (= hangar) degistirme: tum kurallar SUNUCUDA dogrulanir, sonuc s_ship_result ile bildirilir.
++	if not players.has(peer) or _is_ghost(players[peer]):
++		return
++	var p: Dictionary = players[peer]
++	if str(p.ship) == ship:
++		return
+ 	var ok := false
+ 	for s in DOData.SHIPS:
+ 		if str(s.id) == ship:
+ 			ok = true
+ 			break
+ 	if not ok:
++		_to(peer, "s_ship_result", [false, str(p.ship), "Bilinmeyen gemi."])
+ 		return
+-	var p: Dictionary = players[peer]
+-	if str(p.ship) == ship:
++	# 1) Savasta gemi/hangar degistirme yasak.
++	if _in_combat(p):
++		print("[ON_SHIP] account_id=%d gemi degistirme REDDEDILDI (savasta)" % int(p.account_id))
++		_to(peer, "s_ship_result", [false, str(p.ship), "Savaşta gemi/hangar değiştirilemez."])
++		return
++	# 2) Gemi hesabin olmali; police sadece admin icin.
++	if not (ship in (p.get("_sv_owned", []) as Array)):
++		print("[ON_SHIP] account_id=%d sahip olmadigi gemi REDDEDILDI: %s" % [int(p.account_id), ship])
++		_to(peer, "s_ship_result", [false, str(p.ship), "Bu gemiye sahip değilsin."])
+ 		return
+-	# Savasta gemi degistirme yasak (istemciye guvenilmez).
+-	if float(p.combat_t) > clock or float(p.lock_t) > clock:
+-		print("[ON_SHIP] account_id=%d gemi degistirme REDDEDILDI (savasta/kilitli)" % int(p.account_id))
+-		return
+-	# Sunucu tarafinda gemi secimi dogrulanir: police sadece admin icin (istemciye guvenilmez).
+ 	if ship == "police" and not bool(p.get("_sv_admin", 0)):
+ 		print("[ON_SHIP] account_id=%d police secimi REDDEDILDI (degil admin)" % int(p.account_id))
++		_to(peer, "s_ship_result", [false, str(p.ship), "Bu gemi yalnızca yöneticiler içindir."])
+ 		return
+-	p.ship = ship
+-	# Aktif gemiyi veritabanina kalici olarak kaydet (istemciye guvenilmez).
++	# 3) Aktif gemi veritabanina KALICI yazilir; yazilamazsa degisiklik de yapilmaz (bir sonraki giriste Phoenix'e donmesin).
+ 	var ship_resp: Dictionary = db_send("save_active_ship", {"account_id": int(p.account_id), "ship": ship})
+ 	if not ship_resp.has("ok") or not ship_resp["ok"]:
+-		print("[ON_SHIP] active_ship kaydedilemedi: account_id=%d" % int(p.account_id))
++		print("[ON_SHIP] active_ship kaydedilemedi: account_id=%d (%s)" % [int(p.account_id), str(ship_resp.get("error", "?"))])
++		_to(peer, "s_ship_result", [false, str(p.ship), "Gemi kaydedilemedi, tekrar dene."])
++		return
++	p.ship = ship
++	_to(peer, "s_ship_result", [true, ship, ""])
+ 	if str(p.map) != "":
+ 		# s_pjoin: istemci oyuncuyu yeniden olusturur (yeni gemi modeli), digerlerine owned olmadan
+ 		_bcast(str(p.map), "s_pjoin", [_player_info(p)], peer)
+ 
+-	# Muhimmat secimi: savasta degistirme yasak (istemciye guvenilmez).
+-	func on_select_ammo(peer: int, ammo: String) -> void:
+-		if not players.has(peer):
+-			return
+-		var p: Dictionary = players[peer]
+-		# Savasta/kilitli muhimmat degistirilemez
+-		if float(p.combat_t) > clock or float(p.lock_t) > clock:
+-			print("[SELECT AMMO] account_id=%d muhimmat degistirme REDDEDILDI (savasta/kilitli)" % int(p.account_id))
+-			net.callv("rpc_id", [peer, "s_select_ammo_result", false, str(p.get("sel", "x1")), "Savasta muhimmat degistirilemez"])
+-			return
+-		# Muhimmat secimini guncelle
+-		p.sel = ammo
+-		print("[SELECT AMMO] account_id=%d muhimmat=%s" % [int(p.account_id), ammo])
+-		net.callv("rpc_id", [peer, "s_select_ammo_result", true, ammo, ""])
++
++# Muhimmat (lazer cephanesi) secimi: hasar alirken degistirme yasak (sunucu dogrular). Roket secimi sistemden kaldirildi.
++func on_select_ammo(peer: int, ammo: String) -> void:
++	if not players.has(peer) or _is_ghost(players[peer]):
++		return
++	var p: Dictionary = players[peer]
++	if not DOData.AMMO.any(func(am): return str(am.id) == ammo):
++		_to(peer, "s_select_ammo_result", [false, str(p.get("sel", "x1")), "Bilinmeyen mühimmat."])
++		return
++	if ammo == str(p.get("sel", "x1")):
++		_to(peer, "s_select_ammo_result", [true, ammo, ""])
++		return
++	if float(p.last_dmg_t) + DOData.AMMO_SWITCH_LOCK_SEC > clock:
++		print("[SELECT AMMO] account_id=%d muhimmat degistirme REDDEDILDI (hasar aliyor)" % int(p.account_id))
++		_to(peer, "s_select_ammo_result", [false, str(p.get("sel", "x1")), "Hasar alırken mühimmat değiştirilemez"])
++		return
++	p.sel = ammo
++	db_send("save_selected_ammo", {"account_id": int(p.account_id), "ammo": ammo})
++	_to(peer, "s_select_ammo_result", [true, ammo, ""])
++
++
++# Ekipman/konfigurasyon kaydi (lazer, jenerator, droid, formasyon, aktif konfig). Konfigurasyon degistirme savasta SERBEST.
++# Istemcinin yolladigi liste guvenilmez: veritabani katmani yuva sayisi + envanter + katalogla suzer, suzulmus hali geri doner.
++func on_save_loadout(peer: int, ship: String, loads_json: String, cfgi: int, seq: int) -> void:
++	if not players.has(peer) or _is_ghost(players[peer]) or loads_json.length() > 40000:
++		return
++	var p: Dictionary = players[peer]
++	if ship != str(p.ship):
++		return   # yalnizca sunucuda aktif olan geminin ekipmani yazilabilir
++	var parsed = JSON.parse_string(loads_json)
++	if typeof(parsed) != TYPE_ARRAY:
++		return
++	var resp: Dictionary = db_send("save_loadout", {"account_id": int(p.account_id), "ship": ship, "loads": parsed, "cfg_index": cfgi})
++	if not resp.has("ok") or not resp["ok"]:
++		print("[LOADOUT] kaydedilemedi: account_id=%d (%s)" % [int(p.account_id), str(resp.get("error", "?"))])
++		return
++	_to(peer, "s_loadout_result", [ship, JSON.stringify(resp.get("loads", [])), int(resp.get("cfg_index", 0)), seq])
+ 
+ 
+ 
+@@ -487,10 +558,13 @@
+ 		mp.disconnect_peer(peer)   # guvenlik agi (reliable paket once gider)
+ 
+ 
+-func on_disconnect(peer: int, release_lock: bool = true) -> void:
++func on_disconnect(peer: int, release_lock: bool = true, force_remove: bool = false) -> void:
++	# Baglanti koptu (istemci kapandi / internet gitti / kick): gemi SILINMEZ. Sunucu sureyi kendisi tutar.
+ 	if not players.has(peer):
+ 		return
+ 	var p: Dictionary = players[peer]
++	if _is_ghost(p):
++		return
+ 	# Oturum kilidini YALNIZCA kendi oturumuysa birak (eski oturum yeni oturumun kilidini silemez)
+ 	if release_lock and p.has("account_id") and str(p.get("_session_hash", "")) != "":
+ 		db_send("release_session_lock", {"account_id": int(p["account_id"]), "session_token_hash": str(p["_session_hash"])})
+@@ -500,32 +574,30 @@
+ 	for ik in invites.keys():
+ 		if int(invites[ik].from) == peer:
+ 			invites.erase(ik)
+-	# Baglanti kopmasi saldiri kilidini / catisma sayacini SIFIRLAMAZ (yeniden baglaninca geri yuklenir).
+-	if maxf(float(p.lock_t), maxf(float(p.combat_t), float(p.arr_t))) > clock:
+-		ghosts[str(p.name).to_lower()] = {"lock_t": float(p.lock_t), "combat_t": float(p.combat_t), "arr_t": float(p.arr_t)}
+-	# Konumu kaydet (ayrilişte)
+-	if p.has("account_id") and str(p.map) != "":
++	# Konumu kaydet (ayrilista)
++	if p.has("account_id") and old_map != "":
+ 		var pos: Vector3 = p.pos
+ 		if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+ 			db_send("save_player_position", {
+ 				"account_id": int(p.account_id),
+-				"map_name": str(p.map),
++				"map_name": old_map,
+ 				"px": float(pos.x),
+ 				"pz": float(pos.z),
+ 			})
+-	# Combat Logout: oyuncuyu players'dan sil ve ghost_players'a al.
+-	# Gemi haritada gorunur kalir; sure dolunca s_pleave yayıp kalmasi gerekirse silinir.
+-	var acct_id: int = int(p.get("account_id", 0))
+-	var combat: bool = float(p.combat_t) > clock or float(p.lock_t) > clock
+-	var logout_sec: float = DOData.COMBAT_LOGOUT_COMBAT_SEC if combat else DOData.COMBAT_LOGOUT_SAFE_SEC
+-	var p_copy: Dictionary = p.duplicate()
+-	ghost_players[peer] = {"p": p_copy, "timer": logout_sec, "reason": "combat" if combat else "safe"}
+-	players.erase(peer)
+-	# s_pleave YAYINLAMAZ: gemi gorunur kalmali, diger oyuncular saldirabilsin.
+-	if old_map != "":
+-		_maybe_free_world(old_map)
+-	print("[COMBAT LOGOUT] %s ghost'a alindi: sure=%.0f sn, reason=%s, acct=%d" % [str(p.name), logout_sec, "combat" if combat else "safe", acct_id])
+-	_system_chat("%s sunucudan ayrildi (gemi haritada kalir)." % str(p.name))
++	# Haritada degilse (ya da banli ise) bekleyecek gemi yok: normal temizlik.
++	if old_map == "" or force_remove:
++		players.erase(peer)
++		if old_map != "":
++			_bcast(old_map, "s_pleave", [peer])
++			_maybe_free_world(old_map)
++		return
++	# Combat Logout: ayni kayit hayalete cevrilir. Sure = savas durumuna gore (15 / 30 sn).
++	var logout_sec: float = _logout_seconds(p)
++	p["ghost"] = true
++	p["ghost_t"] = logout_sec
++	p["ut"] = false
++	print("[COMBAT LOGOUT] %s haritada kaliyor: sure=%.0f sn, acct=%d" % [str(p.name), logout_sec, int(p.get("account_id", 0))])
++	_system_chat("%s sunucudan ayrildi (gemi %.0f sn haritada kalir)." % [str(p.name), logout_sec])
+ 
+ 
+ func _maybe_free_world(map_name: String) -> void:
+@@ -539,6 +611,14 @@
+ 	if not players.has(peer) or not maps.has(map_name):
+ 		return
+ 	var p: Dictionary = players[peer]
++	if p.has("_resume"):
++		var rs: Dictionary = p["_resume"]
++		p.erase("_resume")
++		map_name = str(rs.map)
++		x = float(rs.x)
++		z = float(rs.z)
++		if not maps.has(map_name):
++			return
+ 	var old_map: String = str(p.map)
+ 	var jumped: bool = false
+ 	if old_map != "" and old_map != map_name:
+@@ -786,13 +866,7 @@
+ 
+ 
+ func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
+-	# Ghost player attacker: renew timer
+-	if not players.has(peer):
+-		var gp: Dictionary = ghost_players.get(peer, null)
+-		if gp != null:
+-			gp.timer = DOData.COMBAT_LOGOUT_COMBAT_SEC
+-			return  # timer yenilendi, hasar islenmeyecek (edge case)
+-	if not players.has(peer) or dmg <= 0.0 or dmg > 5.0e6:
++	if not players.has(peer) or _is_ghost(players[peer]) or dmg <= 0.0 or dmg > 5.0e6:
+ 		return
+ 	var p: Dictionary = players[peer]
+ 	if not worlds.has(str(p.map)):
+@@ -850,34 +924,10 @@
+ 
+ 
+ func on_hit_player(peer: int, victim: int, dmg: float) -> void:
+-	# Ghost player victim: renew timer and allow damage
+-	if not players.has(victim):
+-		var gp: Dictionary = ghost_players.get(victim, null)
+-		if gp != null:
+-			gp.timer = DOData.COMBAT_LOGOUT_COMBAT_SEC  # hasar alinca sure yenilenecek
+-			var gp_p: Dictionary = gp.p
+-			gp_p.combat_t = clock + DOData.COMBAT_SEC
+-			# Hasar uygula: kurban ghost gemi, hasar alir
+-			var a: Dictionary = players[peer]
+-			if str(a.map) == "" or str(a.map) != str(gp_p.get("map", "")):
+-				return
+-			if not worlds.has(str(a.map)):
+-				return
+-			var dd: Vector3 = (a.pos as Vector3) - (gp_p.pos as Vector3)
+-			dd.y = 0.0
+-			if dd.length() > DOData.LASER_RANGE * DOData.S * 3.0:
+-				return
+-			# Saldiran korumasi kalkar
+-			_register_attack(a)
+-			_update_safe(gp_p, worlds[str(gp_p.map)])
+-			if bool(gp_p.in_safe):
+-				return
+-			gp_p.combat_t = clock + DOData.COMBAT_SEC
+-			gp_p.last_dmg_t = clock
+-			_to(victim, "s_hurt", [peer, dmg])
+-			return
+ 	if not players.has(peer) or not players.has(victim) or peer == victim or dmg <= 0.0 or dmg > 5.0e6:
+ 		return
++	if _is_ghost(players[peer]):
++		return
+ 	var a: Dictionary = players[peer]
+ 	var v: Dictionary = players[victim]
+ 	if str(a.map) == "" or str(a.map) != str(v.map):
+@@ -901,6 +951,11 @@
+ 	a.combat_t = clock + DOData.COMBAT_SEC
+ 	v.combat_t = clock + DOData.COMBAT_SEC
+ 	v.last_dmg_t = clock
++	a["last_pvp_t"] = clock
++	v["last_pvp_t"] = clock
++	if _is_ghost(v):
++		_ghost_damage(victim, dmg, peer, true)   # baglantisi kopmus gemi: hasari sunucu uygular, sure yenilenir
++		return
+ 	_to(victim, "s_hurt", [peer, dmg])
+ 
+ 
+@@ -948,6 +1003,8 @@
+ 	print("[SOHBET%s] %s: %s" % [["", "-SIRKET", "-GRUP"][clampi(ch, 0, 2)], str(p.name), text])
+ 	for pid in players.keys():
+ 		var q: Dictionary = players[pid]
++		if _is_ghost(q):
++			continue
+ 		if ch == 1 and int(q.faction) != int(p.faction):
+ 			continue
+ 		if ch == 2 and (int(p.group) == 0 or int(q.group) != int(p.group)):
+@@ -957,6 +1014,8 @@
+ 
+ func _system_chat(text: String) -> void:
+ 	for pid in players.keys():
++		if _is_ghost(players[pid]):
++			continue
+ 		net.callv("rpc_id", [int(pid), "s_chat", "", 0, text, 0])
+ 
+ 
+@@ -1504,13 +1563,18 @@
+ 			var st: Dictionary = db_send("get_account_status", {"account_id": int(p.account_id)})
+ 			if st.has("ok") and st["ok"] and st.get("ban_active", false):
+ 				print("[SUNUCU] Banli oyuncu tick ile kick: account_id=%d" % p.account_id)
++				if _is_ghost(p):
++					_finalize_ghost(int(pid))   # banli hesabin gemisi haritada bekletilmez
++					continue
+ 				net.callv("rpc_id", [int(pid), "s_disconnect", "Hesap yasakli: " + str(st.get("ban_reason", "bilinmeyen"))])
+-				players.erase(int(pid))
++				on_disconnect(int(pid), true, true)
+ 	# Online oyuncularin cr/uri bakiyesini DB'den senkronize et (admin panelinden gelen degisiklikler icin)
+ 	if balance_tick_t >= 30.0:
+ 		balance_tick_t = 0.0
+ 		for pid in players.keys().duplicate():
+ 			var p: Dictionary = players[pid]
++			if _is_ghost(p):
++				continue
+ 			var bal: Dictionary = db_send("get_player_balance", {"account_id": int(p.account_id)})
+ 			if bal.has("ok") and bal["ok"]:
+ 				p["_sv_cr"] = int(bal["cr"])
+@@ -1521,6 +1585,8 @@
+ 		admin_tick_t = 0.0
+ 		for pid in players.keys().duplicate():
+ 			var p: Dictionary = players[pid]
++			if _is_ghost(p):
++				continue
+ 			var st: Dictionary = db_send("get_account_status", {"account_id": int(p.account_id)})
+ 			if st.has("ok") and st["ok"]:
+ 				var new_admin: bool = bool(st.get("is_admin", false))
+@@ -1552,6 +1618,8 @@
+ 		stale_lock_t = 0.0
+ 		for hb_pid in players.keys().duplicate():
+ 			var hb_p: Dictionary = players[hb_pid]
++			if _is_ghost(hb_p):
++				continue
+ 			if hb_p.has("account_id") and str(hb_p.get("_session_hash", "")) != "":
+ 				var hb: Dictionary = db_send("renew_session_lock", {"account_id": int(hb_p.account_id), "session_token_hash": str(hb_p._session_hash)})
+ 				if hb.get("ok", false) and not hb.get("owned", true):
+@@ -1564,6 +1632,8 @@
+ 		pos_save_t = 0.0
+ 		for pid in players.keys().duplicate():
+ 			var p: Dictionary = players[pid]
++			if _is_ghost(p):
++				continue
+ 			if p.has("account_id") and str(p.map) != "":
+ 				var pos: Vector3 = p.pos
+ 				if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+@@ -1576,25 +1646,15 @@
+ 
+ 
+ 
+-	# Combat Logout ghost timer: sure dolani ghostlari temizle ve durumunu kaydet
+-	for gp in ghost_players.keys().duplicate():
+-		var g: Dictionary = ghost_players[gp]
+-		g.timer -= dt
+-		if g.timer <= 0.0:
+-			var gp_p: Dictionary = g.p
+-			if str(gp_p.map) != "":
+-				_bcast(str(gp_p.map), "s_pleave", [gp])
+-				if gp_p.has("account_id") and str(gp_p.map) != "":
+-					var pos: Vector3 = gp_p.pos
+-					if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+-						db_send("save_player_position", {
+-							"account_id": int(gp_p.account_id),
+-							"map_name": str(gp_p.map),
+-							"px": float(pos.x),
+-							"pz": float(pos.z),
+-						})
+-			ghost_players.erase(gp)
+-			print("[COMBAT LOGOUT] %s sure doldu, gemi haridan kaldirildi" % [str(gp_p.name)])
++	# Combat Logout sayaci: sure dolan hayalet gemiler haritadan guvenle kaldirilir ve durumlari kaydedilir.
++	for gpid in players.keys().duplicate():
++		var gq: Dictionary = players[gpid]
++		if not _is_ghost(gq):
++			continue
++		gq.ghost_t = float(gq.ghost_t) - dt
++		if float(gq.ghost_t) <= 0.0:
++			_finalize_ghost(int(gpid))
++
+ 
+ func _tick_respawn(w: Dictionary, dt: float) -> void:
+ 	var rs: Array = w.respawn
+@@ -1635,6 +1695,8 @@
+ 		arr.append(float(e.sh))
+ 		arr.append(1.0 if bool(e.aggro) else 0.0)
+ 	for pid in peers:
++		if _is_ghost(players[pid]):
++			continue
+ 		net.rpc_id(int(pid), "s_npc_snap", arr)
+ 
+ 
+@@ -1652,6 +1714,8 @@
+ 		if ids.size() < 2:
+ 			continue
+ 		for pid in ids:
++			if _is_ghost(players[pid]):
++				continue
+ 			var arr: Array = []
+ 			for oid in ids:
+ 				if oid == pid:
+@@ -1685,6 +1749,8 @@
+ 		tp.last_dmg_t = clock
+ 		if SafeZone.npc_damage_is_combat(w.m):
+ 			tp.combat_t = maxf(float(tp.combat_t), clock + DOData.COMBAT_SEC)
++		if _is_ghost(tp):
++			_ghost_damage(target_peer, dmg, 0, false)   # NPC saldirisi altindaki hayalet: can sunucuda duser, sure yenilenir
+ 	_bcast(str(w.name), "s_npc_fire", [int(e.uid), target_peer, dmg])
+ 
+ 

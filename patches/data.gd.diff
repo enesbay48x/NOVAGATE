@@ -1,0 +1,18 @@
+--- /tmp/a_data.gd	2026-11-04 02:34:55.823129889 +0000
++++ /tmp/b_data.gd	2026-11-04 02:34:55.824186910 +0000
+@@ -45,8 +45,14 @@
+ const COMBAT_SEC := 10.0                 # son PvP vurusundan sonra "catisma" sayilma suresi (sn) - varsayim
+ const AGGRESSOR_LOCK_SEC := 10.0         # saldiridan sonra korumanin geri gelemedigi sure (sn) - varsayim
+ const ARRIVAL_PROTECT_ENEMY_SEC := 0.0   # dusman haritasina gecis korumasi (sn). Kaynaklarda DOGRULANMADI -> 0 = kapali
++# ---- COMBAT LOGOUT (sunucu kontrollu; baglanti kopmasi / istemci kapanmasi / internet gitmesi AYNI kurallari kullanir) ----
+ const COMBAT_LOGOUT_SAFE_SEC := 15.0     # savas disi cikis: gemi 15 sn haritada kalir
+-const COMBAT_LOGOUT_COMBAT_SEC := 30.0   # NPC/PvP sagindan cikis: 30 sn
++const COMBAT_LOGOUT_NPC_SEC := 30.0      # NPC saldirisi altinda cikis: 30 sn (cikistan sonra tekrar hasar alirsa sure YENILENIR)
++const COMBAT_LOGOUT_PVP_SEC := 30.0      # PvP savasinda cikis: 30 sn (cikistan sonra tekrar hasar alirsa sure YENILENIR)
++const COMBAT_LOGOUT_COMBAT_SEC := 30.0   # (eski ad; NPC/PvP ile ayni deger)
++const GHOST_SHIELD_ABSORB := 0.8         # baglantisi kopmus geminin kalkaninin hasari sogurma orani (kalkan bitene kadar)
++const AMMO_SWITCH_LOCK_SEC := 5.0        # son hasardan sonra lazer muhimmati degistirmenin yasak oldugu sure (sn)
++const NET_PEER_TIMEOUT_MAX_MS := 10000   # internet kopmasinin SUNUCUDA anlasilma ust siniri (ms). ENet varsayilani 30000
+ const ADV_MAP_PORTAL_DMZ := false        # X-5..X-8'de kendi sirketinin kapi cevresi guvenli mi? Kaynak ayirmiyor -> kapali
+ const ENEMY_BASE_SAFE := false           # dusman ussunun yaninda guvenli bolge (kapali: sadece kendi ussun)
+ const JUMP_BLOCK_NORMAL_MAPS := false    # normal sirket haritalarinda saldiri altinda atlamayi engelle (kaynakta yalnizca PvP haritalari)

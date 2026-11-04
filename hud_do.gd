@@ -749,7 +749,7 @@ func _short(v: float) -> String:
 const LASER_IDS := ["x1", "x2", "x3", "x4", "sab", "rsb"]
 const LASER_ICONS := ["lcb-10", "mcb-25", "mcb-50", "ucb-100", "sab-50", "rsb-75"]
 const LASER_TIPS := ["x1 cephane", "x2 cephane", "x3 cephane", "x4 cephane", "SAB-50 (kalkan emici)", "RSB-75 (hizli sarj)"]
-const SUPPORTED_CATS := ["lasers", "rockets", "special_items", "drone_formations"]
+const SUPPORTED_CATS := ["lasers", "special_items", "drone_formations"]
 const QUICK_N := 10
 const TOP_N := 8
 
@@ -789,8 +789,6 @@ func _items_for(cat: String) -> Array:
 		"lasers":
 			for id in LASER_IDS:
 				out.append({"k": "las", "id": id})
-		"rockets":
-			out.append({"k": "rkt", "id": "r310"})
 		"special_items":
 			for id in Extras.IDS:
 				out.append({"k": "ext", "id": id})
@@ -866,20 +864,12 @@ func _fill_cell(c: DOCell, p: Dictionary, with_key: bool) -> void:
 
 
 func _use_item(p: Dictionary) -> void:
-	if game == null:
-		if mobile != null:
-			mobile._diag_show("HUD/GAME NULL")
-		return
 	if game.SV.is_empty():
 		return
 	var id := str(p.get("id", ""))
-	print("[HUD_DO DIAG] _use_item cagrildi: k=", str(p.get("k", "")), ", id=", id)
 	match str(p.get("k", "")):
 		"las":
-			print("[HUD_DO DIAG] game.select_ammo cagiracak: id=", id)
-			mobile._diag_show("SELECT_AMMO ÇAĞRILDI id=" + id)
 			game.select_ammo(id)   # RSB kuralari (bekleyen secimini engelle + onceki muhimmadi kaydet) tek yerde isler
-			mobile._diag_show("SEÇİLİ=" + str(game.SV.sel))
 		"rkt":
 			game.toggle_rocket_auto()
 		"frm":
@@ -995,7 +985,6 @@ func _build_actionbar() -> void:
 		top_cells.append(c)
 	var cats := [
 		["lasers", "Lazerler: cephane secenekleri", _on_cat.bind("lasers", "Lazerler")],
-		["rockets", "Roketler", _on_cat.bind("rockets", "Roketler")],
 		["special_items", "Ozel esyalar", _on_cat.bind("special_items", "Ozel esyalar")],
 		["drone_formations", "Droid dizilimleri: sec / alt cubuga surukle", _on_cat.bind("drone_formations", "Droid dizilimleri")],
 		["buy_now", "Market  [B]", game.toggle_base],

@@ -550,6 +550,14 @@ func on_fire_vis(shooter: int, kind: int, ref: int, nb: int, ammo: String) -> vo
 		g.fire_bolt(from0 + dir * 1.2 + side * off + Vector3(0, 0.6, 0), tgt, "lf1", col, 0.0, _vis_vol(), ammo, wf)
 
 
+# Baska oyuncu bir ozel esya (extra) kullandi: efekti onun gemisinde goster.
+func on_extra(peer: int, idx: int) -> void:
+	var sp = players.get(peer)
+	if sp == null or not is_instance_valid(sp.node) or g.extras == null:
+		return
+	g.extras.play_remote(idx, sp.node as Node3D)
+
+
 # Sunucu GERCEK korumayi bildirir (0 yok, 1 ust, 2 kapi, 3 gecici gecis). Istemci koruma VEREMEZ; yalnizca gosterir.
 func on_prot(kind: int) -> void:
 	g.net_prot = kind
@@ -625,19 +633,14 @@ func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new
 		g.toast("Alim basarisiz: " + error)
 
 
-# ------------------------------------------------------------------ gemi degistirme sonucu (sunucu -> istemci)
+# ------------------------------------------------------------------ gemi / ekipman / muhimmat sonuclari (sunucu -> istemci)
 func on_ship_result(ok: bool, ship: String, error: String) -> void:
-	if g != null:
-		g.on_ship_result(ok, ship, error)
+	g.on_ship_result(ok, ship, error)
 
 
-# ------------------------------------------------------------------ mermi guncelleme sonucu (sunucu -> istemci)
-func on_ammo_result(ok: bool, ammo_id: String, new_qty: int, error: String) -> void:
-	if g != null:
-		g.on_ammo_result(ok, ammo_id, new_qty, error)
+func on_loadout_result(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
+	g.on_loadout_result(ship, loads_json, cfgi, seq)
 
 
-# ------------------------------------------------------------------ mermi secim sonucu (sunucu -> istemci)
 func on_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
-	if g != null:
-		g.on_select_ammo_result(ok, ammo, error)
+	g.on_select_ammo_result(ok, ammo, error)

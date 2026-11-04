@@ -45,8 +45,14 @@ const PORTAL_SAFE_RADIUS := 600.0        # kapi cevresi guvenli yaricap (DO biri
 const COMBAT_SEC := 10.0                 # son PvP vurusundan sonra "catisma" sayilma suresi (sn) - varsayim
 const AGGRESSOR_LOCK_SEC := 10.0         # saldiridan sonra korumanin geri gelemedigi sure (sn) - varsayim
 const ARRIVAL_PROTECT_ENEMY_SEC := 0.0   # dusman haritasina gecis korumasi (sn). Kaynaklarda DOGRULANMADI -> 0 = kapali
+# ---- COMBAT LOGOUT (sunucu kontrollu; baglanti kopmasi / istemci kapanmasi / internet gitmesi AYNI kurallari kullanir) ----
 const COMBAT_LOGOUT_SAFE_SEC := 15.0     # savas disi cikis: gemi 15 sn haritada kalir
-const COMBAT_LOGOUT_COMBAT_SEC := 30.0   # NPC/PvP sagindan cikis: 30 sn
+const COMBAT_LOGOUT_NPC_SEC := 30.0      # NPC saldirisi altinda cikis: 30 sn (cikistan sonra tekrar hasar alirsa sure YENILENIR)
+const COMBAT_LOGOUT_PVP_SEC := 30.0      # PvP savasinda cikis: 30 sn (cikistan sonra tekrar hasar alirsa sure YENILENIR)
+const COMBAT_LOGOUT_COMBAT_SEC := 30.0   # (eski ad; NPC/PvP ile ayni deger)
+const GHOST_SHIELD_ABSORB := 0.8         # baglantisi kopmus geminin kalkaninin hasari sogurma orani (kalkan bitene kadar)
+const AMMO_SWITCH_LOCK_SEC := 5.0        # son hasardan sonra lazer muhimmati degistirmenin yasak oldugu sure (sn)
+const NET_PEER_TIMEOUT_MAX_MS := 10000   # internet kopmasinin SUNUCUDA anlasilma ust siniri (ms). ENet varsayilani 30000
 const ADV_MAP_PORTAL_DMZ := false        # X-5..X-8'de kendi sirketinin kapi cevresi guvenli mi? Kaynak ayirmiyor -> kapali
 const ENEMY_BASE_SAFE := false           # dusman ussunun yaninda guvenli bolge (kapali: sadece kendi ussun)
 const JUMP_BLOCK_NORMAL_MAPS := false    # normal sirket haritalarinda saldiri altinda atlamayi engelle (kaynakta yalnizca PvP haritalari)
@@ -328,7 +334,7 @@ static func make_maps() -> Dictionary:
 		"name": "4-4 (PvP)",
 		"w": 42000.0,
 		"h": 26000.0,
-		"npcs": [["pilot", 6]],
+		"npcs": [],   # PvP haritasinda bot yok (eskiden: [["pilot", 6]])
 		"faction": 0,
 		"pvp": true,
 		"base": null,
@@ -507,6 +513,10 @@ static func _attach_rules(mm: Dictionary, key: String) -> void:
 	mm["rules"] = r
 
 
+# ---- NPC SAYISI CARPANI: haritalardaki her NPC turunun sayisi bununla carpilir. 1 = eskisi gibi ----
+const NPC_MULT := 4
+const NPC_MULT_EXCLUDE := ["cubikon"]   # carpandan muaf NPC'ler (ornek: ["cubikon", "pilot"])
+
 # Her harita icin yapilandirilmis NPC dogus verisi uretir ("zones").
 # zones: [{"npc": <npc_id>, "n": <adet>, "area": [x0,y0,x1,y1] (DO birimi) | "fixed": [x,y]}] 
 # - Cubikon "fixed" (sabit) hucrlerden dogar; digerleri "area" bolgelerinden, harita sinirlari,
@@ -532,6 +542,8 @@ static func _attach_zones(m: Dictionary) -> void:
 	for ent in m.get("npcs", []):
 		var npc: String = str(ent[0])
 		var n: int = int(ent[1])
+		if not NPC_MULT_EXCLUDE.has(npc):
+			n *= NPC_MULT   # NPC sayisi carpani (Cubikon haric)
 		if npc == "cubikon":
 			# Cubikon: dort sabit hucreden dogar (2010 X-6 referans hucreleri).
 			for c in CUBIKON.cells:

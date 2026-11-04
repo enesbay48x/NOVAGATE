@@ -72,6 +72,8 @@ var _state_set := false
 var _aim_lock_prev := false
 var _map_preserved_move_touch := -1   # harita acilirken hareket stick'ine basili parmak (touch index)
 var _map_preserved_move_active := false
+var _down := {}                # touch index -> ekran konumu (o an basili tum parmaklar)
+var _resume_move_id := -1      # arayuz kapaninca (panel/harita) birakilan hareket parmagi; hala basiliysa geri alinir
 
 var ws: float = DOData.S                # 1 DO birimi = ws Godot birimi (ic siniflar icin)
 var safe_r: float = DOData.SAFE_RADIUS
@@ -1025,6 +1027,18 @@ func _blocked_by_gui(p: Vector2) -> bool:
 
 
 func _input(ev: InputEvent) -> void:
+	# Parmaklarin gercek durumu: panel/harita acikken (arayuz "canli" degilken) bile izlenir.
+	# Boylece panel kapaninca hala basili olan hareket parmagi geri alinabilir.
+	var st0 := ev as InputEventScreenTouch
+	if st0 != null:
+		if st0.pressed and not st0.canceled:
+			_down[st0.index] = st0.position
+		else:
+			_down.erase(st0.index)
+	else:
+		var sd0 := ev as InputEventScreenDrag
+		if sd0 != null and _down.has(sd0.index):
+			_down[sd0.index] = sd0.position
 	if not _live():
 		return
 	var st := ev as InputEventScreenTouch
@@ -1138,6 +1152,12 @@ func _move(id: int, gpos: Vector2) -> bool:
 
 func _release(id: int, gpos: Vector2) -> bool:
 	if _map_open:
+		# Harita acikken hareket parmagi kalkarsa joystick HEMEN birakilir (yoksa gemi bayat degerle gitmeye devam eder).
+		if _ptr.has(id) and _ptr[id]["ctl"] == stick_move and stick_move != null:
+			stick_move.set_pressed(false)
+			stick_move.end()
+			_map_preserved_move_active = false
+			_map_preserved_move_touch = -1
 		_ptr.erase(id)
 		return true
 	if not _ptr.has(id):
@@ -1171,21 +1191,16 @@ func _release(id: int, gpos: Vector2) -> bool:
 			_aim_target = null
 			queue_redraw()
 			if s.max_dev < AIM_MIN:
+				# Kisa dokunus: ates aciksa DURUR; kapaliysa en yakin NPC / dusman sirkete ates baslar.
 				if game.fire:
 					game._set_fire(false)
-					pass  # DIAG removed
 				else:
-					var target = shot
-					if target == null or not is_instance_valid(target.node):
-						target = _find_nearest_enemy()
-					if target != null and is_instance_valid(target.node):
-						game.target = target
-						game._set_fire(true)
-						pass  # DIAG removed
-					else:
-						pass  # DIAG removed
+					_fire_nearest()
 			elif shot != null and is_instance_valid(shot.node):
 				_aim_fire(shot)
+			elif not game.fire:
+				# Joystick itildi ama konide kimse yoktu: yine de en yakin hedefe ates et
+				_fire_nearest()
 		elif s.role == "move" and tap and bool(d.get("float", false)):
 			_world_tap(d["gpos"])   # sol alanda kisa dokunus: oradaki kutu / NPC'ye dokunmus olabilir
 	elif c.kind == "txt":
@@ -1249,10 +1264,7 @@ func _btn_action(id: String) -> void:
 	match id:
 		"x1", "x2", "x3", "x4", "sab", "rsb":
 			if game == null or hud == null:
-				pass  # DIAG removed
 				return
-			print("[MOBILE_HUD DIAG] Laser butonuna basildi: id=", id, ", cagri: hud._use_item({k:las, id:", id, "})")
-			pass  # DIAG removed
 			hud._use_item({"k": "las", "id": id})
 		"rkt":
 			game.toggle_rocket_auto()
@@ -1505,23 +1517,35 @@ func _find_in_cone(po: Vector3, wd: Vector2):
 	return best
 
 
-# Koni disindaki en yakin dusmani bul (menzil icinde). Aim stick kisa tap ile kullanilir.
+# En yakin gorunur dusmani bul (NPC ya da dusman sirket oyuncusu). Menzil siniri YOK:
+# uzaktaysa gemi hedefe yaklasip ates eder. Aim stick kisa tap ile kullanilir.
 func _find_nearest_enemy() -> Object:
 	var best = null
 	var best_dist := 1e9
+	if game.P == null or not is_instance_valid(game.P.node):
+		return null
 	var po: Vector3 = game.P.node.position
-	var range_u := DOData.LASER_RANGE * DOData.S * AIM_RANGE_MUL
 	for e in game.enemies:
-		if not is_instance_valid(e.node) or float(e.hp) <= 0.0:
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0 or not e.node.visible:
 			continue
 		var v := Vector2(float(e.node.position.x) - po.x, float(e.node.position.z) - po.z)
 		var dist := v.length()
-		if dist > range_u:
-			continue
 		if dist < best_dist:
 			best_dist = dist
 			best = e
 	return best
+
+
+# Hedef joystigi dokunusu: en yakin dusmani sec ve atesi baslat.
+func _fire_nearest() -> void:
+	var t = _find_nearest_enemy()
+	if t == null or not is_instance_valid(t.node):
+		game.toast("Yakinda hedef yok.")
+		return
+	game._cancel_collect()
+	game.target = t
+	_haptic(30)
+	game._set_fire(true)
 
 
 # Koninin ekrandaki sekli: dunya uzayinda yay uzerinden, kameradan gecirilerek hesaplanir (perspektife uyar).
@@ -1770,24 +1794,37 @@ func _process(dt: float) -> void:
 	if not active or hud == null:
 		return
 	if not _live():
+		# Hareket parmagi hala basiliysa hatirla; arayuz geri gelince joystick kaldigi yerden devam etsin.
+		if stick_move != null and stick_move.active and _resume_move_id < 0:
+			for k in _ptr.keys():
+				if _ptr[k]["ctl"] == stick_move and _down.has(k):
+					_resume_move_id = int(k)
+					break
 		if not _ptr.is_empty() or _driving or _aim_show:
 			_reset_pointers()
 		if _map_open:
 			_close_map()
 		return
+	if _resume_move_id >= 0:
+		var rid := _resume_move_id
+		_resume_move_id = -1
+		if _down.has(rid) and not _ptr.has(rid) and not edit_mode and not _map_open and stick_move != null and not stick_move.active:
+			var rg: Vector2 = _down[rid]
+			_start_float_move(rid, _to_local(rg), rg, _now())
 	stick_move.smooth(dt, SMOOTH_MOVE)
 	stick_aim.smooth(dt, SMOOTH_AIM)
 	if not edit_mode:
 		_drive_move()
 		_update_aim()
 	_update_vision_ring()
-	if minimap_btn != null:
-		minimap_btn.queue_redraw()
-	if _map_open and mapview != null:
-		mapview.queue_redraw()
 	_acc += dt
 	if _acc >= 0.1:
 		_acc = 0.0
+		# Radar ve buyuk harita 10 Hz cizilir (her karede cizmek telefonda agir)
+		if minimap_btn != null:
+			minimap_btn.queue_redraw()
+		if _map_open and mapview != null:
+			mapview.queue_redraw()
 		_icon_t -= 0.1
 		if _icon_t <= 0.0:
 			_icon_t = 3.0

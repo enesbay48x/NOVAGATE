@@ -176,18 +176,40 @@ func use(id: String) -> bool:
 		# bekleme suresinde ucret alinmaz
 		game.toast("%s: bekleme süresi %d sn" % [dn, int(ceil(cd_left(id)))])
 		return false
+	var ok := false
 	match id:
 		"E-NB-01":
-			return _use_nuke(id)
+			ok = _use_nuke(id)
 		"E-WS-02":
-			return _use_shield(id)
+			ok = _use_shield(id)
 		"E-EMP-03":
-			return _use_ema(id)
+			ok = _use_ema(id)
 		"E-FR-05":
-			return _use_repair(id)
+			ok = _use_repair(id)
 		"E-ENT-06":
-			return _use_enc(id)
-	return false
+			ok = _use_enc(id)
+	# Basarili kullanimi ayni haritadaki diger oyunculara bildir (efekt onlarda da gorunsun)
+	if ok and game.net_on:
+		Net.send_extra(IDS.find(id))
+	return ok
+
+
+# Baska bir oyuncunun kullandigi ekstranin GORSELI (hasar/etki yok; hepsi sunucuda / kullanicida islenir).
+func play_remote(idx: int, node: Node3D) -> void:
+	if idx < 0 or idx >= IDS.size() or node == null or not is_instance_valid(node):
+		return
+	var id: String = IDS[idx]
+	match id:
+		"E-NB-01":
+			_play(id, node, Vector3(0, 1.0, 0), 22.0, 0.0, true, 99.0, false, false)
+		"E-WS-02":
+			_play(id, node, Vector3(0, 1.0, 0), 11.0, 0.0, true, SHIELD_TIME, true, false, 0.4, 0.15)
+		"E-EMP-03":
+			_play(id, node, Vector3(0, 1.0, 0), 30.0, 0.0, true, 99.0, false, false)
+		"E-FR-05":
+			_play(id, node, Vector3(0, 1.0, 0), 19.2, 0.0, false, REPAIR_FX_TIME, true, false, 0.5, 0.2)
+		"E-ENT-06":
+			_play(id, node, Vector3(0, 1.0, 0), 10.0, 0.0, true, ENC_TIME, true, false, 1.0, 0.2)
 
 
 func _start_cd(id: String) -> void:
