@@ -70,6 +70,8 @@ var _pinch_prev := -1.0
 var _icon_t := 0.0
 var _state_set := false
 var _aim_lock_prev := false
+var _map_preserved_move_touch := -1   # harita acilirken hareket stick'ine basili parmak (touch index)
+var _map_preserved_move_active := false
 
 var ws: float = DOData.S                # 1 DO birimi = ws Godot birimi (ic siniflar icin)
 var safe_r: float = DOData.SAFE_RADIUS
@@ -1169,8 +1171,16 @@ func _release(id: int, gpos: Vector2) -> bool:
 			_aim_target = null
 			queue_redraw()
 			if s.max_dev < AIM_MIN:
-				if game.fire:
-					game.fire = false   # joystick'e (cekmeden) basinca ates durur; HEDEF SECIMI KORUNUR
+				if s.role == "aim":
+					# Kisa tap: atesi toggle et veya en yakin hedefi kilitle + ates et
+					if shot != null and is_instance_valid(shot.node):
+						game._set_fire(not game.fire)   # Fix 2: toggle ateş (aciksa kapa, kapaliysa ac)
+					else:
+						# Fix 3: koni icinde hedef yok -> en yakin dusmani bul, kilitle, atese basla
+						var nearest := _find_nearest_enemy()
+						if nearest != null:
+							game.target = nearest
+							game._set_fire(true)
 			elif shot != null and is_instance_valid(shot.node):
 				_aim_fire(shot)
 		elif s.role == "move" and tap and bool(d.get("float", false)):
@@ -1487,6 +1497,25 @@ func _find_in_cone(po: Vector3, wd: Vector2):
 	return best
 
 
+# Koni disindaki en yakin dusmani bul (menzil icinde). Aim stick kisa tap ile kullanilir.
+func _find_nearest_enemy() -> Object:
+	var best = null
+	var best_dist := 1e9
+	var po: Vector3 = game.P.node.position
+	var range_u := DOData.LASER_RANGE * DOData.S * AIM_RANGE_MUL
+	for e in game.enemies:
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0:
+			continue
+		var v := Vector2(float(e.node.position.x) - po.x, float(e.node.position.z) - po.z)
+		var dist := v.length()
+		if dist > range_u:
+			continue
+		if dist < best_dist:
+			best_dist = dist
+			best = e
+	return best
+
+
 # Koninin ekrandaki sekli: dunya uzayinda yay uzerinden, kameradan gecirilerek hesaplanir (perspektife uyar).
 # _cone_rings[i] = i. serit sinirinin yayi (CONE_BANDS adet; sonuncusu menzilin ucu).
 func _build_cone(cam: Camera3D, po: Vector3, wd: Vector2) -> void:
@@ -1574,7 +1603,24 @@ func _map_rect() -> Rect2:
 func _open_map() -> void:
 	if _map_open or edit_mode or not active:
 		return
-	_reset_pointers()
+	# Hareket stick'ini koru: harita acilirken parmak cikmasin, hareket devam etsin.
+	# _reset_pointers() stick_move.end() cagirir ve hareketi durdurur; bunu engelle.
+	if stick_move != null and stick_move.active:
+		_map_preserved_move_active = true
+		for k in _ptr.keys():
+			if _ptr[k]["ctl"] == stick_move:
+				_map_preserved_move_touch = k
+				break
+	# Digel pointer'lari temizle, hareket stick'ini sonlandirma
+	var to_clear := []
+	for k in _ptr.keys():
+		if _ptr[k]["ctl"] != stick_move:
+			to_clear.append(k)
+	for k in to_clear:
+		var c = _ptr[k]["ctl"]
+		if c != null:
+			c.set_pressed(false)
+		_ptr.erase(k)
 	_map_open = true
 	if mapview != null:
 		mapview.visible = true
@@ -1586,6 +1632,13 @@ func _close_map() -> void:
 	_swallow_until = _now() + 0.3
 	if mapview != null:
 		mapview.visible = false
+	# Hareket stick'ini durdur: parmak harita acilirken kalktiyorsa stick'i bitir.
+	# Parmak haliyle basiliysa stick calismaya devam eder.
+	if _map_preserved_move_active and stick_move != null and stick_move.active:
+		if not _ptr.has(_map_preserved_move_touch):
+			stick_move.end()
+	_map_preserved_move_active = false
+	_map_preserved_move_touch = -1
 
 
 # Haritada bir noktaya dokunus: gemi oraya gider, harita kapanir. Disina ya da X'e dokunus: sadece kapanir.
