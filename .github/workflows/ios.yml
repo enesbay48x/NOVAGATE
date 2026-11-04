@@ -25,12 +25,26 @@ jobs:
 
       - name: Install iOS export templates
         run: |
-          curl -L -o ios_templates.zip "https://github.com/godotengine/godot-builds/releases/download/4.6.2-stable/ios_template.zip"
+          # Godot 4.6.2-stable için resmi export templates paketi (tpz = Godot Template Package, ZIP tabanlı)
+          # ios_template.zip bu release'te yok; doğru dosya Godot_v4.6.2-stable_export_templates.tpz'dır
+          curl -fL -o export_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.6.2-stable/Godot_v4.6.2-stable_export_templates.tpz"
+
+          # Arşivin geçerli bir ZIP/tpz olduğunu doğrula; değilse işlemi durdur
+          unzip -t export_templates.tpz > /dev/null
+
           mkdir -p /tmp/godot_templates
-          unzip -o -q ios_templates.zip -d /tmp/godot_templates
+          unzip -o -q export_templates.tpz -d /tmp/godot_templates
+
           echo "=== Template archive contents ==="
           find /tmp/godot_templates -type f | sort
+
+          # Arşiv içinde iOS template zip'ini bul
           IOS_ZIP=$(find /tmp/godot_templates -name "ios.zip" | head -1)
+          if [ -z "$IOS_ZIP" ]; then
+            echo "::error::No ios.zip found in Godot 4.6.2-stable export templates archive"
+            exit 1
+          fi
+
           echo "Found iOS template: $IOS_ZIP"
           TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.6.2.stable"
           mkdir -p "$TEMPL_DIR"
