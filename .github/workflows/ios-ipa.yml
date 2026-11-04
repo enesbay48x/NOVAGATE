@@ -60,7 +60,7 @@ jobs:
           sed -i '' 's/application\/code_sign_identity_release="-"/application\/code_sign_identity_release="Apple Distribution"/' export_presets.cfg
           echo "Team id configured in export_presets.cfg (from secret, not committed)"
 
-      - name: Export iOS app directly (no Xcode archive, no code signing)
+      - name: Export iOS Xcode project (Godot does not sign during project generation)
         run: |
           mkdir -p export/ios
           GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
@@ -68,22 +68,45 @@ jobs:
             GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
           fi
           echo "Using Godot binary: $GODOT_BIN"
-          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.app"
+          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
 
-      - name: Verify Godot produced a real .app bundle
+      - name: Disable code signing in Xcode project (pbxproj)
         run: |
-          if [ ! -d "export/ios/NOVAGATE.app" ]; then
-            echo "::error::Godot did not produce export/ios/NOVAGATE.app"
-            ls -la export/ios/ 2>/dev/null || true
+          PBXPROJ="export/ios/NOVAGATE.xcodeproj/project.pbxproj"
+          if [ ! -f "$PBXPROJ" ]; then
+            echo "::error::project.pbxproj not found in exported Xcode project"
             exit 1
           fi
-          echo "=== .app bundle contents ==="
-          find export/ios/NOVAGATE.app -maxdepth 2 -type f | sort | head -30
-          echo "Verified: export/ios/NOVAGATE.app is a real app bundle"
+          sed -i '' 's/CODE_SIGNING_ALLOWED = YES;/CODE_SIGNING_ALLOWED = NO;/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGN_IDENTITY = .*;/CODE_SIGN_IDENTITY = "";/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGN_STYLE = .*;/CODE_SIGN_STYLE = Manual;/g' "$PBXPROJ"
+          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = .*;/PROVISIONING_PROFILE_SPECIFIER = "";/g' "$PBXPROJ"
+          sed -i '' 's/DEVELOPMENT_TEAM = .*;/DEVELOPMENT_TEAM = "";/g' "$PBXPROJ"
+          echo "Code signing disabled in Xcode project"
+
+      - name: Build unsigned .app with xcodebuild
+        run: |
+          cd export/ios
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -derivedDataPath ../build/derived \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM=""
+          BUILT_APP=$(find ../build -name "*.app" -maxdepth 5 2>/dev/null | head -1)
+          if [ -z "$BUILT_APP" ]; then
+            echo "::error::No .app built by xcodebuild"
+            find ../build -maxdepth 5 -type d 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          echo "Built app: $BUILT_APP"
+          cp -R "$BUILT_APP" ../NOVAGATE-unsigned.app
+          echo "app_path=$(pwd)/../NOVAGATE-unsigned.app" >> $GITHUB_OUTPUT
 
       - name: Set iOS landscape orientation in .app bundle
         run: |
-          INFO_PLIST="export/ios/NOVAGATE.app/Info.plist"
+          INFO_PLIST="NOVAGATE-unsigned.app/Info.plist"
           if [ -f "$INFO_PLIST" ]; then
             /usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" "$INFO_PLIST" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations array" "$INFO_PLIST"
@@ -94,15 +117,25 @@ jobs:
             echo "Info.plist not found in .app bundle"
           fi
 
+      - name: Verify real .app bundle
+        run: |
+          if [ ! -d "NOVAGATE-unsigned.app" ]; then
+            echo "::error::NOVAGATE-unsigned.app not found"
+            exit 1
+          fi
+          echo "=== .app bundle contents ==="
+          find NOVAGATE-unsigned.app -maxdepth 2 -type f | sort | head -30
+          echo "Verified: NOVAGATE-unsigned.app is a real iOS app bundle"
+
       - name: Package unsigned .app into IPA
         run: |
-          if [ ! -d "export/ios/NOVAGATE.app" ]; then
-            echo "::error::Missing export/ios/NOVAGATE.app"
+          if [ ! -d "NOVAGATE-unsigned.app" ]; then
+            echo "::error::Missing NOVAGATE-unsigned.app"
             exit 1
           fi
           rm -rf Payload NOVAGATE-unsigned.ipa
           mkdir -p Payload
-          cp -R export/ios/NOVAGATE.app Payload/
+          cp -R NOVAGATE-unsigned.app Payload/
           zip -r NOVAGATE-unsigned.ipa Payload/
           echo "=== IPA contents ==="
           unzip -l NOVAGATE-unsigned.ipa | head -20
