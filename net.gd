@@ -4,7 +4,7 @@ extends Node
 #   Sunucu : godot --headless --path <proje> -- --server --port=7777
 #   Istemci: oyunun ana menusunde "Cok oyunculu" kutusunu isaretle, sunucu adresini yaz.
 
-const PROTO := 7   # 7: grup sistemi + s_npc_reward RPC; 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: sunucu otoriter guvenli bolge + kapi dogrulamasi; 4: bonus kutular
+const PROTO := 8   # 8: gemi degistirme sonucu (s_ship_result), mermi guncelleme (s_ammo_result), decrement_ammo, save_player_ammo; 7: grup sistemi + s_npc_reward RPC; 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: sunucu otoriter guvenli bolge + kapi dogrulamasi; 4: bonus kutular
 # ---- OTOMATIK BAGLANTI ----------------------------------------------------------
 # Yayin sunucusunun adresi (ornek: "54.x.x.x:7777" veya "oyun.alanadi.com:7777").
 # Doluysa: giris ekranindaki "Cok oyunculu" kutusu ve adres alani gizlenir, oyun giris yapinca
@@ -761,3 +761,10 @@ func s_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
 func s_ship_result(ok: bool, ship: String, error: String) -> void:
 	if gm != null and online:
 		gm.on_ship_result(ok, ship, error)
+
+
+# ================================================================== MERMI GUNCELLEME SONUCI (sunucu -> istemci)
+@rpc("authority", "call_remote", "reliable")
+func s_ammo_result(ok: bool, ammo_id: String, new_qty: int, error: String) -> void:
+	if gm != null and online:
+		gm.on_ammo_result(ok, ammo_id, new_qty, error)

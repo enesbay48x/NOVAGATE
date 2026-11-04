@@ -1515,6 +1515,11 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 str(msg.get("ammo_id", "")),
                 int(msg.get("quantity", 1)),
             )
+        elif method == "save_player_ammo":
+            resp = save_player_ammo(
+                int(msg.get("account_id", 0)),
+                msg.get("ammo_dict", {}),
+            )
         elif method == "backup":
             backup_key = msg.get("backup_key", "")
             if isinstance(backup_key, str):
@@ -1609,6 +1614,39 @@ def decrement_ammo(account_id: int, ammo_id: str, quantity: int) -> dict:
         except Exception:
             pass
         log.error("decrement_ammo hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+def save_player_ammo(account_id: int, ammo_dict: dict) -> dict:
+    """
+    Oyuncunun tum mermisini atomik olarak kaydeder (oturum sonu/dual session
+    guvenligi icin). Her bir ammo_id'nin miktarini UPSERT ile yazar.
+    """
+    account_id = int(account_id)
+    if not isinstance(ammo_dict, dict):
+        return {"ok": False, "error": "invalid_ammo_dict"}
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for ammo_id, qty in ammo_dict.items():
+            qty = int(qty)
+            if qty < 0:
+                qty = 0
+            conn.execute(
+                "INSERT INTO ammo (account_id, ammo_id, quantity) VALUES (?, ?, ?) "
+                "ON CONFLICT(account_id, ammo_id) DO UPDATE SET quantity = excluded.quantity",
+                (account_id, str(ammo_id), qty),
+            )
+        conn.execute("COMMIT")
+        return {"ok": True}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("save_player_ammo hata: %s", e)
         return {"ok": False, "error": "internal"}
     finally:
         conn.close()

@@ -638,6 +638,14 @@ func on_disconnect(peer: int, release_lock: bool = true) -> void:
 				"px": float(pos.x),
 				"pz": float(pos.z),
 			})
+	# Mermiyi kaydet (ayrilişte): eski oturum dusulmeden once DB'ye yazilmali
+	if p.has("account_id"):
+		var _ammo: Dictionary = p.get("_sv_ammo", {})
+		if _ammo.size() > 0:
+			db_send("save_player_ammo", {
+				"account_id": int(p.account_id),
+				"ammo_dict": _ammo,
+			})
 	# Combat Logout: oyuncuyu players'dan sil ve ghost_players'a al.
 	# Gemi haritada gorunur kalir; sure dolunca s_pleave yayıp kalmasi gerekirse silinir.
 	var acct_id: int = int(p.get("account_id", 0))
@@ -935,6 +943,8 @@ func on_fire_vis(peer: int, kind: int, ref: int, nb: int, ammo: String) -> void:
 	fp["_sv_ammo"] = ammo_dict
 	_register_attack(players[peer])   # ates acmak (NPC ya da oyuncuya) korumayi derhal kaldirir
 	_bcast(str(players[peer].map), "s_fire", [peer, kind, ref, clampi(nb, 1, 10), ammo], peer)
+	# Istemciye mermi guncellemesi gonder (ucuz RPC, her atista)
+	net.callv("rpc_id", [peer, "s_ammo_result", true, ammo, int(ammo_dict.get(ammo, 0)), ""])
 
 
 func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
