@@ -60,7 +60,7 @@ jobs:
           sed -i '' 's/application\/code_sign_identity_release="-"/application\/code_sign_identity_release="Apple Distribution"/' export_presets.cfg
           echo "Team id configured in export_presets.cfg (from secret, not committed)"
 
-      - name: Export iOS Xcode project
+      - name: Export iOS app directly (no Xcode archive, no code signing)
         run: |
           mkdir -p export/ios
           GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
@@ -68,52 +68,47 @@ jobs:
             GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
           fi
           echo "Using Godot binary: $GODOT_BIN"
-          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
+          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.app"
 
-      - name: Set iOS landscape orientation
+      - name: Verify Godot produced a real .app bundle
         run: |
-          INFO_PLIST="export/ios/NOVAGATE.xcodeproj/NOVAGATE-Info.plist"
+          if [ ! -d "export/ios/NOVAGATE.app" ]; then
+            echo "::error::Godot did not produce export/ios/NOVAGATE.app"
+            ls -la export/ios/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "=== .app bundle contents ==="
+          find export/ios/NOVAGATE.app -maxdepth 2 -type f | sort | head -30
+          echo "Verified: export/ios/NOVAGATE.app is a real app bundle"
+
+      - name: Set iOS landscape orientation in .app bundle
+        run: |
+          INFO_PLIST="export/ios/NOVAGATE.app/Info.plist"
           if [ -f "$INFO_PLIST" ]; then
             /usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" "$INFO_PLIST" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations array" "$INFO_PLIST"
             /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationLandscapeLeft" "$INFO_PLIST"
             /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeRight" "$INFO_PLIST"
-            echo "Landscape orientation set"
+            echo "Landscape orientation set in $INFO_PLIST"
           else
-            echo "Info.plist not found; orientation managed by Xcode project"
+            echo "Info.plist not found in .app bundle"
           fi
 
-      - name: Write ExportOptions.plist (unsigned)
+      - name: Package unsigned .app into IPA
         run: |
-          mkdir -p export/ios
-          cat > export/ios/ExportOptions.plist <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTDs Property List 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>development</string>
-              <key>signingStyle</key>
-              <string>manual</string>
-              <key>teamID</key>
-              <string></string>
-              <key>provisioningProfiles</key>
-              <dict></dict>
-          </dict>
-          </plist>
-          EOF
-
-      - name: Build unsigned IPA with xcodebuild
-        id: build_unsigned
-        run: |
-          cd export/ios
-          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -archivePath ../build/NOVAGATE.xcarchive archive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
-          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+          if [ ! -d "export/ios/NOVAGATE.app" ]; then
+            echo "::error::Missing export/ios/NOVAGATE.app"
+            exit 1
+          fi
+          rm -rf Payload NOVAGATE-unsigned.ipa
           mkdir -p Payload
-          cp -R "../build/ios/NOVAGATE.app" Payload/
-          zip -r ../../NOVAGATE-unsigned.ipa Payload/
-          echo "ipa_path=$(pwd)/../../NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
+          cp -R export/ios/NOVAGATE.app Payload/
+          zip -r NOVAGATE-unsigned.ipa Payload/
+          echo "=== IPA contents ==="
+          unzip -l NOVAGATE-unsigned.ipa | head -20
+          echo "ipa_path=$(pwd)/NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
           echo "ipa_name=NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
+          echo "Unsigned IPA created: NOVAGATE-unsigned.ipa"
 
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4

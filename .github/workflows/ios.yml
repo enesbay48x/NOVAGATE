@@ -60,7 +60,7 @@ jobs:
           echo "Using Godot binary: $GODOT_BIN"
           "$GODOT_BIN" --headless --path . --import
 
-      - name: Export iOS Xcode project
+      - name: Export iOS app directly (no Xcode archive, no code signing)
         run: |
           mkdir -p export/ios
           GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
@@ -68,16 +68,32 @@ jobs:
             GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
           fi
           echo "Using Godot binary: $GODOT_BIN"
-          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
+          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.app"
 
-      - name: Build unsigned .ipa with xcodebuild
+      - name: Verify Godot produced a real .app bundle
         run: |
-          cd export/ios
-          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -archivePath ../build/NOVAGATE.xcarchive archive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
-          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+          if [ ! -d "export/ios/NOVAGATE.app" ]; then
+            echo "::error::Godot did not produce export/ios/NOVAGATE.app"
+            ls -la export/ios/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "=== .app bundle contents ==="
+          find export/ios/NOVAGATE.app -maxdepth 2 -type f | sort | head -30
+          echo "Verified: export/ios/NOVAGATE.app is a real macOS/iOS app bundle"
+
+      - name: Package unsigned .app into IPA
+        run: |
+          if [ ! -d "export/ios/NOVAGATE.app" ]; then
+            echo "::error::Missing export/ios/NOVAGATE.app"
+            exit 1
+          fi
+          rm -rf Payload NOVAGATE.ipa
           mkdir -p Payload
-          cp -R "../build/ios/NOVAGATE.app" Payload/
-          zip -r ../../NOVAGATE.ipa Payload/
+          cp -R export/ios/NOVAGATE.app Payload/
+          zip -r NOVAGATE.ipa Payload/
+          echo "=== IPA contents ==="
+          unzip -l NOVAGATE.ipa | head -20
+          echo "Unsigned IPA created: NOVAGATE.ipa"
 
       - name: Upload .ipa artifact
         uses: actions/upload-artifact@v4
