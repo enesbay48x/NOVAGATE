@@ -72,6 +72,8 @@ var _state_set := false
 var _aim_lock_prev := false
 var _map_preserved_move_touch := -1   # harita acilirken hareket stick'ine basili parmak (touch index)
 var _map_preserved_move_active := false
+var _diag_label: Label = null         # DIAG: gecici debug etiketi (2 saniye gorunur)
+var _diag_timer := 0.0                # DIAG: debug etiketi gosterim sure sayaci
 
 var ws: float = DOData.S                # 1 DO birimi = ws Godot birimi (ic siniflar icin)
 var safe_r: float = DOData.SAFE_RADIUS
@@ -1171,16 +1173,22 @@ func _release(id: int, gpos: Vector2) -> bool:
 			_aim_target = null
 			queue_redraw()
 			if s.max_dev < AIM_MIN:
-				if s.role == "aim":
-					# Kisa tap: atesi toggle et veya en yakin hedefi kilitle + ates et
-					if shot != null and is_instance_valid(shot.node):
-						game._set_fire(not game.fire)   # Fix 2: toggle ateş (aciksa kapa, kapaliysa ac)
+				# DIAG: aim stick kisa tap (teshis)
+				if game.fire:
+					# DIAG: ates acikti, sadece kapa (hedef arama yok)
+					game._set_fire(false)
+					_diag_show("ATES KAPATILDI")
+				else:
+					# DIAG: ates kapaliydi, once koni (shot), sonra en yakin dusman ara
+					var target := shot
+					if target == null or not is_instance_valid(target.node):
+						target = _find_nearest_enemy()
+					if target != null and is_instance_valid(target.node):
+						game.target = target
+						game._set_fire(true)
+						_diag_show("HEDEF KILITLENDI + ATES")
 					else:
-						# Fix 3: koni icinde hedef yok -> en yakin dusmani bul, kilitle, atese basla
-						var nearest := _find_nearest_enemy()
-						if nearest != null:
-							game.target = nearest
-							game._set_fire(true)
+						_diag_show("HEDEF BULUNAMADI")
 			elif shot != null and is_instance_valid(shot.node):
 				_aim_fire(shot)
 		elif s.role == "move" and tap and bool(d.get("float", false)):
@@ -1237,6 +1245,24 @@ func _reset_pointers() -> void:
 func _haptic(ms: int) -> void:
 	if OS.has_feature("mobile"):
 		Input.vibrate_handheld(ms)
+
+
+# DIAG: ekranda 2 saniye gorunur, sonra kaybolur (sadece gelistirme icin; # DIAG yorumlari ile kolay bulunup silinebilir)
+func _diag_show(text: String) -> void:
+	if _diag_label == null:
+		_diag_label = Label.new()
+		_diag_label.add_theme_font_override("font", font)
+		_diag_label.add_theme_font_size_override("font_size", 16)
+		_diag_label.add_theme_color_override("font_color", Color(1, 1, 0))
+		_diag_label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
+		_diag_label.add_theme_constant_override("outline_size", 3)
+		_diag_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(_diag_label)
+	_diag_label.text = text
+	_diag_label.position = Vector2(get_viewport_rect().size.x * 0.5 - 150, 40)
+	_diag_label.size = Vector2(300, 24)
+	_diag_label.visible = true
+	_diag_timer = 2.0
 
 
 func _btn_action(id: String) -> void:
@@ -1785,6 +1811,13 @@ func _process(dt: float) -> void:
 			_icon_t = 3.0
 			_load_icons()
 		_refresh()
+	# DIAG: gecici debug etiketi sure sayaci (2 saniye sonra kaybolur)
+	if _diag_timer > 0.0:
+		_diag_timer -= dt
+		if _diag_timer <= 0.0:
+			_diag_timer = 0.0
+			if _diag_label != null:
+				_diag_label.visible = false
 
 
 func _load_icons() -> void:
