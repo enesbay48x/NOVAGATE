@@ -27,7 +27,6 @@ jobs:
 
       - name: Install iOS export templates
         run: |
-          # 4.7-stable release'de "ios_template.zip" yok; resmi export templates paketi kullaniliyor
           curl -fL -o export_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_export_templates.tpz"
           unzip -t export_templates.tpz > /dev/null
           mkdir -p /tmp/godot_templates
@@ -105,25 +104,44 @@ jobs:
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM=""
-          # Build agacinda NOVAGATE.app dosyasini ara
-          BUILT_APP=$(find "$PWD/../build" -name "NOVAGATE.app" -maxdepth 15 2>/dev/null | head -1)
-          if [ -z "$BUILT_APP" ]; then
-            echo "::warning::NOVAGATE.app bulunamadi, tum .app dosyalari listeleniyor:"
-            find "$PWD/../build" -name "*.app" -maxdepth 15 2>/dev/null || true
-            echo "=== Tum dosyalar build altinda ==="
-            find "$PWD/../build" -maxdepth 15 -type f 2>/dev/null | head -80 || true
-            echo "::error::No NOVAGATE.app built by xcodebuild under $PWD/../build"
+
+          echo "=== CURRENT DIRECTORY ==="
+          pwd
+          echo "=== REPOSITORY ROOT ==="
+          ls -la "$PWD/.."
+          echo "=== ALL APP BUNDLES UNDER REPO ==="
+          find "$PWD/.." -type d -name "*.app" -maxdepth 10 2>/dev/null || true
+          echo "=== BUILD DIRECTORIES ==="
+          find "$PWD/.." -maxdepth 5 -type d \( -name "build" -o -name "Build" \) -print 2>/dev/null || true
+          echo "=== SYMROOT CONTENTS ==="
+          SYMROOT_DIR="$PWD/../build/symroot"
+          if [ -d "$SYMROOT_DIR" ]; then
+            find "$SYMROOT_DIR" -maxdepth 6 -print 2>/dev/null || true
+          else
+            echo "SYMROOT directory does not exist: $SYMROOT_DIR"
+          fi
+
+          APP_PATH=$(find "$PWD/../build" -type d -name "NOVAGATE.app" -maxdepth 15 2>/dev/null | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find "$PWD/../build" -type d -name "*.app" -maxdepth 15 2>/dev/null | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app bundle found under $PWD/../build after xcodebuild"
             exit 1
           fi
-          echo "Built app found: $BUILT_APP"
-          rm -rf "$PWD/../NOVAGATE-unsigned.app"
-          cp -R "$BUILT_APP" "$PWD/../NOVAGATE-unsigned.app"
-          echo "Copied to: $PWD/../NOVAGATE-unsigned.app"
-          echo "app_path=$PWD/../NOVAGATE-unsigned.app" >> $GITHUB_OUTPUT
+
+          echo "=== REAL .app FOUND ==="
+          echo "$APP_PATH"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
       - name: Set iOS landscape orientation in .app bundle
         run: |
-          INFO_PLIST="NOVAGATE-unsigned.app/Info.plist"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::APP_PATH environment variable is empty"
+            exit 1
+          fi
+          INFO_PLIST="$APP_PATH/Info.plist"
           if [ -f "$INFO_PLIST" ]; then
             /usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" "$INFO_PLIST" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations array" "$INFO_PLIST"
@@ -131,54 +149,67 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeRight" "$INFO_PLIST"
             echo "Landscape orientation set in $INFO_PLIST"
           else
-            echo "Info.plist not found in .app bundle"
+            echo "Info.plist not found in .app bundle: $APP_PATH"
           fi
 
       - name: Verify real .app bundle
         run: |
-          if [ ! -d "NOVAGATE-unsigned.app" ]; then
-            echo "::error::NOVAGATE-unsigned.app not found at repo root"
-            echo "=== Files at repo root ==="
-            ls -la
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::APP_PATH environment variable is empty"
             exit 1
           fi
-          if [ ! -f "NOVAGATE-unsigned.app/Info.plist" ]; then
-            echo "::error::NOVAGATE-unsigned.app/Info.plist missing - not a real app bundle"
+          echo "Verifying APP_PATH: $APP_PATH"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::APP_PATH is not a directory: $APP_PATH"
+            exit 1
+          fi
+          if [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::APP_PATH does not contain Info.plist: $APP_PATH"
             exit 1
           fi
           echo "=== .app bundle contents ==="
-          find NOVAGATE-unsigned.app -maxdepth 4 -type f | sort | head -60
-          echo "Verified: NOVAGATE-unsigned.app is a real iOS app bundle"
+          find "$APP_PATH" -maxdepth 4 -type f | sort | head -60
+          echo "Verified: $APP_PATH is a real iOS app bundle"
 
       - name: Package unsigned .app into IPA
         run: |
-          if [ ! -d "NOVAGATE-unsigned.app" ]; then
-            echo "::error::Missing NOVAGATE-unsigned.app"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::APP_PATH environment variable is empty"
+            exit 1
+          fi
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Missing .app bundle at: $APP_PATH"
             exit 1
           fi
           rm -rf Payload NOVAGATE-unsigned.ipa
           mkdir -p Payload
-          cp -R NOVAGATE-unsigned.app Payload/NOVAGATE-unsigned.app
+          cp -R "$APP_PATH" Payload/NOVAGATE.app
           zip -r NOVAGATE-unsigned.ipa Payload/
+
+          IPA_PATH="$PWD/NOVAGATE-unsigned.ipa"
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA file was not created: $IPA_PATH"
+            exit 1
+          fi
           echo "=== IPA contents ==="
-          unzip -l NOVAGATE-unsigned.ipa
-          if ! unzip -t NOVAGATE-unsigned.ipa > /dev/null; then
+          unzip -l "$IPA_PATH"
+          if ! unzip -t "$IPA_PATH" > /dev/null; then
             echo "::error::IPA zip integrity check failed"
             exit 1
           fi
-          if ! unzip -l NOVAGATE-unsigned.ipa | grep -q "Payload/NOVAGATE-unsigned.app/Info.plist"; then
-            echo "::error::IPA does not contain Payload/NOVAGATE-unsigned.app/Info.plist"
+          if ! unzip -l "$IPA_PATH" | grep -q "Payload/NOVAGATE.app/Info.plist"; then
+            echo "::error::IPA does not contain Payload/NOVAGATE.app/Info.plist"
             exit 1
           fi
-          echo "ipa_path=$(pwd)/NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
-          echo "ipa_name=NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
-          echo "Unsigned IPA created: NOVAGATE-unsigned.ipa"
+          echo "Unsigned IPA created: $IPA_PATH"
 
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: NOVAGATE-unsigned-ipa
-          path: NOVAGATE-unsigned.ipa
+          path: ${{ env.IPA_PATH }}
           retention-days: 7
 
       - name: Import Apple certificate and provisioning profile
@@ -226,27 +257,28 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER=""
           xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist
-          if [ ! -d "../build/ios/NOVAGATE.app" ]; then
-            echo "::error::Signed .app not found at ../build/ios/NOVAGATE.app"
+          SIGNED_APP_PATH="$PWD/../build/ios/NOVAGATE.app"
+          if [ ! -d "$SIGNED_APP_PATH" ]; then
+            echo "::error::Signed .app not found at $SIGNED_APP_PATH"
             echo "=== Files under ../build/ios ==="
             find ../build/ios -maxdepth 5 -type f 2>/dev/null | head -50 || true
             exit 1
           fi
           rm -rf Payload NOVAGATE.ipa
           mkdir -p Payload
-          cp -R "../build/ios/NOVAGATE.app" Payload/NOVAGATE.app
+          cp -R "$SIGNED_APP_PATH" Payload/NOVAGATE.app
           zip -r ../../NOVAGATE.ipa Payload/
+          SIGNED_IPA_PATH="$PWD/../../NOVAGATE.ipa"
+          echo "SIGNED_IPA_PATH=$SIGNED_IPA_PATH" >> "$GITHUB_ENV"
           echo "=== Signed IPA contents ==="
-          unzip -l ../../NOVAGATE.ipa | head -20
-          echo "ipa_path=$(pwd)/../../NOVAGATE.ipa" >> $GITHUB_OUTPUT
-          echo "ipa_name=NOVAGATE.ipa" >> $GITHUB_OUTPUT
+          unzip -l "$SIGNED_IPA_PATH" | head -20
 
       - name: Upload signed IPA artifact
         if: steps.check_secrets.outputs.has_secrets == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: NOVAGATE-signed-ipa
-          path: NOVAGATE.ipa
+          path: ${{ env.SIGNED_IPA_PATH }}
           retention-days: 7
 
       - name: Collect IPA files for release

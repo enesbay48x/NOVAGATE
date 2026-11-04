@@ -75,7 +75,6 @@ jobs:
       - name: Build unsigned .app with xcodebuild
         run: |
           cd export/ios
-          # Deterministik ç˙ıkış klasoru: SYMROOT ile build ciktisini belli bir yere topla
           rm -rf ../build
           mkdir -p ../build
           xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos \
@@ -87,67 +86,94 @@ jobs:
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM=""
-          # Build agacinda tum .app dosyalarini ara (recursive, derinlik sansirli)
-          BUILT_APP=$(find "$PWD/../build" -name "NOVAGATE.app" -maxdepth 15 2>/dev/null | head -1)
-          if [ -z "$BUILT_APP" ]; then
-            # Proje ismiyle eslesmeyen ama generic .app varsa onlari da listele
-            echo "::warning::NOVAGATE.app bulunamadi, tum .app dosyalari listeleniyor:"
-            find "$PWD/../build" -name "*.app" -maxdepth 15 2>/dev/null || true
-            echo "=== Tum dosyalar build altinda ==="
-            find "$PWD/../build" -maxdepth 15 -type f 2>/dev/null | head -80 || true
-            echo "::error::No NOVAGATE.app built by xcodebuild under $PWD/../build"
+
+          echo "=== CURRENT DIRECTORY ==="
+          pwd
+          echo "=== REPOSITORY ROOT ==="
+          ls -la "$PWD/.."
+          echo "=== ALL APP BUNDLES UNDER REPO ==="
+          find "$PWD/.." -type d -name "*.app" -maxdepth 10 2>/dev/null || true
+          echo "=== BUILD DIRECTORIES ==="
+          find "$PWD/.." -maxdepth 5 -type d \( -name "build" -o -name "Build" \) -print 2>/dev/null || true
+          echo "=== SYMROOT CONTENTS ==="
+          SYMROOT_DIR="$PWD/../build/symroot"
+          if [ -d "$SYMROOT_DIR" ]; then
+            find "$SYMROOT_DIR" -maxdepth 6 -print 2>/dev/null || true
+          else
+            echo "SYMROOT directory does not exist: $SYMROOT_DIR"
+          fi
+
+          # Deterministik yonetim: once NOVAGATE.app ara, yoksa ilk .app al
+          APP_PATH=$(find "$PWD/../build" -type d -name "NOVAGATE.app" -maxdepth 15 2>/dev/null | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find "$PWD/../build" -type d -name "*.app" -maxdepth 15 2>/dev/null | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app bundle found under $PWD/../build after xcodebuild"
             exit 1
           fi
-          echo "Built app found: $BUILT_APP"
-          # Repo kokuya kopyala (her adim repo kokusunda basladigi icin $PWD/../ = repo kokudur)
-          rm -rf "$PWD/../NOVAGATE.app"
-          cp -R "$BUILT_APP" "$PWD/../NOVAGATE.app"
-          echo "Copied to: $PWD/../NOVAGATE.app"
-          echo "app_path=$PWD/../NOVAGATE.app" >> $GITHUB_OUTPUT
+
+          echo "=== REAL .app FOUND ==="
+          echo "$APP_PATH"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
       - name: Verify real .app bundle
         run: |
-          if [ ! -d "NOVAGATE.app" ]; then
-            echo "::error::NOVAGATE.app not found at repo root"
-            echo "=== Files at repo root ==="
-            ls -la
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::APP_PATH environment variable is empty"
             exit 1
           fi
-          if [ ! -f "NOVAGATE.app/Info.plist" ]; then
-            echo "::error::NOVAGATE.app/Info.plist missing - not a real app bundle"
+          echo "Verifying APP_PATH: $APP_PATH"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::APP_PATH is not a directory: $APP_PATH"
+            exit 1
+          fi
+          if [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "::error::APP_PATH does not contain Info.plist: $APP_PATH"
             exit 1
           fi
           echo "=== .app bundle contents ==="
-          find NOVAGATE.app -maxdepth 4 -type f | sort | head -60
-          echo "Verified: NOVAGATE.app is a real iOS app bundle"
+          find "$APP_PATH" -maxdepth 4 -type f | sort | head -60
+          echo "Verified: $APP_PATH is a real iOS app bundle"
 
       - name: Package unsigned .app into IPA
         run: |
-          if [ ! -d "NOVAGATE.app" ]; then
-            echo "::error::Missing NOVAGATE.app"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::APP_PATH environment variable is empty"
+            exit 1
+          fi
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Missing .app bundle at: $APP_PATH"
             exit 1
           fi
           rm -rf Payload NOVAGATE.ipa
           mkdir -p Payload
-          cp -R NOVAGATE.app Payload/NOVAGATE.app
+          cp -R "$APP_PATH" Payload/NOVAGATE.app
           zip -r NOVAGATE.ipa Payload/
+
+          IPA_PATH="$PWD/NOVAGATE.ipa"
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA file was not created: $IPA_PATH"
+            exit 1
+          fi
           echo "=== IPA contents ==="
-          unzip -l NOVAGATE.ipa
-          if ! unzip -t NOVAGATE.ipa > /dev/null; then
+          unzip -l "$IPA_PATH"
+          if ! unzip -t "$IPA_PATH" > /dev/null; then
             echo "::error::IPA zip integrity check failed"
             exit 1
           fi
-          if ! unzip -l NOVAGATE.ipa | grep -q "Payload/NOVAGATE.app/Info.plist"; then
+          if ! unzip -l "$IPA_PATH" | grep -q "Payload/NOVAGATE.app/Info.plist"; then
             echo "::error::IPA does not contain Payload/NOVAGATE.app/Info.plist"
             exit 1
           fi
-          echo "ipa_path=$(pwd)/NOVAGATE.ipa" >> $GITHUB_OUTPUT
-          echo "ipa_name=NOVAGATE.ipa" >> $GITHUB_OUTPUT
-          echo "Unsigned IPA created: NOVAGATE.ipa"
+          echo "Unsigned IPA created: $IPA_PATH"
 
       - name: Upload .ipa artifact
         uses: actions/upload-artifact@v4
         with:
           name: NOVAGATE-ipa
-          path: NOVAGATE.ipa
+          path: ${{ env.IPA_PATH }}
           retention-days: 7
