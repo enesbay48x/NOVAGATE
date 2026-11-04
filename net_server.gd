@@ -2248,3 +2248,26 @@ func on_purchase_item(peer: int, item_id: String, quantity: int, tx_id: String) 
 		var err: String = str(resp.get("error", "bilinmeyen hata"))
 		print("[SUNUCU] market alimi basarisiz: account_id=%d, item=%s, hata=%s" % [acct_id, item_id, err])
 		net.callv("rpc_id", [peer, "s_purchase_result", false, err, tx_id, 0, 0])
+
+
+func _notification(what: int) -> void:
+	if what == 1012:  # NotificationWMCloseRequest
+		# Sunucu kapatilirken tum online oyuncularin mermisini DB'ye flush et
+		print("[SUNUCU] Kapatma sinyali alindi, tum oyuncularin mermisi DB'ye yaziliyor...")
+		for pid in players.keys().duplicate():
+			if players.has(pid):
+				_flush_player_ammo(pid)
+		# Konum da kaydet
+		for pid in players.keys().duplicate():
+			if players.has(pid):
+				var p: Dictionary = players[pid]
+				if p.has("account_id") and str(p.map) != "":
+					var pos: Vector3 = p.pos
+					if pos.x != 0.0 or pos.y != 0.0 or pos.z != 0.0:
+						db_send("save_player_position", {
+							"account_id": int(p.account_id),
+							"map_name": str(p.map),
+							"px": float(pos.x),
+							"pz": float(pos.z),
+						})
+		print("[SUNUCU] Tum oyuncularin mermi ve konumu kaydedildi.")
