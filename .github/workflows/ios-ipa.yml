@@ -1,0 +1,137 @@
+name: iOS IPA Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-ios-ipa:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Godot 4.7-stable macOS editor
+        run: |
+          curl -L -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_macos.universal.zip"
+          unzip -o -q godot.zip -d /Applications
+
+      - name: Install iOS export templates
+        run: |
+          curl -L -o ios_templates.zip "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/ios_template.zip"
+          mkdir -p /tmp/godot_templates
+          unzip -o -q ios_templates.zip -d /tmp/godot_templates
+          echo "=== iOS export template contents ==="
+          find /tmp/godot_templates -type f | sort
+          IOS_ZIP=$(find /tmp/godot_templates -name "ios.zip" | head -1)
+          echo "Found iOS template: $IOS_ZIP"
+          TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.7.stable"
+          mkdir -p "$TEMPL_DIR"
+          cp "$IOS_ZIP" "$TEMPL_DIR/ios.zip"
+          echo "Copied to: $TEMPL_DIR/ios.zip"
+
+      - name: Import assets (Godot headless)
+        run: |
+          GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
+          if [ -z "$GODOT_BIN" ]; then
+            GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
+          fi
+          echo "Using Godot binary: $GODOT_BIN"
+          "$GODOT_BIN" --headless --path . --import
+
+      - name: Export iOS Xcode project
+        run: |
+          mkdir -p export/ios
+          GODOT_BIN=$(ls /Applications/Godot*.app/Contents/MacOS/Godot 2>/dev/null | head -1)
+          if [ -z "$GODOT_BIN" ]; then
+            GODOT_BIN=$(find /Applications -maxdepth 2 -name "Godot" -type f -executable 2>/dev/null | head -1)
+          fi
+          echo "Using Godot binary: $GODOT_BIN"
+          "$GODOT_BIN" --headless --path . --export-release "iOS" "export/ios/NOVAGATE.xcodeproj"
+
+      - name: Build unsigned IPA with xcodebuild
+        id: build_unsigned
+        run: |
+          cd export/ios
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -archivePath ../build/NOVAGATE.xcarchive archive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+          mkdir -p Payload
+          cp -R "../build/ios/NOVAGATE.app" Payload/
+          zip -r ../../NOVAGATE-unsigned.ipa Payload/
+          echo "ipa_path=../../NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
+          echo "ipa_name=NOVAGATE-unsigned.ipa" >> $GITHUB_OUTPUT
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVAGATE-unsigned-ipa
+          path: NOVAGATE-unsigned.ipa
+          retention-days: 7
+
+      - name: Check for Apple signing secrets
+        id: check_secrets
+        run: |
+          if [ -n "${{ secrets.APPLE_CERT_P12_BASE64 }}" ] && [ -n "${{ secrets.APPLE_CERT_PASSWORD }}" ] && [ -n "${{ secrets.APPLE_PROVISION_PROFILE_BASE64 }}" ] && [ -n "${{ secrets.APPLE_TEAM_ID }}" ]; then
+            echo "has_secrets=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_secrets=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Import Apple certificate and provisioning profile
+        if: steps.check_secrets.outputs.has_secrets == 'true'
+        run: |
+          security create-keychain -p build-keychain build.keychain
+          security unlock-keychain -p build-keychain build.keychain
+          security set-keychain-settings -t 7200 -l build-keychain
+
+          echo "${{ secrets.APPLE_CERT_P12_BASE64 }}" | base64 -d > cert.p12
+          security import cert.p12 -k build.keychain -P "${{ secrets.APPLE_CERT_PASSWORD }}" -T /usr/bin/codesign -T /usr/bin/security
+
+          echo "${{ secrets.APPLE_PROVISION_PROFILE_BASE64 }}" | base64 -d > provisioning.mobileprovision
+          cp provisioning.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/"
+
+          sed -i '' 's/application\/app_store_team_id="[^"]*"/application\/app_store_team_id="'"${{ secrets.APPLE_TEAM_ID }}"'"/' export_presets.cfg
+          sed -i '' 's/application\/code_sign_identity_release="-"/application\/code_sign_identity_release="Apple Distribution"/' export_presets.cfg
+
+      - name: Build signed IPA (if secrets available)
+        if: steps.check_secrets.outputs.has_secrets == 'true'
+        run: |
+          cd export/ios
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -archivePath ../build/NOVAGATE.xcarchive archive
+          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist
+          mkdir -p Payload
+          cp -R "../build/ios/NOVAGATE.app" Payload/
+          zip -r ../../NOVAGATE.ipa Payload/
+          echo "ipa_path=../../NOVAGATE.ipa" >> $GITHUB_OUTPUT
+          echo "ipa_name=NOVAGATE.ipa" >> $GITHUB_OUTPUT
+
+      - name: Upload signed IPA artifact
+        if: steps.check_secrets.outputs.has_secrets == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVAGATE-signed-ipa
+          path: NOVAGATE.ipa
+          retention-days: 7
+
+      - name: Create GitHub Release (tagged pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          name: NOVAGATE iOS ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        files:
+          NOVAGATE-unsigned.ipa
