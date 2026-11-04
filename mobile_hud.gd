@@ -70,6 +70,11 @@ var _pinch_prev := -1.0
 var _icon_t := 0.0
 var _state_set := false
 var _aim_lock_prev := false
+var _map_preserved_move_touch := -1   # harita acilirken hareket stick'ine basili parmak (touch index)
+var _map_preserved_move_active := false
+var _diag_label: Label = null         # DIAG: gecici debug etiketi (2 saniye gorunur)
+var _diag_timer := 0.0                # DIAG: debug etiketi gosterim sure sayaci
+var _diag_lines: Array = []           # DIAG: son 3 mesajin buffer'i (ust uste binmesin)
 
 var ws: float = DOData.S                # 1 DO birimi = ws Godot birimi (ic siniflar icin)
 var safe_r: float = DOData.SAFE_RADIUS
@@ -1169,8 +1174,22 @@ func _release(id: int, gpos: Vector2) -> bool:
 			_aim_target = null
 			queue_redraw()
 			if s.max_dev < AIM_MIN:
+				# DIAG: aim stick kisa tap (teshis)
 				if game.fire:
-					game.fire = false   # joystick'e (cekmeden) basinca ates durur; HEDEF SECIMI KORUNUR
+					# DIAG: ates acikti, sadece kapa (hedef arama yok)
+					game._set_fire(false)
+					_diag_show("ATES KAPATILDI")
+				else:
+					# DIAG: ates kapaliydi, once koni (shot), sonra en yakin dusman ara
+					var target := shot
+					if target == null or not is_instance_valid(target.node):
+						target = _find_nearest_enemy()
+					if target != null and is_instance_valid(target.node):
+						game.target = target
+						game._set_fire(true)
+						_diag_show("HEDEF KILITLENDI + ATES")
+					else:
+						_diag_show("HEDEF BULUNAMADI")
 			elif shot != null and is_instance_valid(shot.node):
 				_aim_fire(shot)
 		elif s.role == "move" and tap and bool(d.get("float", false)):
@@ -1229,11 +1248,39 @@ func _haptic(ms: int) -> void:
 		Input.vibrate_handheld(ms)
 
 
+# DIAG: ekranda 2 saniye gorunur, sonra kaybolur (sadece gelistirme icin; # DIAG yorumlari ile kolay bulunup silinebilir)
+# Yeni mesaj eskisine eklenir, son 3 satir gorunur (ust uste binmez).
+func _diag_show(text: String) -> void:
+	if _diag_label == null:
+		_diag_label = Label.new()
+		if font != null:
+			_diag_label.add_theme_font_override("font", font)
+		_diag_label.add_theme_font_size_override("font_size", 16)
+		_diag_label.add_theme_color_override("font_color", Color(1, 1, 0))
+		_diag_label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
+		_diag_label.add_theme_constant_override("outline_size", 3)
+		_diag_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(_diag_label)
+	_diag_lines.append_back(text)
+	while _diag_lines.size() > 3:
+		_diag_lines.pop_front()
+	_diag_label.text = "\n".join(_diag_lines)
+	_diag_label.position = Vector2(get_viewport_rect().size.x * 0.5 - 150, 40)
+	_diag_label.size = Vector2(300, 72)   # 3 satir * 24px
+	_diag_label.visible = true
+	_diag_timer = 2.0
+
+
 func _btn_action(id: String) -> void:
 	if game.SV.is_empty():
 		return
 	match id:
 		"x1", "x2", "x3", "x4", "sab", "rsb":
+			if game == null or hud == null:
+				_diag_show("HUD/GAME NULL")
+				return
+			print("[MOBILE_HUD DIAG] Laser butonuna basildi: id=", id, ", cagri: hud._use_item({k:las, id:", id, "})")
+			_diag_show("LAZER BTN id=" + id)
 			hud._use_item({"k": "las", "id": id})
 		"rkt":
 			game.toggle_rocket_auto()
@@ -1486,6 +1533,25 @@ func _find_in_cone(po: Vector3, wd: Vector2):
 	return best
 
 
+# Koni disindaki en yakin dusmani bul (menzil icinde). Aim stick kisa tap ile kullanilir.
+func _find_nearest_enemy() -> Object:
+	var best = null
+	var best_dist := 1e9
+	var po: Vector3 = game.P.node.position
+	var range_u := DOData.LASER_RANGE * DOData.S * AIM_RANGE_MUL
+	for e in game.enemies:
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0:
+			continue
+		var v := Vector2(float(e.node.position.x) - po.x, float(e.node.position.z) - po.z)
+		var dist := v.length()
+		if dist > range_u:
+			continue
+		if dist < best_dist:
+			best_dist = dist
+			best = e
+	return best
+
+
 # Koninin ekrandaki sekli: dunya uzayinda yay uzerinden, kameradan gecirilerek hesaplanir (perspektife uyar).
 # _cone_rings[i] = i. serit sinirinin yayi (CONE_BANDS adet; sonuncusu menzilin ucu).
 func _build_cone(cam: Camera3D, po: Vector3, wd: Vector2) -> void:
@@ -1573,7 +1639,24 @@ func _map_rect() -> Rect2:
 func _open_map() -> void:
 	if _map_open or edit_mode or not active:
 		return
-	_reset_pointers()
+	# Hareket stick'ini koru: harita acilirken parmak cikmasin, hareket devam etsin.
+	# _reset_pointers() stick_move.end() cagirir ve hareketi durdurur; bunu engelle.
+	if stick_move != null and stick_move.active:
+		_map_preserved_move_active = true
+		for k in _ptr.keys():
+			if _ptr[k]["ctl"] == stick_move:
+				_map_preserved_move_touch = k
+				break
+	# Digel pointer'lari temizle, hareket stick'ini sonlandirma
+	var to_clear := []
+	for k in _ptr.keys():
+		if _ptr[k]["ctl"] != stick_move:
+			to_clear.append(k)
+	for k in to_clear:
+		var c = _ptr[k]["ctl"]
+		if c != null:
+			c.set_pressed(false)
+		_ptr.erase(k)
 	_map_open = true
 	if mapview != null:
 		mapview.visible = true
@@ -1585,6 +1668,13 @@ func _close_map() -> void:
 	_swallow_until = _now() + 0.3
 	if mapview != null:
 		mapview.visible = false
+	# Hareket stick'ini durdur: parmak harita acilirken kalktiyorsa stick'i bitir.
+	# Parmak haliyle basiliysa stick calismaya devam eder.
+	if _map_preserved_move_active and stick_move != null and stick_move.active:
+		if not _ptr.has(_map_preserved_move_touch):
+			stick_move.end()
+	_map_preserved_move_active = false
+	_map_preserved_move_touch = -1
 
 
 # Haritada bir noktaya dokunus: gemi oraya gider, harita kapanir. Disina ya da X'e dokunus: sadece kapanir.
@@ -1731,6 +1821,13 @@ func _process(dt: float) -> void:
 			_icon_t = 3.0
 			_load_icons()
 		_refresh()
+	# DIAG: gecici debug etiketi sure sayaci (2 saniye sonra kaybolur)
+	if _diag_timer > 0.0:
+		_diag_timer -= dt
+		if _diag_timer <= 0.0:
+			_diag_timer = 0.0
+			if _diag_label != null:
+				_diag_label.visible = false
 
 
 func _load_icons() -> void:

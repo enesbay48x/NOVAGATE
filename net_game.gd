@@ -635,3 +635,9 @@ func on_ship_result(ok: bool, ship: String, error: String) -> void:
 func on_ammo_result(ok: bool, ammo_id: String, new_qty: int, error: String) -> void:
 	if g != null:
 		g.on_ammo_result(ok, ammo_id, new_qty, error)
+
+
+# ------------------------------------------------------------------ mermi secim sonucu (sunucu -> istemci)
+func on_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
+	if g != null:
+		g.on_select_ammo_result(ok, ammo, error)
