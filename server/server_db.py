@@ -830,12 +830,15 @@ def grant_reward(account_id: int, event_id: str, source: str,
         )
 
         # 3) Mermi / envanter odulleri (varsa)
+        _grant_ammo_new: Dictionary = {}
         for ammo_id, qty in clean_ammo.items():
             conn.execute(
                 "INSERT INTO ammo (account_id, ammo_id, quantity) VALUES (?, ?, ?) "
                 "ON CONFLICT(account_id, ammo_id) DO UPDATE SET quantity = quantity + excluded.quantity",
                 (account_id, ammo_id, qty),
             )
+            _row = conn.execute("SELECT quantity FROM ammo WHERE account_id = ? AND ammo_id = ?", (account_id, ammo_id)).fetchone()
+            _grant_ammo_new[str(ammo_id)] = int(_row["quantity"]) if _row else qty
         for item_id, qty in clean_items.items():
             conn.execute(
                 "INSERT INTO inventory (account_id, item_id, quantity) VALUES (?, ?, ?) "
@@ -869,7 +872,8 @@ def grant_reward(account_id: int, event_id: str, source: str,
             "new_hon": float(new_pd["hon"]),
             "new_sep": int(new_pd["sep"]),
             "new_kills": int(new_pd["kills"]),
-            "new_pvp_kills": int(new_pd["pvp_kills"]),
+            "new_pvp_kills": int(new_pd["kills"]),
+            "new_ammo": _grant_ammo_new,
         })
 
         item_id = None

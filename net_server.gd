@@ -46,6 +46,10 @@ var npc_override_t: float = 0.0   # son npc_overrides okuma zamani
 var ban_tick_t: float = 0.0   # ban kick tick sayaci
 var balance_tick_t: float = 0.0   # online oyuncu bakiye senkronizasyon sayaci
 var pos_save_t: float = 0.0   # oyuncu konumu periyodik kayit sayaci
+var ammo_save_t: float = 0.0   # oyuncu mermi periyodik kayit sayaci (5-10 sn)
+var _dirty_ammo_peers: Array = []   # ammo degisen oyuncu peer id'leri (periyodik yazim icin)
+var _ammo_result_pending: Dictionary = {}   # peer -> {ammo, qty} (gruplanmis gonderim icin)
+var ammo_result_t: float = 0.0   # mermi guncellemesi gonderim sayaci (1 sn)
 var rank_t: float = 0.0       # rütbe yeniden hesaplama sayaci (60 sn'de bir)
 var admin_tick_t: float = 0.0 # admin durumu yenileme sayaci (30 sn'de bir)
 var stale_lock_t: float = 0.0 # bayat kilit temizleme sayaci (30 sn'de bir)
@@ -510,7 +514,11 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 	# Mevcut account_id'yi koru, diger alanlari guncelle
 	var acct_id: int = int(players[peer].account_id)
 	var old_p: Dictionary = players[peer]
-	players[peer] = {"id": peer, "account_id": acct_id, "name": nm, "faction": clampi(faction, 1, 3), "ship": old_p.get("ship", "phoenix"), "map": "",
+	# Gemi SECIMI her zaman DB'den (load_player_state -> ps["ship"]) gelmelidir,
+	# istemcinin c_join'ta gonderdiginden DEGIL. old_p zaten on_attach_token'de
+	# DB'den yuklenen degeri icerir ("ship": str(ps.get("ship", "phoenix"))).
+	var ship_from_db: String = str(old_p.get("ship", "phoenix"))
+	players[peer] = {"id": peer, "account_id": acct_id, "name": nm, "faction": clampi(faction, 1, 3), "ship": ship_from_db, "map": "",
 		"pos": Vector3.ZERO, "yaw": 0.0, "hp": 1.0, "mhp": 1.0, "sh": 0.0, "msh": 0.0, "spd": 0.0,
 		"in_safe": false, "ut": false, "chat_t": 0.0, "form": "std", "drn": [],
 		# koruma / catisma durumu (hepsi sunucu saatiyle; birbirinden ayri)
@@ -706,6 +714,13 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 					"px": float(pos.x),
 					"pz": float(pos.z),
 				})
+				# Harita degisiminde ammo'yu da kaydet
+				var _ammo: Dictionary = p.get("_sv_ammo", {})
+				if _ammo.size() > 0:
+					db_send("save_player_ammo", {
+						"account_id": int(p.account_id),
+						"ammo_dict": _ammo,
+					})
 		p.map = ""
 		_maybe_free_world(old_map)
 	elif old_map == map_name:
@@ -941,10 +956,13 @@ func on_fire_vis(peer: int, kind: int, ref: int, nb: int, ammo: String) -> void:
 	# Mermi yeterli: bellekte dusur (DB'ye yazma icin zamanlayici/on_disconnect beklenir)
 	ammo_dict[ammo] = current_qty - nb
 	fp["_sv_ammo"] = ammo_dict
+	# Periyodik kayit icin isaretle
+	if not _dirty_ammo_peers.has(peer):
+		_dirty_ammo_peers.append(peer)
 	_register_attack(players[peer])   # ates acmak (NPC ya da oyuncuya) korumayi derhal kaldirir
 	_bcast(str(players[peer].map), "s_fire", [peer, kind, ref, clampi(nb, 1, 10), ammo], peer)
-	# Istemciye mermi guncellemesi gonder (ucuz RPC, her atista)
-	net.callv("rpc_id", [peer, "s_ammo_result", true, ammo, int(ammo_dict.get(ammo, 0)), ""])
+	# Istemciye mermi guncellemesi gonder (gruplanmis, en cok 1/sn)
+	_ammo_result_pending[peer] = {"ammo": ammo, "qty": int(ammo_dict.get(ammo, 0))}
 
 
 func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
@@ -1635,6 +1653,17 @@ func tick(dt: float) -> void:
 	if psnap_t >= PSNAP_DT:
 		psnap_t = 0.0
 		_send_player_snaps()
+	# Mermi guncellemesi gruplanmis gonder (en cok 1/sn)
+	ammo_result_t += dt
+	if ammo_result_t >= 1.0:
+		ammo_result_t = 0.0
+		for pid in _ammo_result_pending.keys().duplicate():
+			if not players.has(pid):
+				_ammo_result_pending.erase(pid)
+				continue
+			var pending: Dictionary = _ammo_result_pending[pid]
+			net.callv("rpc_id", [pid, "s_ammo_result", true, pending["ammo"], pending["qty"], ""])
+			_ammo_result_pending.erase(pid)
 	stat_t += dt
 	if stat_t >= 60.0:
 		stat_t = 0.0
@@ -1741,6 +1770,22 @@ func tick(dt: float) -> void:
 						"px": float(pos.x),
 						"pz": float(pos.z),
 					})
+	# Her degisen oyuncunun mermisini periyodik olarak kaydet (5-10 saniyede bir)
+	if ammo_save_t >= 7.5:
+		ammo_save_t = 0.0
+		for pid in _dirty_ammo_peers.duplicate():
+			if not players.has(pid):
+				_dirty_ammo_peers.erase(pid)
+				continue
+			var p: Dictionary = players[pid]
+			if p.has("account_id"):
+				var _ammo: Dictionary = p.get("_sv_ammo", {})
+				if _ammo.size() > 0:
+					db_send("save_player_ammo", {
+						"account_id": int(p.account_id),
+						"ammo_dict": _ammo,
+					})
+				_dirty_ammo_peers.erase(pid)
 
 
 
@@ -1751,6 +1796,14 @@ func tick(dt: float) -> void:
 		if g.timer <= 0.0:
 			var gp_p: Dictionary = g.p
 			var gp_map: String = str(gp_p.map)
+			# Ghost'un ammo'sunu DB'ye yaz
+			if gp_p.has("account_id"):
+				var _ghost_ammo: Dictionary = gp_p.get("_sv_ammo", {})
+				if _ghost_ammo.size() > 0:
+					db_send("save_player_ammo", {
+						"account_id": int(gp_p.account_id),
+						"ammo_dict": _ghost_ammo,
+					})
 			if gp_map != "":
 				_bcast(gp_map, "s_pleave", [gp])
 				if gp_p.has("account_id") and gp_map != "":

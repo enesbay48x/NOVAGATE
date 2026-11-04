@@ -3264,12 +3264,38 @@ func new_game(f: int) -> void:
 
 
 func continue_game() -> void:
-	# Giris her zaman sunucu verisiyle yapilir. Yerel save dosyasi (save_game JSON)
-	# asla sunucu degerini ezmemeli. SV _on_attach_result ile sunucudan doldurulur.
 	if save_path == "":
 		toast("Oturum bulunamadi. Lutfen giris yapin.")
 		return
-	_start_run(false)
+	if net_on:
+		# Online mod: SV sunucudan (_on_attach_result ile) doldurulur.
+		# Yerel save dosyasi asla sunucu degerini ezmez.
+		_start_run(false)
+	else:
+		# Offline mod: yerel save dosyasindan yukle.
+		var f := FileAccess.open(save_path, FileAccess.READ)
+		if f == null:
+			toast("Kayıt dosyası açılamadı.")
+			return
+		var d = JSON.parse_string(f.get_as_text())
+		if d == null or typeof(d) != TYPE_DICTIONARY:
+			new_game(1)
+			return
+		SV = d
+		SV.owned = Array(SV.owned)
+		SV.faction = int(SV.faction)
+		if not SV.has("inv"):
+			SV.inv = {"lf2": 15, "sg3n-a01": 20}
+		if not SV.ammo.has("rsb"):
+			SV.ammo["rsb"] = 0
+		if not SV.has("drone_equip"):
+			SV.drone_equip = {}
+		SV.forms = Array(SV.get("forms", ["std"]))
+		if not SV.has("loads"):
+			SV.loads = {}
+		ensure_campaign_data()
+		ensure_loadout()
+		_start_run(false)
 
 
 func save_game() -> void:
