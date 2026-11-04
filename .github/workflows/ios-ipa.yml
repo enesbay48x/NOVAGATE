@@ -85,7 +85,8 @@ jobs:
 
       - name: Write ExportOptions.plist (unsigned)
         run: |
-          cat > ExportOptions.plist <<'EOF'
+          mkdir -p export/ios
+          cat > export/ios/ExportOptions.plist <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTDs Property List 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -107,7 +108,7 @@ jobs:
         run: |
           cd export/ios
           xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -archivePath ../build/NOVAGATE.xcarchive archive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
-          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ../ExportOptions.plist CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
           mkdir -p Payload
           cp -R "../build/ios/NOVAGATE.app" Payload/
           zip -r ../../NOVAGATE-unsigned.ipa Payload/
@@ -136,7 +137,7 @@ jobs:
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           cp provisioning.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/"
 
-          cat > ExportOptions.plist <<EOF
+          cat > export/ios/ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTDs Property List 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -165,7 +166,7 @@ jobs:
             CODE_SIGNING_ALLOWED=YES \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER=""
-          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ../ExportOptions.plist
+          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist
           mkdir -p Payload
           cp -R "../build/ios/NOVAGATE.app" Payload/
           zip -r ../../NOVAGATE.ipa Payload/
@@ -180,6 +181,14 @@ jobs:
           path: NOVAGATE.ipa
           retention-days: 7
 
+      - name: Collect IPA files for release
+        if: startsWith(github.ref, 'refs/tags/')
+        id: collect-ipa
+        run: |
+          FILES="NOVAGATE-unsigned.ipa"
+          [ -f NOVAGATE.ipa ] && FILES="${FILES}"$'\n'"NOVAGATE.ipa"
+          echo "ipa_files=${FILES}" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release (tagged pushes only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
@@ -189,8 +198,6 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: |
-            NOVAGATE-unsigned.ipa
-            ${{ steps.check_secrets.outputs.has_secrets == 'true' && 'NOVAGATE.ipa' || '' }}
+          files: ${{ steps.collect-ipa.outputs.ipa_files }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
