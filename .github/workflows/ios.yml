@@ -89,22 +89,23 @@ jobs:
         run: |
           cd export/ios
           xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -derivedDataPath ../build/derived \
+            CONFIGURATION_BUILD_DIR="$PWD/../build/Release-iphoneos" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM=""
-          # Find the built .app
-          BUILT_APP=$(find ../build -name "*.app" -maxdepth 5 2>/dev/null | head -1)
+          # Find the built .app at the exact output directory
+          BUILT_APP=$(find "$PWD/../build/Release-iphoneos" -name "*.app" -maxdepth 1 2>/dev/null | head -1)
           if [ -z "$BUILT_APP" ]; then
-            echo "::error::No .app built by xcodebuild"
-            find ../build -maxdepth 5 -type d 2>/dev/null | head -20 || true
+            echo "::error::No .app built by xcodebuild in $PWD/../build/Release-iphoneos"
+            find "$PWD/../build" -maxdepth 5 -type d 2>/dev/null | head -30 || true
             exit 1
           fi
           echo "Built app: $BUILT_APP"
-          cp -R "$BUILT_APP" ../NOVAGATE.app
-          echo "app_path=$(pwd)/../NOVAGATE.app" >> $GITHUB_OUTPUT
+          cp -R "$BUILT_APP" "$PWD/../NOVAGATE.app"
+          echo "app_path=$PWD/../NOVAGATE.app" >> $GITHUB_OUTPUT
 
       - name: Verify real .app bundle
         run: |
