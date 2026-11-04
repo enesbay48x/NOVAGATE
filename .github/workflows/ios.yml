@@ -59,9 +59,10 @@ jobs:
       - name: Build unsigned .ipa with xcodebuild
         run: |
           cd export/ios
-          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO -derivedDataPath xcode-build
+          xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos -archivePath ../build/NOVAGATE.xcarchive archive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+          xcodebuild -exportArchive -archivePath ../build/NOVAGATE.xcarchive -exportPath ../build/ios -exportOptionsPlist ExportOptions.plist CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
           mkdir -p Payload
-          cp -R "xcode-build/Build/Products/Release-iphoneos/NOVAGATE.app" Payload/
+          cp -R "../build/ios/NOVAGATE.app" Payload/
           zip -r ../../NOVAGATE.ipa Payload/
 
       - name: Upload .ipa artifact
