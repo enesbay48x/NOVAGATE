@@ -1234,6 +1234,7 @@ func _btn_action(id: String) -> void:
 		return
 	match id:
 		"x1", "x2", "x3", "x4", "sab", "rsb":
+			print("[MOBILE_HUD DIAG] Laser butonuna basildi: id=", id, ", cagri: hud._use_item({k:las, id:", id, "})")
 			hud._use_item({"k": "las", "id": id})
 		"rkt":
 			game.toggle_rocket_auto()
