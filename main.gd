@@ -11,6 +11,7 @@ const MiniMap := preload("res://minimap.gd")
 const DOHud := preload("res://hud_do.gd")
 const ControlPanelScript := preload("res://control_panel.gd")
 const LaserFX := preload("res://laser_fx.gd")
+const NpcFX := preload("res://npc_laser_fx.gd")   # NPC'lere ozgu lazer gorselleri (kodla cizilir)
 const Extras := preload("res://extras.gd")
 const SkillTree := preload("res://skill_tree.gd")
 const SPACE_BG_SHADER := """
@@ -406,7 +407,8 @@ func _ready() -> void:
 	scene_environment.glow_hdr_threshold = 1.0
 	scene_environment.tonemap_exposure = 0.8
 	scene_environment.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
-	scene_environment.ssao_enabled = true
+	# SSAO telefonda cok agir (FPS dusurur): mobilde kapali, masaustunde acik
+	scene_environment.ssao_enabled = not OS.has_feature("mobile")
 	
 	var we := WorldEnvironment.new()
 	we.environment = scene_environment
@@ -1913,16 +1915,7 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 	Net.account_id = acct_id
 
 	# SV'i sunucudan gelen verilerle doldur (istemci tarafindaki SV sadece gorunum kopyasi)
-	var ps_raw = JSON.parse_string(player_state_json)
-	if not (ps_raw is Dictionary):
-		push_warning("[MAIN] player_state_json gecerli bir Dictionary degil")
-		lbl_auth_msg.text = "Sunucu gecersiz durum gonderdi."
-		menu.modulate = Color(1, 1, 1, 1)
-		menu.show()
-		auth_box.visible = true
-		company_box.visible = false
-		return
-	var ps: Dictionary = ps_raw
+	var ps: Dictionary = JSON.parse_string(player_state_json)
 	SV = {
 		"faction": int(ps.get("faction", faction)),
 		"is_admin": int(ps.get("is_admin", 0)),
@@ -1977,6 +1970,8 @@ func _on_attach_result(ok: bool, msg: String, acct_id: int = 0, callsign: String
 	if typeof(SV.maps_visited) != TYPE_ARRAY:
 		SV.maps_visited = []
 
+	if typeof(ps.get("resume")) == TYPE_DICTIONARY:
+		SV["_resume"] = ps.get("resume")   # Combat Logout: sure dolmadan donen oyuncu gemisini mevcut can/kalkanla gorur
 	print("[ISTEMCI] SV hazirlandi: account_id=%d, callsign=%s, ship=%s" % [acct_id, callsign, ps.get("ship", "phoenix")])
 	# Oyunu baslat (zaten ENet baglantisi var, sadece oyun baslat)
 	_start_run(false, true)
@@ -2669,7 +2664,32 @@ func auto_equip(c: Dictionary, self_idx := -1) -> void:
 			l.drn = (c.drn as Array).duplicate()
 
 
+# ---- SAVASTA EKIPMAN KILIDI ----
+# Son COMBAT_SEC sn icinde hasar aldiysan ya da saldirdiysan ekipman (lazer / jenerator / droid / droid esyasi)
+# takilamaz ve cikarilamaz. Kilit tum menu yollarini kapsar: bu fonksiyonlari yalnizca menu cagirir.
+var _equip_toast_t := -1.0e9
+
+
+func equip_locked() -> bool:
+	var s: float = DOData.COMBAT_SEC
+	if last_hit > 0.0 and clock - last_hit < s:
+		return true
+	return clock - last_attack < s or clock < combat_until
+
+
+# true donerse islem engellenmistir. Uyari yazisi en fazla saniyede bir gosterilir (dongulerde yigilmasin).
+func equip_block() -> bool:
+	if not equip_locked():
+		return false
+	if clock - _equip_toast_t > 1.0:
+		_equip_toast_t = clock
+		toast("Savaşta ekipman değiştirilemez.")
+	return true
+
+
 func equip_item(id: String) -> bool:
+	if equip_block():
+		return false
 	var key := item_key(id)
 	var c := cfg()
 	if c[key].size() >= cap_of(key):
@@ -2689,6 +2709,8 @@ func equip_item(id: String) -> bool:
 
 
 func unequip_slot(key: String, idx: int) -> void:
+	if equip_block():
+		return
 	var c := cfg()
 	if idx >= 0 and idx < c[key].size():
 		if key == "drn":
@@ -2763,6 +2785,8 @@ func drone_laser_dmg() -> float:
 
 
 func equip_drone_item(uid: String, slot_index: int, item_id: String) -> bool:
+	if equip_block():
+		return false
 	var c := cfg()
 	var idx := drone_uid_index(c, uid)
 	if idx < 0:
@@ -2812,6 +2836,8 @@ func _on_equip_drone_from_inventory(id: String) -> void:
 
 
 func _on_drone_slot_unequip(uid: String, slot_index: int) -> void:
+	if equip_block():
+		return
 	var de := _cfg_drone_equip(cfg())
 	if not de.has(uid) or typeof(de[uid]) != TYPE_DICTIONARY:
 		return
@@ -2821,6 +2847,8 @@ func _on_drone_slot_unequip(uid: String, slot_index: int) -> void:
 
 
 func _on_unequip_all_drones() -> void:
+	if equip_block():
+		return
 	_cfg_drone_equip(cfg()).clear()
 	_clamp_vitals()
 	save_game()
@@ -3048,16 +3076,74 @@ func buy_ship(id: String) -> bool:
 func equip_ship(id: String) -> void:
 	if not (id in SV.owned) or SV.ship == id:
 		return
+	if Net.online:
+		# Online: gemi (hangar) degisimine SUNUCU karar verir (savas yasagi, sahiplik, kalici kayit). Onay gelince uygulanir.
+		Net.send_ship(id)
+		return
+	_apply_ship(id)
+
+
+func _apply_ship(id: String) -> void:
 	SV.ship = id
 	ensure_loadout()
 	var pos: Vector3 = P.node.position
 	_make_player()
 	P.node.position = pos
 	drone_sig = ""
-	if net_on:
-		Net.send_ship(str(SV.ship))
 	toast("Gemi değişti: " + ship_def().name)
-	save_game()
+	save_game()   # yeni geminin ekipmani da sunucuya senkronlanir
+
+
+# Sunucudan gelen gemi degistirme sonucu. ship = SUNUCUDA aktif olan gemi.
+func on_ship_result(ok: bool, ship: String, error: String) -> void:
+	if not ok:
+		toast(error)
+	if ship in SV.owned and str(SV.get("ship", "")) != ship and P != null:
+		_apply_ship(ship)   # onaylandi ya da reddedildi ve istemci sunucudan ayristi -> sunucudaki gemiye esitle
+	if base_menu != null:
+		refresh_base()
+
+
+# ---- Ekipman kaydi (sunucu dogrular; istemci yalnizca degisiklik oldugunda gonderir) ----
+var _loadout_sig := ""
+var _loadout_seq := 0
+
+
+func _sync_loadout() -> void:
+	if not Net.online or SV.is_empty() or not SV.has("loads"):
+		return
+	var sid := str(SV.get("ship", "phoenix"))
+	var ls = SV.loads.get(sid, null)
+	if typeof(ls) != TYPE_ARRAY or (ls as Array).is_empty():
+		return
+	var js := JSON.stringify(ls)
+	var sig := "%s|%d|%s" % [sid, int(SV.get("cfgi", 0)), js]
+	if sig == _loadout_sig:
+		return
+	_loadout_sig = sig
+	_loadout_seq += 1
+	Net.send_loadout(sid, js, int(SV.get("cfgi", 0)), _loadout_seq)
+
+
+# Sunucunun suzdugu (gecerli) ekipman listesi. Yalnizca en son istege ait yanit uygulanir (eski yanit yeni degisikligi ezmez).
+func on_loadout_result(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
+	if seq != _loadout_seq or ship != str(SV.get("ship", "")):
+		return
+	var parsed = JSON.parse_string(loads_json)
+	if typeof(parsed) != TYPE_ARRAY:
+		return
+	var sent = SV.loads.get(ship, [])
+	if JSON.stringify(parsed) == JSON.stringify(sent) and cfgi == int(SV.get("cfgi", 0)):
+		return   # sunucu ayni seyi onayladi
+	SV.loads[ship] = parsed
+	SV.cfgi = cfgi
+	ensure_loadout()
+	_loadout_sig = "%s|%d|%s" % [ship, int(SV.get("cfgi", 0)), JSON.stringify(SV.loads.get(ship, []))]
+	_clamp_vitals()
+	_update_drones(0.0)
+	toast("Ekipman sunucuda düzeltildi.")
+	if base_menu != null:
+		refresh_base()
 
 
 func drones_owned() -> int:
@@ -3198,7 +3284,7 @@ func select_ammo(id: String) -> void:
 # Ekranda yalnizca ODUL yazilari gorunur (hasar sayilari ayri cizilir). Diger tum bildirimler sohbet gunlugune
 # yazilir ama ekrana cikmaz. Baska bir yazi gostermek icin asagidaki _toast_visible() kosullarina ekle.
 func _toast_visible(t: String) -> bool:
-	return t.begins_with("Bonus kutu") or t.begins_with("Görev ödülü") or t.begins_with("Seviye ") or t.begins_with("Atlama engellendi") \
+	return t.begins_with("Bonus kutu") or t.begins_with("Görev ödülü") or t.begins_with("Seviye ") or t.begins_with("Atlama engellendi") or t.begins_with("Savaşta") or t.begins_with("Muhimmat degistirilemedi") \
 		or (t.begins_with("+") and t.contains("XP"))
 
 
@@ -3270,6 +3356,7 @@ func save_game() -> void:
 	SV.map = cur
 	SV.px = P.node.position.x
 	SV.pz = P.node.position.z
+	_sync_loadout()
 	if save_path == "":
 		return
 	var f := FileAccess.open(save_path, FileAccess.WRITE)
@@ -3335,27 +3422,6 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 			company_box.visible = false
 			lbl_auth_msg.text = "Sunucuya bağlanılamadı: " + Net.last_error
 			return
-	# Harita dogrulama: SV.map maps sozlugunde yoksa varsayilana donuluyor
-	var map_key: String = str(SV.get("map", "1-1"))
-	if not maps.has(map_key):
-		push_warning("[MAIN] Harita '%s' maps sozlugunde yok, varsayilana donuluyor" % map_key)
-		map_key = DOData.FACTIONS.has(int(SV.get("faction", 1))) and DOData.FACTIONS[int(SV.get("faction", 1))].has("home") and DOData.FACTIONS[int(SV.get("faction", 1))].home or "1-1"
-		if not maps.has(map_key):
-			map_key = "1-1"
-			if not maps.has(map_key):
-				var _mk := maps.keys()
-				if _mk.size() > 0:
-					map_key = str(_mk[0])
-				else:
-					push_error("[MAIN] maps sozlugu bos, oyuna girilemiyor")
-					menu.modulate = Color(1, 1, 1, 1)
-					menu.show()
-					auth_box.visible = true
-					company_box.visible = false
-					for n in hud_nodes:
-						n.visible = false
-					return
-		SV.map = map_key
 	menu.hide()
 	ensure_campaign_data()
 	ensure_loadout()
@@ -3372,7 +3438,7 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 	extras.reset()
 	_make_player()
 	_build_plate()
-	var m = maps[map_key]
+	var m = maps[SV.map]
 	var arrive := w2g(m.w / 2.0, m.h / 2.0)
 	if m.base != null:
 		arrive = w2g(m.base.x, m.base.y) + Vector3(10, 0, 10)
@@ -3380,6 +3446,13 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 		arrive = Vector3(SV.px, 0, SV.pz)
 	load_map(SV.map, arrive)
 	running = true
+	var rs = SV.get("_resume", null)
+	if typeof(rs) == TYPE_DICTIONARY and P != null:
+		P.hp = maxf(1.0, max_hp() * float((rs as Dictionary).get("hp_r", 1.0)))
+		P.sh = clampf(max_sh() * float((rs as Dictionary).get("sh_r", 1.0)), 0.0, max_sh())
+	SV.erase("_resume")
+	_loadout_sig = ""
+	_sync_loadout()   # sunucudaki kayitla esitle (yeni hesapta otomatik donanim da kalici olur)
 	toast("Hoş geldin! Tıkla: hareket/hedef  |  Ctrl/Boşluk: lazer  |  R: roket  |  J: kapı  |  M: harita")
 
 
@@ -3423,9 +3496,6 @@ func load_map(name: String, arrive: Vector3) -> void:
 	prot_kind = 0
 	net_prot = 0     # yeni haritada koruma durumunu sunucu yeniden hesaplar (s_prot)
 	base_pos = null
-	if not maps.has(name):
-		push_warning("[MAIN] load_map: '%s' maps sozlugunde yok, islem iptal" % name)
-		return
 	var m = maps[name]
 	_apply_map_color_theme(name, m)
 	bg_tex = _tex(MAP_TEX % name)
@@ -4675,6 +4745,8 @@ var laser_sprite_cache := {}
 # Dönen: {"mesh","mat"} ya da sprite yoksa null (eski kutu lazere düşer).
 # wf: mühimmat kalınlığı çarpanı (x1 ince, x4/rsb kalın); aynı kalınlık ayrı önbelleğe kaydedilir.
 func _laser_sprite(key: String, wf := 1.0):
+	if key.begins_with("n_"):
+		return NpcFX.sprite(key)   # NPC: her tur kendi mermisi (resim dosyasi gerekmez)
 	if key == "" or not LASER_SPRITES.has(key):
 		return null
 	var ck := "%s|%s" % [key, snappedf(wf, 0.05)]
@@ -4733,6 +4805,8 @@ func _bolt_mat(col: Color, glow: bool) -> StandardMaterial3D:
 func fire_bolt(from: Vector3, tgt, kind: String, col: Color, dmg: float, vol: Dictionary, sprite_key := "", wf := 1.0, off := Vector3.ZERO) -> void:
 	if world == null:
 		return
+	if sprite_key.begins_with("n_"):
+		col = NpcFX.color(sprite_key)   # iz / carpma efekti NPC'nin kendi rengiyle
 	var st := _bolt_style(kind)
 	var b := MeshInstance3D.new()
 	var spr = _laser_sprite(sprite_key, wf)
@@ -4795,7 +4869,7 @@ func _bolt_hit(b: Dictionary) -> void:
 		if randf() < skill_bonus("evasion"):   # Evasive Maneuvers: isabet azalir
 			popup_txt("ISKA", pos, Color(0.7, 0.85, 1.0))
 			return
-		impact(pos, Color(1.0, 0.4, 0.3), false, 1.0)   # kalkan varken ozel efekt/balon yok
+		impact(pos, Color(b.col).lerp(Color(1.0, 1.0, 1.0), 0.25), false, 1.0)   # kalkan varken ozel efekt/balon yok
 		hurt(float(b.dmg))
 		return
 	if bool(vol.get("combine", false)):
@@ -5562,7 +5636,7 @@ func _npc_bolt(e: Dictionary, j: int, dmg: float, gen: int) -> void:
 	else:
 		from = hps[j % hps.size()]["p"]
 	fire_bolt(from, null, "enemy", Color(1.0, 0.3, 0.35), dmg, {}, "n_" + str(e.get("id", "")))
-	_fx_sphere(from, Color(1.0, 0.5, 0.4), 0.25, 1.1, 0.11, 0.9)
+	NpcFX.flash(self, from, "n_" + str(e.get("id", "")))
 
 
 func _process(dt: float) -> void:
@@ -6499,6 +6573,8 @@ func run_damage_tests() -> void:
 # Droidleri otomatik donatir: once en guclu bosta lazerler, lazer kalmazsa en guclu bosta kalkan jeneratoru.
 # Envanter DUSURULMEZ; esyalar sadece "kullanimda" sayilir.
 func _on_auto_equip_drones() -> void:
+	if equip_block():
+		return
 	var c := cfg()
 	var de := _cfg_drone_equip(c)
 	for i in c.drn.size():

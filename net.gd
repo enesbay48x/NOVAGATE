@@ -56,6 +56,7 @@ func _ready() -> void:
 		SERVER_ADDR = env_addr
 	multiplayer.server_disconnected.connect(_on_server_lost)
 	multiplayer.peer_disconnected.connect(_on_peer_gone)
+	multiplayer.peer_connected.connect(_on_peer_joined)
 	# TLS login icin HTTPRequest (auth_service.py HTTPS endpoint)
 	auth_http_request = HTTPRequest.new()
 	add_child(auth_http_request)
@@ -167,8 +168,19 @@ func _process(dt: float) -> void:
 		srv.tick(dt)
 
 
+# Sunucu: internet kopmasi daha hizli anlasilsin (varsayilan ~30 sn); sure DOData.NET_PEER_TIMEOUT_MAX_MS ile ayarlanir.
+func _on_peer_joined(id: int) -> void:
+	if not is_server:
+		return
+	var enet := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if enet == null:
+		return
+	var pp = enet.get_peer(id)
+	if pp != null:
+		pp.set_timeout(32, 5000, DOData.NET_PEER_TIMEOUT_MAX_MS)
+
+
 func _on_peer_gone(id: int) -> void:
-	print("[DISCONNECT] _on_peer_gone peer=%d" % id)
 	if is_server and srv != null:
 		srv.on_disconnect(id)
 
@@ -267,7 +279,6 @@ func disconnect_from_server() -> void:
 
 
 func _on_server_lost() -> void:
-	print("[DISCONNECT] _on_server_lost")
 	if is_server:
 		return
 	online = false
@@ -316,6 +327,12 @@ func send_fire(kind: int, ref: int, nb: int, ammo: String) -> void:
 		rpc_id(1, "c_fire", kind, ref, nb, ammo)
 
 
+# Ozel esya (extra) kullanildi: sunucu ayni haritadaki diger oyunculara efekti yayinlar.
+func send_extra(idx: int) -> void:
+	if online and idx >= 0:
+		rpc_id(1, "c_extra", idx)
+
+
 func send_drones(form: String, drn: Array) -> void:
 	if online:
 		rpc_id(1, "c_drones", form, drn)
@@ -339,6 +356,13 @@ func send_purchase_item(item_id: String, qty: int, tx_id: String) -> void:
 func send_select_ammo(ammo: String) -> void:
 	if online:
 		rpc_id(1, "c_select_ammo", ammo)
+
+
+# Ekipman/konfigurasyon degisince (lazer, jenerator, droid, formasyon, aktif konfig) sunucuya kaydettir.
+# loads_json = o geminin [konfig1, konfig2] listesi. Sunucu dogrular; suzulmus hali s_loadout_result ile doner.
+func send_loadout(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
+	if online:
+		rpc_id(1, "c_save_loadout", ship, loads_json, cfgi, seq)
 
 
 # ch: 0 genel, 1 sirket, 2 grup
@@ -392,12 +416,7 @@ func c_join(proto: int, nm: String, faction: int, ship: String) -> void:
 @rpc("any_peer", "call_remote", "reliable")
 func c_ship(ship: String) -> void:
 	if is_server and srv != null:
-		var id: int = multiplayer.get_remote_sender_id()
-		if srv.players.has(id):
-			var p: Dictionary = srv.players[id]
-			if ship == "police" and not bool(p.get("_sv_admin", 0)):
-				return   # Police sadece admin icin: istemciye guvenilmez
-		srv.on_ship(id, ship)
+		srv.on_ship(multiplayer.get_remote_sender_id(), ship)   # tum dogrulama (savas, sahiplik, police) sunucuda
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -531,9 +550,6 @@ func s_disconnect(reason: String) -> void:
 	if is_server:
 		return
 	last_error = reason
-	print("[DISCONNECT] s_disconnect reason=%s peer=%d" % [reason, multiplayer.get_remote_sender_id()])
-	if game != null and is_instance_valid(game):
-		game.toast("Baglanti koptu: " + reason)
 	online = false
 	if multiplayer.multiplayer_peer != null:
 		multiplayer.multiplayer_peer.close()
@@ -749,8 +765,42 @@ func c_select_ammo(ammo: String) -> void:
 		srv.on_select_ammo(multiplayer.get_remote_sender_id(), ammo)
 
 
+# ================================================================== EKIPMAN KAYDI (client -> sunucu)
+@rpc("any_peer", "call_remote", "reliable")
+func c_save_loadout(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
+	if is_server and srv != null:
+		srv.on_save_loadout(multiplayer.get_remote_sender_id(), ship, loads_json, cfgi, seq)
+
+
+# ================================================================== EKIPMAN KAYDI SONUCU (sunucu -> client)
+@rpc("authority", "call_remote", "reliable")
+func s_loadout_result(ship: String, loads_json: String, cfgi: int, seq: int) -> void:
+	if gm != null and online:
+		gm.on_loadout_result(ship, loads_json, cfgi, seq)
+
+
+# ================================================================== GEMI DEGISTIRME SONUCU (sunucu -> client)
+@rpc("authority", "call_remote", "reliable")
+func s_ship_result(ok: bool, ship: String, error: String) -> void:
+	if gm != null and online:
+		gm.on_ship_result(ok, ship, error)
+
+
 # ================================================================== MUHIMMAT SECIMI SONUCI (sunucu -> client)
 @rpc("authority", "call_remote", "reliable")
 func s_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
 	if gm != null and online:
 		gm.on_select_ammo_result(ok, ammo, error)
+
+
+# ================================================================== OZEL ESYA (EXTRA) EFEKTI
+@rpc("any_peer", "call_remote", "reliable")
+func c_extra(idx: int) -> void:
+	if is_server and srv != null:
+		srv.on_extra(multiplayer.get_remote_sender_id(), idx)
+
+
+@rpc("authority", "call_remote", "reliable")
+func s_extra(peer: int, idx: int) -> void:
+	if gm != null and online:
+		gm.on_extra(peer, idx)

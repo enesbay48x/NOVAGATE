@@ -1,0 +1,28 @@
+--- /tmp/a_hud_do.gd	2026-11-04 02:34:55.843274382 +0000
++++ /tmp/b_hud_do.gd	2026-11-04 02:34:55.844704871 +0000
+@@ -749,7 +749,7 @@
+ const LASER_IDS := ["x1", "x2", "x3", "x4", "sab", "rsb"]
+ const LASER_ICONS := ["lcb-10", "mcb-25", "mcb-50", "ucb-100", "sab-50", "rsb-75"]
+ const LASER_TIPS := ["x1 cephane", "x2 cephane", "x3 cephane", "x4 cephane", "SAB-50 (kalkan emici)", "RSB-75 (hizli sarj)"]
+-const SUPPORTED_CATS := ["lasers", "rockets", "special_items", "drone_formations"]
++const SUPPORTED_CATS := ["lasers", "special_items", "drone_formations"]
+ const QUICK_N := 10
+ const TOP_N := 8
+ 
+@@ -789,8 +789,6 @@
+ 		"lasers":
+ 			for id in LASER_IDS:
+ 				out.append({"k": "las", "id": id})
+-		"rockets":
+-			out.append({"k": "rkt", "id": "r310"})
+ 		"special_items":
+ 			for id in Extras.IDS:
+ 				out.append({"k": "ext", "id": id})
+@@ -987,7 +985,6 @@
+ 		top_cells.append(c)
+ 	var cats := [
+ 		["lasers", "Lazerler: cephane secenekleri", _on_cat.bind("lasers", "Lazerler")],
+-		["rockets", "Roketler", _on_cat.bind("rockets", "Roketler")],
+ 		["special_items", "Ozel esyalar", _on_cat.bind("special_items", "Ozel esyalar")],
+ 		["drone_formations", "Droid dizilimleri: sec / alt cubuga surukle", _on_cat.bind("drone_formations", "Droid dizilimleri")],
+ 		["buy_now", "Market  [B]", game.toggle_base],

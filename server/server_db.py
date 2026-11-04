@@ -432,6 +432,9 @@ def load_player_state(account_id: int) -> dict | None:
         map_rows = conn.execute("SELECT map_name FROM player_maps_visited WHERE account_id = ?", (account_id,)).fetchall()
         maps_visited = [r["map_name"] for r in map_rows]
 
+        active_ship = pd["ship"] if pd["ship"] in owned else DEFAULT_SHIP   # kayitli aktif gemi gecersizse Phoenix
+        if DEFAULT_SHIP not in owned and not owned:
+            owned = [DEFAULT_SHIP]
         prefs = conn.execute("SELECT * FROM player_prefs WHERE account_id = ?", (account_id,)).fetchone()
         stats = conn.execute("SELECT rockets FROM player_stats_ext WHERE account_id = ?", (account_id,)).fetchone()
 
@@ -447,7 +450,7 @@ def load_player_state(account_id: int) -> dict | None:
             "sep": pd["sep"] if "sep" in pd.keys() else 0,
             "pvp_kills": pd["pvp_kills"],
             "rank_pen": pd["rank_pen"],
-            "ship": pd["ship"],
+            "ship": active_ship,
             "map": pd["map_name"],
             "px": pd["px"],
             "pz": pd["pz"],
@@ -1166,10 +1169,13 @@ def get_account_status(account_id: int) -> dict:
 
 
 def save_active_ship(account_id: int, ship_id: str) -> dict:
-    """Oyuncunun aktif gemisini player_data.ship'te kalici olarak kaydeder."""
+    """Oyuncunun aktif gemisini player_data.ship'te kalici olarak kaydeder (gemi hesabin olmali)."""
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM player_ships WHERE account_id = ? AND ship_id = ?", (account_id, str(ship_id))).fetchone():
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "ship_not_owned"}
         conn.execute(
             "UPDATE player_data SET ship = ?, updated_at = ? WHERE account_id = ?",
             (ship_id, now_ts(), account_id),
@@ -1185,6 +1191,139 @@ def save_active_ship(account_id: int, ship_id: str) -> dict:
         return {"ok": False, "error": "internal"}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# AKTIF GEMI + EKIPMAN (KONFIGURASYON) KALICILIGI  -- tum dogrulama SUNUCUDA
+# ---------------------------------------------------------------------------
+# Gemi basina yuva sayilari (data.gd SHIPS ile ayni; droid yuvasi her gemide 10).
+SHIP_CAPS = {
+    "phoenix": (2, 1), "yamato": (2, 2), "leonov": (3, 3), "defcom": (4, 4), "liberator": (6, 6),
+    "piranha": (8, 8), "nostromo": (8, 8), "bigboy": (10, 10), "spearhead": (5, 12),
+    "vengeance": (10, 10), "goliath": (15, 15), "aegis": (10, 15), "citadel": (7, 20), "police": (50, 50),
+}
+FORM_IDS = {"std", "tu", "ar", "la", "st", "pi", "da", "di", "ch", "mo", "cr", "he", "ba"}
+LOADOUT_CFG_COUNT = 2       # her gemide 2 konfigurasyon
+LOADOUT_DRONE_SLOTS = 10    # droid yuvasi (CAT_MAX_DRONES)
+DEFAULT_SHIP = "phoenix"
+
+
+def _is_gen(item_id: str) -> bool:
+    return item_id in CAT_SPD_GENS or item_id in CAT_SH_GENS
+
+
+def _sanitize_cfg(raw, ship_id: str, inv: dict) -> dict:
+    """Istemciden gelen tek konfigurasyonu dogrular: bilinmeyen esya, yuva asimi ve envanterde olmayan esya atilir."""
+    las_cap, gen_cap = SHIP_CAPS.get(ship_id, (0, 0))
+    out = {"las": [], "gen": [], "drn": [], "form": "std", "drone_equip": {}}
+    if not isinstance(raw, dict):
+        return out
+    for key, cap, ok in (("las", las_cap, lambda i: i in CAT_LASERS),
+                         ("gen", gen_cap, _is_gen),
+                         ("drn", LOADOUT_DRONE_SLOTS, lambda i: i in CAT_DRONE_PRICES)):
+        arr = raw.get(key, [])
+        if not isinstance(arr, list):
+            continue
+        used = {}
+        for it in arr:
+            iid = str(it)
+            if not ok(iid) or len(out[key]) >= cap:
+                continue
+            used[iid] = used.get(iid, 0) + 1
+            if used[iid] > int(inv.get(iid, 0)):
+                continue   # envanterde olmayan esya takilamaz
+            out[key].append(iid)
+    form = str(raw.get("form", "std"))
+    out["form"] = form if form in FORM_IDS else "std"
+    # Droid ekipmani: {"iris_0": {"slot_0": "lf1"}} -> yalnizca gecerli droid ornegi + lazer/kalkan jeneratoru
+    de = raw.get("drone_equip", {})
+    if isinstance(de, dict):
+        for uid, slots in de.items():
+            uid = str(uid)
+            base, _, idx = uid.rpartition("_")
+            if not idx.isdigit() or int(idx) >= len(out["drn"]) or out["drn"][int(idx)] != base:
+                continue
+            if not isinstance(slots, dict):
+                continue
+            clean = {}
+            for sk, iid in slots.items():
+                iid = str(iid)
+                if str(sk).startswith("slot_") and str(sk)[5:].isdigit() and (iid in CAT_LASERS or _is_gen(iid)):
+                    clean[str(sk)] = iid
+            if clean:
+                out["drone_equip"][uid] = clean
+    return out
+
+
+def save_loadout(account_id: int, ship_id: str, loads, cfg_index: int) -> dict:
+    """Bir geminin konfigurasyonlarini (lazer/jenerator/droid/formasyon) + aktif konfigurasyon indeksini kaydeder.
+    Gemi hesabin olmali; her esya sunucuda envanter/yuva sayisina gore suzulur. Suzulmus hali geri doner."""
+    ship_id = str(ship_id)
+    if ship_id not in SHIP_CAPS:
+        return {"ok": False, "error": "unknown_ship"}
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM player_ships WHERE account_id = ? AND ship_id = ?", (account_id, ship_id)).fetchone():
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": "ship_not_owned"}
+        inv = {r["item_id"]: int(r["quantity"]) for r in conn.execute(
+            "SELECT item_id, quantity FROM inventory WHERE account_id = ?", (account_id,)).fetchall()}
+        raw_list = loads if isinstance(loads, list) else []
+        cfgs = [_sanitize_cfg(raw_list[i] if i < len(raw_list) else None, ship_id, inv) for i in range(LOADOUT_CFG_COUNT)]
+        # Droidler gemiye aittir: iki konfigurasyonda ayni liste (istemci _sync_drn_all ile ayni kural)
+        master = max(cfgs, key=lambda c: len(c["drn"]))["drn"]
+        for c in cfgs:
+            c["drn"] = list(master)
+        cfg_index = max(0, min(LOADOUT_CFG_COUNT - 1, int(cfg_index)))
+        conn.execute(
+            "INSERT INTO player_loads (account_id, load_key, load_data) VALUES (?, ?, ?) "
+            "ON CONFLICT(account_id, load_key) DO UPDATE SET load_data = excluded.load_data",
+            (account_id, ship_id, json.dumps(cfgs)),
+        )
+        conn.execute(
+            "INSERT INTO player_prefs (account_id, selected_ammo, cfg_index, free_mode, route_to, updated_at) "
+            "VALUES (?, 'x1', ?, 0, '', ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET cfg_index = excluded.cfg_index, updated_at = excluded.updated_at",
+            (account_id, cfg_index, now_ts()),
+        )
+        conn.execute("COMMIT")
+        return {"ok": True, "loads": cfgs, "cfg_index": cfg_index}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("save_loadout hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+def save_selected_ammo(account_id: int, ammo_id: str) -> dict:
+    if str(ammo_id) not in CAT_AMMO:
+        return {"ok": False, "error": "unknown_ammo"}
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO player_prefs (account_id, selected_ammo, cfg_index, free_mode, route_to, updated_at) "
+            "VALUES (?, ?, 0, 0, '', ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET selected_ammo = excluded.selected_ammo, updated_at = excluded.updated_at",
+            (account_id, str(ammo_id), now_ts()),
+        )
+        conn.execute("COMMIT")
+        return {"ok": True}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("save_selected_ammo hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
 
 
 def get_player_balance(account_id: int) -> dict:
@@ -1492,6 +1631,17 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 str(msg.get("ship", "")),
                 bool(msg.get("add", False)),
             )
+        elif method == "save_active_ship":
+            resp = save_active_ship(int(msg.get("account_id", 0)), str(msg.get("ship", "")))
+        elif method == "save_loadout":
+            resp = save_loadout(
+                int(msg.get("account_id", 0)),
+                str(msg.get("ship", "")),
+                msg.get("loads", []),
+                int(msg.get("cfg_index", 0)),
+            )
+        elif method == "save_selected_ammo":
+            resp = save_selected_ammo(int(msg.get("account_id", 0)), str(msg.get("ammo", "")))
         elif method == "save_player_position":
             resp = save_player_position(
                 int(msg.get("account_id", 0)),

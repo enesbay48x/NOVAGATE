@@ -1,0 +1,27 @@
+# =============================================================================
+# NOVAGATE - CANALI EC2 SUNUCUSU IÇIN YEDEKLEME KOMUTLARI
+# Bu dosya sadece komut referansidir. CALISTIRILMAMALIDIR.
+# Canli EC2 sunucusunda (18.117.15.199) SSH ile baglanip asagidaki komutlari
+# sirasi ile calistirin.
+# =============================================================================
+
+# 1. Canli DB'nin tarihli yedegini al (sqlite3 .backup, wal ve shm dahil)
+#   Bu komut canli calan sunucuya ait DB'nin anlik kopyasini alir.
+sqlite3 /opt/novagate/server/novagate_game.db ".backup '/opt/novagate/server/backups/novagate_game_$(date +%Y%m%d_%H%M%S).db.bak'"
+
+# 2. Yedegin integrite kontrolu (okyunus olmali)
+sqlite3 "/opt/novagate/server/backups/novagate_game_$(date +%Y%m%d_%H%M%S).db.bak" "PRAGMA integrity_check;"
+
+# 3. WAL ve SHM dosyalarini da yedekle (wal modunda bu dosyalar onemlidir)
+cp /opt/novagate/server/novagate_game.db-wal "/opt/novagate/server/backups/novagate_game_$(date +%Y%m%d_%H%M%S).db-wal" 2>/dev/null || true
+cp /opt/novagate/server/novagate_game.db-shm "/opt/novagate/server/backups/novagate_game_$(date +%Y%m%d_%H%M%S).db-shm" 2>/dev/null || true
+
+# 4. Eski yedekleri temizle (7 gundan eski olanlar)
+find /opt/novagate/server/backups/ -name "novagate_game_*.db.bak" -mtime +7 -delete
+find /opt/novagate/server/backups/ -name "novagate_game_*.db-wal" -mtime +7 -delete 2>/dev/null || true
+find /opt/novagate/server/backups/ -name "novagate_game_*.db-shm" -mtime +7 -delete 2>/dev/null || true
+
+# =============================================================================
+# NOT: Bu komutlar canli EC2 sunucusunda calistirilmalidir. Yerel gelistirme
+# makinesinde calistirilmasin.
+# =============================================================================
