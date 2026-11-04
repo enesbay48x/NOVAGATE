@@ -3048,16 +3048,46 @@ func buy_ship(id: String) -> bool:
 func equip_ship(id: String) -> void:
 	if not (id in SV.owned) or SV.ship == id:
 		return
-	SV.ship = id
-	ensure_loadout()
-	var pos: Vector3 = P.node.position
-	_make_player()
-	P.node.position = pos
-	drone_sig = ""
+	# SV.ship'i hemen degistirme. Sunucu onayi (s_ship_result) gelince degistir.
 	if net_on:
-		Net.send_ship(str(SV.ship))
-	toast("Gemi değişti: " + ship_def().name)
-	save_game()
+		Net.send_ship(str(id))
+		# on_ship_result ile SV.ship guncellenecek
+	else:
+		# Tek oyuncu modu: yerelde degistir
+		SV.ship = id
+		ensure_loadout()
+		var pos: Vector3 = P.node.position
+		_make_player()
+		P.node.position = pos
+		drone_sig = ""
+		toast("Gemi değişti: " + ship_def().name)
+		save_game()
+
+
+# Sunucu onayi sonrasi gemi degistirme sonucu.
+func on_ship_result(ok: bool, ship: String, error: String) -> void:
+	if ok:
+		SV.ship = ship
+		ensure_loadout()
+		if P != null:
+			var pos: Vector3 = P.node.position
+			_make_player()
+			P.node.position = pos
+		toast("Gemi değişti: " + ship_def().name)
+		save_game()
+	else:
+		toast("Gemi degistirilemedi: " + error)
+
+
+# Sunucu ammo guncellemesi sonucu. player_volley yerelde azaltmaz,
+# sadece s_ammo_result ile SV.ammo guncellenir.
+func on_ammo_result(ok: bool, ammo_id: String, new_qty: int, error: String) -> void:
+	if ok:
+		if not SV.has("ammo"):
+			SV.ammo = {}
+		SV.ammo[str(ammo_id)] = int(new_qty)
+	else:
+		toast("Mermi guncellenemedi: " + error)
 
 
 func drones_owned() -> int:
@@ -3234,33 +3264,11 @@ func new_game(f: int) -> void:
 
 
 func continue_game() -> void:
-	var f := FileAccess.open(save_path, FileAccess.READ)
-	if f == null:
-		toast("Kayıt dosyası açılamadı.")
+	# Giris her zaman sunucu verisiyle yapilir. Yerel save dosyasi (save_game JSON)
+	# asla sunucu degerini ezmemeli. SV _on_attach_result ile sunucudan doldurulur.
+	if save_path == "":
+		toast("Oturum bulunamadi. Lutfen giris yapin.")
 		return
-	var d = JSON.parse_string(f.get_as_text())
-	if d == null or typeof(d) != TYPE_DICTIONARY:
-		new_game(account_faction if account_faction > 0 else 1)
-		return
-	SV = d
-	SV.owned = Array(SV.owned)
-	SV.faction = int(SV.faction)
-	# Hesaba kilitli: sirket ve oyuncu adi kayittan degil hesaptan gelir.
-	if account_faction > 0:
-		SV.faction = account_faction
-	if account_name != "":
-		SV.callsign = account_name
-	if not SV.has("inv"):
-		SV.inv = {"lf2": 15, "sg3n-a01": 20}
-	if not SV.ammo.has("rsb"):
-		SV.ammo["rsb"] = 0
-	if not SV.has("drone_equip"):
-		SV.drone_equip = {}
-	SV.forms = Array(SV.get("forms", ["std"]))
-	if not SV.has("loads"):
-		SV.loads = {}
-	ensure_campaign_data()
-	ensure_loadout()
 	_start_run(false)
 
 
@@ -5406,7 +5414,7 @@ func player_volley(po: Vector3) -> void:
 			last_nammo = clock
 			toast("%s cephanesi bitti, %s ile atiliyor." % [str(SV.get("sel", "")).to_upper(), str(best.name)])
 		id = str(best.id)
-	SV.ammo[id] -= n
+		# SV.ammo[id] -= n   # KALDIRILDI: ammo sadece sunucu tarafinda guncellenir, s_ammo_result ile senkronize olur
 	register_attack()   # guvenli bolgeden ates acmak korumayi derhal kaldirir (hedef NPC de olsa oyuncu da olsa)
 	var total := 0.0
 	for l in las:
