@@ -623,3 +623,15 @@ func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new
 		g.save_game()
 	else:
 		g.toast("Alim basarisiz: " + error)
+
+
+# ------------------------------------------------------------------ gemi degistirme sonucu (sunucu -> istemci)
+func on_ship_result(ok: bool, ship: String, error: String) -> void:
+	if g != null:
+		g.on_ship_result(ok, ship, error)
+
+
+# ------------------------------------------------------------------ mermi guncelleme sonucu (sunucu -> istemci)
+func on_ammo_result(ok: bool, ammo_id: String, new_qty: int, error: String) -> void:
+	if g != null:
+		g.on_ammo_result(ok, ammo_id, new_qty, error)
