@@ -19,23 +19,23 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Install Godot 4.6.2 macOS editor
+      - name: Install Godot 4.7-stable macOS editor
         run: |
-          curl -L -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/4.6.2-stable/Godot_v4.6.2-stable_macos.universal.zip"
+          curl -L -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_macos.universal.zip"
           unzip -o -q godot.zip -d /Applications
 
       - name: Install iOS export templates
         run: |
-          curl -fL -o export_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.6.2-stable/Godot_v4.6.2-stable_export_templates.tpz"
+          curl -fL -o export_templates.tpz "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_export_templates.tpz"
           unzip -t export_templates.tpz > /dev/null
           mkdir -p /tmp/godot_templates
           unzip -o -q export_templates.tpz -d /tmp/godot_templates
           IOS_ZIP=$(find /tmp/godot_templates -name "ios.zip" | head -1)
           if [ -z "$IOS_ZIP" ]; then
-            echo "::error::No ios.zip found in Godot 4.6.2-stable export templates archive"
+            echo "::error::No ios.zip found in Godot 4.7-stable export templates archive"
             exit 1
           fi
-          TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.6.2.stable"
+          TEMPL_DIR="$HOME/Library/Application Support/Godot/export_templates/4.7.stable"
           mkdir -p "$TEMPL_DIR"
           cp "$IOS_ZIP" "$TEMPL_DIR/ios.zip"
 
