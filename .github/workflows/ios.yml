@@ -77,6 +77,8 @@ jobs:
           cd export/ios
           rm -rf ../build
           mkdir -p ../build
+          # Xcode 26 / iOS SDK 26.2: archive ile CODE_SIGNING_ALLOWED=NO hata verir.
+          # 'build' komutu kullanilarak .app uretilir.
           xcodebuild -project NOVAGATE.xcodeproj -scheme NOVAGATE -configuration Release -sdk iphoneos \
             -derivedDataPath ../build/derived \
             SYMROOT=../build/symroot \
@@ -85,7 +87,8 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            DEVELOPMENT_TEAM=""
+            DEVELOPMENT_TEAM="" \
+            build
 
           echo "=== CURRENT DIRECTORY ==="
           pwd
