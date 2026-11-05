@@ -400,14 +400,14 @@ func _ready() -> void:
 	scene_environment.background_canvas_max_layer = -1
 	scene_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	scene_environment.ambient_light_color = Color(0.7, 0.8, 1.0)
-	scene_environment.ambient_light_energy = 1.0
+	scene_environment.ambient_light_energy = 1.2 if OS.has_feature("mobile") else 1.0
 		
 	# Bloom (Parlama) Ayarları
 	scene_environment.glow_enabled = not OS.has_feature("mobile")   # glow mobilde takilma yapar
 	scene_environment.glow_intensity = 0.6
 	scene_environment.glow_bloom = 0.05
 	scene_environment.glow_hdr_threshold = 1.0
-	scene_environment.tonemap_exposure = 0.8
+	scene_environment.tonemap_exposure = 1.2 if OS.has_feature("mobile") else 0.8
 	scene_environment.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
 	# SSAO telefonda cok agir (FPS dusurur): mobilde kapali, masaustunde acik
 	scene_environment.ssao_enabled = not OS.has_feature("mobile")
@@ -419,17 +419,17 @@ func _ready() -> void:
 	# Uzayın soğuk, karanlık havasını hissettirecek yönlü ışık
 	var sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-45, 45, 0)
-	sun.light_energy = 0.8
+	sun.light_energy = 1.0 if OS.has_feature("mobile") else 0.8
 	sun.light_color = Color(0.6, 0.7, 1.0)
 	add_child(sun)
 	
 	sun_light = DirectionalLight3D.new()
 	sun_light.rotation_degrees = Vector3(-55, 30, 0)
-	sun_light.light_energy = 0.8
+	sun_light.light_energy = 1.0 if OS.has_feature("mobile") else 0.8
 	add_child(sun_light)
 	fill_light = DirectionalLight3D.new()
 	fill_light.rotation_degrees = Vector3(-35, -150, 0)
-	fill_light.light_energy = 0.55
+	fill_light.light_energy = 0.75 if OS.has_feature("mobile") else 0.55
 	fill_light.light_color = Color(0.6, 0.75, 1.0)
 	add_child(fill_light)
 	
