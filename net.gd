@@ -211,7 +211,7 @@ func _on_peer_joined(id: int) -> void:
 		return
 	var pp = enet.get_peer(id)
 	if pp != null:
-		pp.set_timeout(32, 5000, DOData.NET_PEER_TIMEOUT_MAX_MS)
+		pp.set_timeout(32, DOData.NET_PEER_TIMEOUT_MIN_MS, DOData.NET_PEER_TIMEOUT_MAX_MS)
 
 
 func _on_peer_gone(id: int) -> void:
@@ -250,6 +250,7 @@ func connect_and_join(addr: String, info: Dictionary) -> bool:
 		last_error = "Sunucuya ulasilamadi (%s:%d). Sunucu acik mi? Port/guvenlik duvari?" % [host, port]
 		disconnect_from_server()
 		return false
+	_client_timeouts(peer)
 	my_id = multiplayer.get_unique_id()
 	_join_state = 0
 	_join_msg = ""
@@ -264,6 +265,12 @@ func connect_and_join(addr: String, info: Dictionary) -> bool:
 		return false
 	online = true
 	return true
+
+
+func _client_timeouts(peer: ENetMultiplayerPeer) -> void:
+	var sp = peer.get_peer(1)
+	if sp != null:
+		sp.set_timeout(32, DOData.NET_PEER_TIMEOUT_MIN_MS, DOData.NET_PEER_TIMEOUT_MAX_MS)
 
 
 func connect_only(addr: String) -> bool:
@@ -295,6 +302,7 @@ func connect_only(addr: String) -> bool:
 		last_error = "Sunucuya ulasilamadi (%s:%d). Sunucu acik mi? Port/guvenlik duvari?" % [host, port]
 		disconnect_from_server()
 		return false
+	_client_timeouts(peer)
 	my_id = multiplayer.get_unique_id()
 	_join_state = 0
 	_join_msg = ""

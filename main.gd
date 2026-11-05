@@ -403,7 +403,7 @@ func _ready() -> void:
 	scene_environment.ambient_light_energy = 1.0
 		
 	# Bloom (Parlama) Ayarları
-	scene_environment.glow_enabled = true
+	scene_environment.glow_enabled = not OS.has_feature("mobile")   # glow mobilde takilma yapar
 	scene_environment.glow_intensity = 0.6
 	scene_environment.glow_bloom = 0.05
 	scene_environment.glow_hdr_threshold = 1.0
@@ -2925,7 +2925,8 @@ func _free_count(c: Dictionary, key: String, id: String, self_idx := -1) -> int:
 		self_idx = active_cfg_idx()
 	var n := inv_count(id) - (c[key] as Array).count(id)
 	n -= _reserved_elsewhere(self_idx, key, id)
-	n -= _drone_used_all(id)
+	# Droidlere takili esya yalnizca AYNI konfigurasyonda dusulur; Konfi 1'deki kullanim Konfi 2'yi azaltmaz.
+	n -= drone_items(c).count(id)
 	return maxi(0, n)
 
 
@@ -3159,8 +3160,8 @@ func _sanitize_drone_equip() -> void:
 	# ekipmani konfigurasyon basina sayilir (_free_count ile ayni kural). Eskiden iki konfigurasyonun
 	# toplami dusuluyordu: lazerler iki konfigte de takiliysa "boşta" 0 kaliyor ve droid ekipmani giriste siliniyordu.
 	var loads := _ship_loads()
-	var drone_used := {}   # tum konfigurasyonlarda droidlere takili adet (esya id -> adet)
 	for c in loads:
+		var drone_used := {}   # bu konfigurasyonda droidlere takili adet (esya id -> adet); konfigler birbirini azaltmaz
 		var ship_used := {}
 		for key in ["las", "gen"]:
 			for id in c[key]:
@@ -3470,15 +3471,37 @@ func buy_item(id: String, qty: int) -> bool:
 	return true
 
 
-func sell_item(id: String) -> bool:
+func _remove_drone_from_ship(id: String, idx: int) -> void:
+	# Satilan droidi tum konfigurasyonlardaki droid listesinden cikarir; ekipmanlar droidle birlikte kayar.
+	var loads := _ship_loads()
+	if loads.is_empty():
+		return
+	var base: Array = loads[0].drn
+	if idx < 0 or idx >= base.size() or str(base[idx]) != id:
+		idx = base.rfind(id)
+	if idx < 0:
+		return
+	for l in loads:
+		if idx < (l.drn as Array).size() and str(l.drn[idx]) == id:
+			_remap_drone_equip_on_remove(l, idx)
+			(l.drn as Array).remove_at(idx)
+
+
+func sell_item(id: String, drone_idx := -1) -> bool:
 	var d := item_def(id)
 	var have := inv_count(id)
 	if d.is_empty() or have <= 0:
 		return false
-	for c in SV.loads[SV.ship]:
-		var key := item_key(id)
-		if (c[key] as Array).count(id) >= have:
-			(c[key] as Array).erase(id)
+	if DOData.DRONES.has(id):
+		# Gemide takili olsa bile satilabilir: once gemiden cikar, sonra sat.
+		var c0 := cfg()
+		if (c0.drn as Array).count(id) > have - 1:
+			_remove_drone_from_ship(id, drone_idx)
+	else:
+		for c in SV.loads[SV.ship]:
+			var key := item_key(id)
+			if (c[key] as Array).count(id) >= have:
+				(c[key] as Array).erase(id)
 	inv_dict(id)[id] = have - 1
 	# Iade %40, YENI fiyat uzerinden (droid: en son alinan droidin fiyati). Sunucu ayni kurali uygular.
 	var unit: Array = [int(d.cr), int(d.uri)]
@@ -3490,6 +3513,8 @@ func sell_item(id: String) -> bool:
 	SV.uri += ruri
 	ensure_loadout()
 	_clamp_vitals()
+	if DOData.DRONES.has(id):
+		_update_drones(0.0)
 	toast("Satıldı: " + str(d.name))
 	save_game()
 	_send_market(id, -1, -rcr, -ruri)
@@ -5191,21 +5216,10 @@ func _update_jump_fx(dt: float) -> void:
 
 
 func _jump_flash_apply() -> void:
-	if dohud == null:
-		return
-	if jump_flash == null or not is_instance_valid(jump_flash):
-		if jump_flash_a <= 0.001:
-			return
-		jump_flash = ColorRect.new()
-		jump_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		jump_flash.z_index = 200
-		jump_flash.color = Color(0.82, 0.96, 1.0, 0.0)
-		dohud.add_child(jump_flash)
-	var a: float = clampf(jump_flash_a, 0.0, 1.0)
-	jump_flash.position = Vector2.ZERO
-	jump_flash.size = get_viewport().get_visible_rect().size
-	jump_flash.color = Color(0.82, 0.96, 1.0, a * a)
-	jump_flash.visible = a > 0.003
+	# Kapi gecisinde ekran beyazlasmasi kaldirildi (flas hicbir zaman cizilmez).
+	jump_flash_a = 0.0
+	if jump_flash != null and is_instance_valid(jump_flash):
+		jump_flash.visible = false
 
 
 # Yeni harita yuklendikten hemen sonra: karsi kapiyi patlat, gemiyi kapinin icinden baslat.

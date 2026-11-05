@@ -3161,6 +3161,8 @@ func _show_context_menu_for_item(item_id: String, is_equipped: bool, slot_key: S
 	context_menu.add_item("İncele", 0)
 	if is_equipped:
 		context_menu.add_item("Çıkar", 1)
+		if slot_key == "drn":
+			context_menu.add_item("Sat", 3)   # takili droid de satilabilir
 	else:
 		context_menu.add_item("Tak", 2)
 		context_menu.add_item("Sat", 3)
@@ -3183,7 +3185,10 @@ func _on_context_menu_action(id: int) -> void:
 				game.equip_item(item_id)
 				refresh()
 		3:
-			game.sell_item(item_id)
+			if str(ctx_meta.get("key", "")) == "drn":
+				game.sell_item(item_id, int(ctx_meta.get("index", -1)))
+			else:
+				game.sell_item(item_id)
 			refresh()
 
 
