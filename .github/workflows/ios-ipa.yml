@@ -69,9 +69,11 @@ jobs:
         run: |
           set -euo pipefail
           echo "Downloading iOS export templates for ${GODOT_VERSION}..."
-          curl -fL -o /tmp/ios_templates.zip "${IOS_TEMPLATES_URL}"
+          curl -fL -o /tmp/ios_templates.tpz "${IOS_TEMPLATES_URL}"
           mkdir -p "${TEMPLATES_DIR}"
-          unzip -o -q /tmp/ios_templates.zip -d /tmp/ios_templates_extract
+          unzip -o -q /tmp/ios_templates.tpz -d /tmp/ios_templates_extract
+          echo "=== Extracted template contents ==="
+          find /tmp/ios_templates_extract -type f | sort
           IOS_ZIP=$(find /tmp/ios_templates_extract -name "ios.zip" | head -1)
           if [ -z "$IOS_ZIP" ]; then
             echo "::error::ios.zip not found in iOS templates archive"
