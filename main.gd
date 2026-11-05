@@ -10,6 +10,8 @@ const UI_TEX := "res://assets/ui/%s.png"
 const MiniMap := preload("res://minimap.gd")
 const DOHud := preload("res://hud_do.gd")
 const ControlPanelScript := preload("res://control_panel.gd")
+const Music = preload("res://music_player.gd")
+const Sfx := preload("res://sfx.gd")   # lazer + NPC atis sesleri
 const LaserFX := preload("res://laser_fx.gd")
 const NpcFX := preload("res://npc_laser_fx.gd")   # NPC'lere ozgu lazer gorselleri (kodla cizilir)
 const Extras := preload("res://extras.gd")
@@ -1270,6 +1272,9 @@ func _build_galaxy_map() -> void:
 
 
 func toggle_galaxy() -> void:
+	# Uzay (galaksi) haritasi devre disi: M tusu, kontrol paneli ve mobilde hicbir yerden acilmaz.
+	gal_panel.visible = false
+	return
 	if not running:
 		return
 	if gal_panel.visible:
@@ -1315,6 +1320,16 @@ var auth_register: bool = false
 var pending_name: String = ""
 var pending_pass: String = ""
 var plate_layer: CanvasLayer
+# ---- BENI HATIRLA ----
+# Kullanici adi + sifre bu cihazda, cihaza ozel anahtarla SIFRELI dosyada tutulur (duz metin degil).
+# Editor (Godot) ve disa aktarilan oyun AYNI user:// klasorunu paylasir; bu yuzden dosya adi ve sifreleme anahtari
+# derleme turune gore ayridir: editorde kaydedilen hesap oyunda GORUNMEZ (ve tersi).
+const REMEMBER_MAX := 6
+var chk_remember: CheckBox
+var acc_panel: PanelContainer      # sagdaki "Kayitli hesaplar" paneli
+var acc_list: VBoxContainer
+var _last_login_pw: String = ""
+var _autologin_active: bool = false   # kayitli hesaba tiklanarak giris deneniyor (gecersizse kayit silinir)
 const RankSys = preload("res://rank_system.gd")
 var plate_rank: TextureRect   # nick solundaki rutbe rozeti
 var plate_box: HBoxContainer
@@ -1608,6 +1623,12 @@ func _build_main_menu(layer: Control) -> void:
 	le_pass2.secret = true
 	blk_pass2 = _lg_field_block(inner, "ŞİFRE (TEKRAR)", le_pass2, 2)
 	blk_pass2.visible = false
+	chk_remember = CheckBox.new()
+	chk_remember.text = "Beni bu cihazda hatırla"
+	chk_remember.focus_mode = Control.FOCUS_NONE
+	chk_remember.add_theme_font_size_override("font_size", 13)
+	chk_remember.add_theme_color_override("font_color", LG_MUTED)
+	inner.add_child(chk_remember)
 	lbl_auth_msg = _lg_label("", 12, LG_ERR)
 	lbl_auth_msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	lbl_auth_msg.custom_minimum_size = Vector2(0, 18)
@@ -1678,6 +1699,7 @@ func _build_main_menu(layer: Control) -> void:
 	var pulse := create_tween().set_loops()
 	pulse.tween_property(t, "modulate:a", 0.82, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	pulse.tween_property(t, "modulate:a", 1.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_remember_build_panel()
 
 
 func _lg_company_card(f: int) -> PanelContainer:
@@ -1784,6 +1806,148 @@ func _company_confirm() -> void:
 		_on_company_chosen(company_sel)
 
 
+# ------------------------------------------------------------------ BENI HATIRLA
+# Kayitli hesaplar bu cihazda, cihaza + derleme turune ozel anahtarla SIFRELI dosyada tutulur.
+# Baska bir cihaza kopyalanirsa cozulemez. Giris ekraninin sag tarafinda kullanici adi olarak listelenir;
+# tiklayinca sifre sorulmadan giris yapilir. Otomatik giris YOKTUR.
+func _remember_is_editor() -> bool:
+	return OS.has_feature("editor")
+
+
+func _remember_path() -> String:
+	return "user://novagate_remember_editor.dat" if _remember_is_editor() else "user://novagate_remember.dat"
+
+
+func _remember_key() -> String:
+	return "ng-remember|" + ("ed" if _remember_is_editor() else "rt") + "|" + OS.get_unique_id() + "|" + OS.get_user_data_dir()
+
+
+func _remember_list() -> Array:
+	var out: Array = []
+	if not FileAccess.file_exists(_remember_path()):
+		return out
+	var f := FileAccess.open_encrypted_with_pass(_remember_path(), FileAccess.READ, _remember_key())
+	if f == null:
+		return out   # anahtar uymuyor (baska cihaz / baska derleme) veya dosya bozuk -> hicbir hesap gosterilmez
+	var d = JSON.parse_string(f.get_as_text())
+	f.close()
+	if typeof(d) == TYPE_DICTIONARY and typeof((d as Dictionary).get("a")) == TYPE_ARRAY:
+		for it in (d["a"] as Array):
+			if typeof(it) == TYPE_DICTIONARY and str(it.get("u", "")) != "" and str(it.get("p", "")) != "":
+				out.append({"u": str(it["u"]), "p": str(it["p"])})
+	return out
+
+
+func _remember_store(arr: Array) -> void:
+	if arr.is_empty():
+		_remember_clear()
+		return
+	var f := FileAccess.open_encrypted_with_pass(_remember_path(), FileAccess.WRITE, _remember_key())
+	if f == null:
+		return
+	f.store_string(JSON.stringify({"a": arr}))
+	f.close()
+
+
+func _remember_save(nm: String, pw: String) -> void:
+	var arr: Array = _remember_list()
+	var out: Array = [{"u": nm, "p": pw}]   # en son giris yapilan hesap en ustte
+	for it in arr:
+		if str(it["u"]).to_lower() != nm.to_lower():
+			out.append(it)
+	while out.size() > REMEMBER_MAX:
+		out.pop_back()
+	_remember_store(out)
+
+
+func _remember_forget(nm: String) -> void:
+	var arr: Array = _remember_list()
+	var out: Array = []
+	for it in arr:
+		if str(it["u"]).to_lower() != nm.to_lower():
+			out.append(it)
+	if out.size() != arr.size():
+		_remember_store(out)
+	if acc_panel != null:
+		_remember_refresh()
+
+
+func _remember_clear() -> void:
+	if FileAccess.file_exists(_remember_path()):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(_remember_path()))
+
+
+# Giris ekraninin sag tarafindaki "KAYITLI HESAPLAR" paneli
+func _remember_build_panel() -> void:
+	acc_panel = PanelContainer.new()
+	acc_panel.add_theme_stylebox_override("panel", _lg_pad(_lg_box(Color(0.0, 0.03, 0.06, 0.88), Color(LG_GOLD.r, LG_GOLD.g, LG_GOLD.b, 0.55), 1, 6), 14, 12))
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	acc_panel.add_child(v)
+	v.add_child(_lg_label("KAYITLI HESAPLAR", 11, LG_MUTED, 2))
+	acc_list = VBoxContainer.new()
+	acc_list.add_theme_constant_override("separation", 6)
+	v.add_child(acc_list)
+	menu.add_child(acc_panel)
+	menu.resized.connect(_remember_layout)
+	auth_box.visibility_changed.connect(_remember_refresh)
+	_remember_refresh()
+
+
+func _remember_refresh() -> void:
+	if acc_panel == null or not is_instance_valid(acc_panel):
+		return
+	for ch in acc_list.get_children():
+		acc_list.remove_child(ch)
+		ch.queue_free()
+	var arr: Array = _remember_list()
+	for it in arr:
+		var nm: String = str(it["u"])
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		var b := Button.new()
+		b.text = nm
+		b.custom_minimum_size = Vector2(150, 44)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_lg_btn_ghost(b, 14)
+		b.pressed.connect(_remember_login.bind(nm))
+		row.add_child(b)
+		var x := Button.new()
+		x.text = "✕"
+		x.tooltip_text = "Bu hesabı listeden kaldır"
+		x.custom_minimum_size = Vector2(40, 44)
+		x.focus_mode = Control.FOCUS_NONE
+		_lg_btn_ghost(x, 13)
+		x.pressed.connect(_remember_forget.bind(nm))
+		row.add_child(x)
+		acc_list.add_child(row)
+	acc_panel.visible = not arr.is_empty() and auth_box != null and auth_box.visible and not auth_register
+	_remember_layout.call_deferred()
+
+
+func _remember_layout() -> void:
+	if acc_panel == null or not is_instance_valid(acc_panel) or menu == null:
+		return
+	acc_panel.reset_size()
+	var vs: Vector2 = menu.size
+	if vs.x >= 960.0:
+		acc_panel.position = Vector2(vs.x - acc_panel.size.x - 28.0, MENU_TOP_PAD + 60.0)   # kartin sagi
+	else:
+		acc_panel.position = Vector2((vs.x - acc_panel.size.x) * 0.5, vs.y - acc_panel.size.y - 12.0)   # dar ekran / telefon: altta
+
+
+# Listedeki hesaba tiklaninca: sifre yazmadan giris
+func _remember_login(nm: String) -> void:
+	for it in _remember_list():
+		if str(it["u"]).to_lower() == nm.to_lower():
+			le_user.text = str(it["u"])
+			le_pass.text = str(it["p"])
+			chk_remember.button_pressed = true
+			_autologin_active = true
+			_auth_submit()
+			return
+
+
 func _auth_toggle_mode() -> void:
 	_auth_set_mode(not auth_register)
 
@@ -1795,6 +1959,8 @@ func _auth_set_mode(reg: bool) -> void:
 	btn_auth_action.text = "DEVAM ET" if reg else "GİRİŞ YAP"
 	btn_auth_switch.text = "Zaten hesabın var mı?  GİRİŞ YAP" if reg else "Hesabın yok mu?  KAYIT OL"
 	blk_pass2.visible = reg
+	chk_remember.visible = not reg
+	_remember_refresh()
 	le_pass2.text = ""
 	lbl_auth_msg.text = ""
 
@@ -1863,6 +2029,7 @@ func _auth_submit() -> void:
 	# Giris: TLS ile auth_service'ye gonder
 	lbl_auth_msg.text = "Sunucuya dogrulaniyor..."
 	login_username = nm   # giris adi (nick degisse de sabit); sifre degistirmede kullanilir
+	_last_login_pw = pw
 	Net.login_via_tls(nm, pw)
 
 
@@ -1873,12 +2040,23 @@ func _on_auth_result(ok: bool, msg: String, acct_id: int = 0, callsign: String =
 	Basariliysa ENet sunucusuna token ile baglanir.
 	"""
 	if not ok:
+		# Aglanti/sunucu sorunu degilse (yani bilgiler gecersizse) kayitli bilgiyi sil
+		if _autologin_active and not (msg.begins_with("TLS") or msg.begins_with("Sunucu hatasi")):
+			_remember_forget(login_username)   # kayitli sifre artik gecersiz: yalnizca bu hesabi sil
+			le_pass.text = ""
+		_autologin_active = false
 		lbl_auth_msg.text = msg
 		menu.modulate = Color(1, 1, 1, 1)
 		menu.show()
 		auth_box.visible = true
 		company_box.visible = false
 		return
+	_autologin_active = false
+	if chk_remember != null and chk_remember.button_pressed and login_username != "" and _last_login_pw != "":
+		_remember_save(login_username, _last_login_pw)
+	elif login_username != "":
+		_remember_forget(login_username)   # "Beni hatirla" isaretli degil: bu hesap kayitliysa kaldir
+	_last_login_pw = ""
 	account_name = callsign
 	account_faction = faction
 	Net.session_token = token
@@ -2050,6 +2228,7 @@ func _on_company_chosen(f: int) -> void:
 			_company_back()
 			return
 		login_username = pending_name
+		_last_login_pw = reg_pass
 		Net.login_via_tls(pending_name, reg_pass))
 
 	req.request(url, headers, HTTPClient.METHOD_POST, reg_body)
@@ -2077,6 +2256,7 @@ func _build_plate() -> void:
 	plate_box.add_child(plate_rank)
 	plate_name = Label.new()
 	plate_name.text = str(SV.get("callsign", "Gezgin"))
+	plate_name.name = "NameLbl"
 	plate_name.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	plate_name.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	plate_name.add_theme_font_override("font", SCI_FONT)
@@ -2114,6 +2294,7 @@ func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false,
 	# Isim once (solda)
 	var lb := Label.new()
 	lb.text = nm
+	lb.name = "NameLbl"
 	lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	lb.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lb.add_theme_font_override("font", SCI_FONT)
@@ -2163,6 +2344,55 @@ func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false,
 	plate_layer.add_child(box)
 	box.reset_size()
 	return box
+
+
+# ---------- KLAN ETIKETI: isim plakasinda "[TAG]" (kendi klan uyeleri yesil, digerleri altin) ----------
+func set_plate_clan(box, tag: String, mate: bool) -> void:
+	if box == null or not is_instance_valid(box):
+		return
+	var lbl: Label = box.get_node_or_null("ClanTag") as Label
+	if tag == "":
+		if lbl != null:
+			box.remove_child(lbl)
+			lbl.queue_free()
+		return
+	var nl: Label = box.get_node_or_null("NameLbl") as Label
+	if lbl == null:
+		lbl = Label.new()
+		lbl.name = "ClanTag"
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lbl.add_theme_font_override("font", SCI_FONT)
+		lbl.add_theme_font_size_override("font_size", nl.get_theme_font_size("font_size") if nl != null else 10)
+		lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+		lbl.add_theme_constant_override("outline_size", 3)
+		box.add_child(lbl)
+		if nl != null:
+			box.move_child(lbl, nl.get_index())
+	lbl.text = "[%s]" % tag
+	lbl.add_theme_color_override("font_color", Color(0.35, 1.0, 0.45) if mate else Color(1.0, 0.85, 0.4))
+
+
+func clan_apply_ent(e) -> void:
+	if Net.gm == null or Net.gm.clan == null:
+		return
+	var C = Net.gm.clan
+	var peer: int = int(e.get("peer", 0))
+	var tag: String = C.tag_of(peer)
+	set_plate_clan(e.get("plate"), tag, C.is_clanmate(peer))
+	var nt = e.get("name_tag")
+	if nt != null and is_instance_valid(nt):
+		var nm: String = str(e.get("name", ""))
+		nt.text = ("[%s] %s" % [tag, nm]) if tag != "" else nm
+
+
+func refresh_clan_plates() -> void:
+	if Net.gm == null or Net.gm.clan == null:
+		return
+	if plate_box != null and is_instance_valid(plate_box):
+		set_plate_clan(plate_box, Net.gm.clan.my_tag(), true)
+	for e in Net.gm.players.values():
+		clan_apply_ent(e)
 
 
 func update_remote_plate(box, node: Node3D, show: bool) -> void:
@@ -2924,15 +3154,17 @@ func _remap_drone_equip_on_remove(c: Dictionary, idx: int) -> void:
 
 
 func _sanitize_drone_equip() -> void:
-	# Gecersiz droid/slot/esya ve envanterde olmayan adetleri temizler (gemi ekipmani oncelikli).
+	# Gecersiz droid/slot/esya ve envanterde olmayan adetleri temizler.
+	# Bir esya iki konfigurasyonda birden gemiye takili olabilir (bkz. _reserved_elsewhere), bu yuzden gemi
+	# ekipmani konfigurasyon basina sayilir (_free_count ile ayni kural). Eskiden iki konfigurasyonun
+	# toplami dusuluyordu: lazerler iki konfigte de takiliysa "boşta" 0 kaliyor ve droid ekipmani giriste siliniyordu.
 	var loads := _ship_loads()
-	var ship_used := {}
+	var drone_used := {}   # tum konfigurasyonlarda droidlere takili adet (esya id -> adet)
 	for c in loads:
+		var ship_used := {}
 		for key in ["las", "gen"]:
 			for id in c[key]:
 				ship_used[str(id)] = int(ship_used.get(str(id), 0)) + 1
-	var left := {}
-	for c in loads:
 		var de := _cfg_drone_equip(c)
 		var clean := {}
 		for i in (c.drn as Array).size():
@@ -2948,11 +3180,10 @@ func _sanitize_drone_equip() -> void:
 				var iid := str((de[uid] as Dictionary)[k])
 				if not drone_accepts(iid):
 					continue
-				if not left.has(iid):
-					left[iid] = int(SV.inv.get(iid, 0)) - int(ship_used.get(iid, 0))
-				if int(left[iid]) <= 0:
+				var free: int = int(SV.inv.get(iid, 0)) - int(ship_used.get(iid, 0)) - int(drone_used.get(iid, 0))
+				if free <= 0:
 					continue
-				left[iid] = int(left[iid]) - 1
+				drone_used[iid] = int(drone_used.get(iid, 0)) + 1
 				slots[k] = iid
 			if not slots.is_empty():
 				clean[uid] = slots
@@ -3273,6 +3504,7 @@ func buy_form(code: String) -> bool:
 	SV.forms.append(code)
 	toast("Formasyon açıldı: " + str(DOData.FORMS[code].name))
 	save_game()
+	_send_market("form:" + code, 1, int(DOData.FORMS[code].cr), 0)   # sunucu bakiyeyi dusup sahipligi kaydeder
 	return true
 
 
@@ -3787,6 +4019,8 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 			lbl_auth_msg.text = "Sunucuya bağlanılamadı: " + Net.last_error
 			return
 	menu.hide()
+	Music.start()   # giris yapilir yapilmaz arka plan muzigi baslar (surekli dongu)
+	Sfx.start()     # lazer / NPC ses efektleri
 	ensure_campaign_data()
 	ensure_loadout()
 	stars_on = bool(SV.settings.stars)
@@ -3820,7 +4054,15 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 		_enter_wreck()   # tamir edilmeden cikis-giris yapilsa da gemi enkaz kalir
 	_loadout_sig = ""
 	_sync_loadout()   # sunucudaki kayitla esitle (yeni hesapta otomatik donanim da kalici olur)
-	toast("Hoş geldin! Tıkla: hareket/hedef  |  Ctrl/Boşluk: lazer  |  R: roket  |  J: kapı  |  M: harita")
+	toast("Hoş geldin! Tıkla: hareket/hedef  |  Ctrl/Boşluk: lazer  |  R: roket  |  J: kapı")
+	# KLAN ETIKETI: sunucu clan_state / clan_tags'i giriste, isim plakasi (_build_plate) olusmadan ONCE yolluyor;
+	# o an plaka olmadigi icin etiket cizilmiyordu (klan sekmesi acilinca durum yeniden gelince gorunuyordu).
+	# Plaka hazir olduktan sonra eldeki durumu yeniden uygula ve sunucudan taze durum iste.
+	if Net.gm != null and Net.gm.clan != null:
+		if Net.gm.clan.has_state:
+			Net.gm.clan._after_state()   # klan sekmesi + plakalar
+		Net.gm.clan.request_state()
+	refresh_clan_plates()
 
 
 func load_map(name: String, arrive: Vector3) -> void:
@@ -4599,8 +4841,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				_select_next()
 			KEY_B:
 				toggle_base()
-			KEY_M:
-				toggle_galaxy()
 			KEY_H:
 				toggle_help()
 			KEY_C:
@@ -4654,11 +4894,16 @@ func _clamp_map(v: Vector3) -> Vector3:
 const PICK_MIN_R := 3.5   # hedef secme icin asgari tiklama yaricapi (Godot birimi)
 
 
+# EMA: hedef kilidi bozulmus (3 sn hedeflenemez) oyuncu hedef secilemez / kilitlenemez.
+func target_ok(e) -> bool:
+	return float(e.get("ema_until", 0.0)) <= clock
+
+
 func _pick_enemy(hit: Vector3):
 	var best = null
 	var bd := 1e9
 	for e in enemies:
-		if not is_instance_valid(e.node) or float(e.hp) <= 0.0:
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0 or not target_ok(e):
 			continue
 		# Kucuk gemiler (Protegit) de tiklanabilsin: tiklama yaricapi en az PICK_MIN_R.
 		var r: float = maxf(float(e.node.get_meta("r", 3.0)) * 1.5, PICK_MIN_R)
@@ -4713,6 +4958,36 @@ func _left_press(pos: Vector2, dbl: bool) -> void:
 	_cancel_collect()
 	dest = _clamp_map(hit)
 	holding = true
+
+
+# Mobil "Kutu topla" butonu: toplama sürüyorsa iptal eder, değilse en yakın kutuya gidip toplar
+# (kutuya tıklamakla aynı akış: gemi kutuya gider -> toplama animasyonu -> ödül).
+func collect_nearest_box() -> void:
+	if not running or P == null or not is_instance_valid(P.node):
+		return
+	if collect_box != null:
+		_cancel_collect()
+		dest = null
+		toast("Kutu toplama iptal edildi.")
+		return
+	var pp: Vector3 = P.node.position
+	var best = null
+	var bd := INF
+	for b in boxes:
+		if not is_instance_valid(b.node):
+			continue
+		var d: float = Vector2(b.node.position.x - pp.x, b.node.position.z - pp.z).length()
+		if d < bd:
+			bd = d
+			best = b
+	if best == null:
+		toast("Yakında toplanacak kutu yok.")
+		return
+	_cancel_collect()
+	collect_box = best
+	collect_t = 0.0
+	dest = _clamp_map(best.node.position)
+	holding = false
 
 
 func _pick_box(hit: Vector3):
@@ -4825,7 +5100,7 @@ func _select_next() -> void:
 	var best = null
 	var bd := 1e9
 	for e in enemies:
-		if is_same(e, target):
+		if is_same(e, target) or not target_ok(e):
 			continue
 		var d: float = e.node.position.distance_to(P.node.position)
 		if d < bd:
@@ -5749,7 +6024,10 @@ func on_purchase_result(ok: bool, error: String, tx_id: String, new_cr: int, new
 		var pqty: int = int(pending.qty)
 		SV.cr = int(SV.cr) + int(pending.cr)     # alimda +, satista - (iade geri alinir)
 		SV.uri = int(SV.uri) + int(pending.uri)
-		if DOData.SHIPS.any(func(sh): return str(sh.id) == pid):
+		if pid.begins_with("form:"):
+			if error != "already_owned":
+				SV.forms.erase(pid.substr(5))
+		elif DOData.SHIPS.any(func(sh): return str(sh.id) == pid):
 			SV.owned.erase(pid)
 		elif DOData.AMMO.any(func(am): return str(am.id) == pid):
 			SV.ammo[pid] = maxi(0, int(SV.ammo.get(pid, 0)) - pqty)
@@ -5852,6 +6130,7 @@ func player_volley(po: Vector3) -> void:
 			toast("%s cephanesi bitti, %s ile atiliyor." % [str(SV.get("sel", "")).to_upper(), str(best.name)])
 		id = str(best.id)
 	SV.ammo[id] -= n
+	Sfx.play(id)   # bu salvoda hangi muhimmat (x1/x2/x3/x4/rsb) atiliyorsa onun sesi
 	register_attack()   # guvenli bolgeden ates acmak korumayi derhal kaldirir (hedef NPC de olsa oyuncu da olsa)
 	var total := 0.0
 	for l in las:
@@ -6006,6 +6285,7 @@ func _npc_bolt(e: Dictionary, j: int, dmg: float, gen: int) -> void:
 		from = en.position + dir * 1.5 + side * [-0.9, 0.9, 0.0][j % 3]
 	else:
 		from = hps[j % hps.size()]["p"]
+	Sfx.play("npc", en.position, P.node.position)   # NPC atis sesi (mesafeye gore)
 	fire_bolt(from, null, "enemy", Color(1.0, 0.3, 0.35), dmg, {}, "n_" + str(e.get("id", "")))
 	NpcFX.flash(self, from, "n_" + str(e.get("id", "")))
 
@@ -6167,8 +6447,8 @@ func _update_game(dt: float) -> void:
 	var range_u: float = DOData.LASER_RANGE * DOData.S
 	_update_protection(po)
 	_update_safe_labels(dt)
-	if target != null and target.hp <= 0.0:
-		target = null
+	if target != null and (target.hp <= 0.0 or not target_ok(target)):
+		target = null   # olu ya da EMA ile kilidi bozulmus hedef: kilit duser
 	if target == null:
 		fire = false
 

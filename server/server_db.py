@@ -245,6 +245,27 @@ def init_db() -> None:
             npc_count INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         )""")
+
+        # company_events tablo (admin panelinden sirkete ozel bonus etkinligi)
+        conn.execute("""CREATE TABLE IF NOT EXISTS company_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            faction INTEGER NOT NULL DEFAULT 0,
+            bonus_pct INTEGER NOT NULL,
+            scope_npc INTEGER NOT NULL DEFAULT 1,
+            scope_pvp INTEGER NOT NULL DEFAULT 0,
+            resources TEXT NOT NULL DEFAULT 'cr,uri,xp,hon',
+            starts_at INTEGER NOT NULL,
+            ends_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            created_by TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            note TEXT,
+            boosted_rewards INTEGER NOT NULL DEFAULT 0,
+            extra_cr INTEGER NOT NULL DEFAULT 0,
+            extra_uri INTEGER NOT NULL DEFAULT 0,
+            extra_xp REAL NOT NULL DEFAULT 0,
+            extra_hon REAL NOT NULL DEFAULT 0
+        )""")
     finally:
         conn.close()
 
@@ -410,7 +431,7 @@ def load_player_state(account_id: int) -> dict | None:
         drone_equip = {r["drone_id"]: bool(r["equipped"]) for r in drones_rows}
 
         forms_rows = conn.execute("SELECT form_id FROM player_forms WHERE account_id = ?", (account_id,)).fetchall()
-        forms = [r["form_id"] for r in forms_rows]
+        forms = ["std"] + [r["form_id"] for r in forms_rows if r["form_id"] != "std"]   # standart halka herkeste vardir
 
         loads_rows = conn.execute("SELECT load_key, load_data FROM player_loads WHERE account_id = ?", (account_id,)).fetchall()
         loads = {}
@@ -528,6 +549,9 @@ CAT_DRONE_PRICES = {'flax': ('cr', [100000, 200000, 400000, 800000, 1600000, 320
  'iris': ('uri', [15000, 24000, 42000, 60000, 84000, 96000, 126000, 200000, 375000, 589000])}
 CAT_MAX_DRONES = 10
 CAT_SELL_RATE = 0.4
+# Droid formasyonlari (data.gd FORMS ile ayni fiyatlar, yalnizca kredi). "std" ucretsiz ve herkeste vardir.
+CAT_FORMS = {"tu": 25000, "ar": 25000, "la": 30000, "st": 35000, "pi": 40000, "da": 45000,
+             "di": 50000, "ch": 55000, "mo": 60000, "cr": 70000, "he": 80000, "ba": 90000}
 
 
 def _drone_total(conn, account_id: int) -> int:
@@ -537,6 +561,8 @@ def _drone_total(conn, account_id: int) -> int:
 
 
 def _item_kind(item_id: str) -> str:
+    if item_id.startswith("form:") and item_id[5:] in CAT_FORMS:
+        return "form"
     if item_id in CAT_SHIPS or item_id in CAT_SHIP_HIDDEN:
         return "ship"
     if item_id in CAT_LASERS:
@@ -588,6 +614,8 @@ def purchase_item(account_id: int, item_id: str, quantity: int, tx_id: str,
         return {"ok": False, "error": "invalid_quantity"}
     if kind == "ship" and (item_id in CAT_SHIP_HIDDEN or selling or n != 1):
         return {"ok": False, "error": "not_purchasable"}
+    if kind == "form" and (selling or n != 1):
+        return {"ok": False, "error": "not_purchasable"}
     if kind == "ammo" and (selling or n not in CAT_AMMO_PACKS):
         return {"ok": False, "error": "invalid_pack"}
     if kind in ("laser", "gen", "drone") and n > (CAT_MAX_DRONES if kind == "drone" else 1000):
@@ -623,6 +651,10 @@ def purchase_item(account_id: int, item_id: str, quantity: int, tx_id: str,
             if conn.execute("SELECT 1 FROM player_ships WHERE account_id = ? AND ship_id = ?", (account_id, item_id)).fetchone():
                 return fail("already_owned")
             cost_cr, cost_uri = CAT_SHIPS[item_id]
+        elif kind == "form":
+            if conn.execute("SELECT 1 FROM player_forms WHERE account_id = ? AND form_id = ?", (account_id, item_id[5:])).fetchone():
+                return fail("already_owned")
+            cost_cr, cost_uri = CAT_FORMS[item_id[5:]], 0
         elif kind == "ammo":
             mult, per1000, cur = CAT_AMMO[item_id]
             tot = per1000 * n // 1000
@@ -663,6 +695,8 @@ def purchase_item(account_id: int, item_id: str, quantity: int, tx_id: str,
         )
         if kind == "ship":
             conn.execute("INSERT INTO player_ships (account_id, ship_id, acquired_at) VALUES (?, ?, ?)", (account_id, item_id, now))
+        elif kind == "form":
+            conn.execute("INSERT OR IGNORE INTO player_forms (account_id, form_id) VALUES (?, ?)", (account_id, item_id[5:]))
         elif kind == "ammo":
             conn.execute(
                 "INSERT INTO ammo (account_id, ammo_id, quantity) VALUES (?, ?, ?) "
@@ -1142,6 +1176,47 @@ def get_npc_overrides() -> dict:
         conn.close()
 
 
+MAX_EVENT_BONUS_PCT_SERVER = 1000   # panelle ayni ust sinir; bozuk veri gelirse sunucu yine de sinirlar
+
+
+def get_active_events() -> list:
+    """Su an gecerli (baslamis, bitmemis, elle iptal edilmemis) sirket bonus etkinlikleri."""
+    conn = get_db()
+    try:
+        t = now_ts()
+        rows = conn.execute(
+            "SELECT id, faction, bonus_pct, scope_npc, scope_pvp, resources, starts_at, ends_at "
+            "FROM company_events WHERE ended_at IS NULL AND ends_at > ? ORDER BY starts_at", (t,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["bonus_pct"] = max(0, min(int(d["bonus_pct"]), MAX_EVENT_BONUS_PCT_SERVER))
+            out.append(d)
+        return out
+    except Exception as e:
+        log.error("get_active_events hata: %s", e)
+        return []
+    finally:
+        conn.close()
+
+
+def record_event_bonus(event_id: int, cr: int, uri: int, xp: float, hon: float) -> dict:
+    """Etkinlik sayesinde verilen EKSTRA odulu etkinlik satirina ekler (istatistik)."""
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE company_events SET boosted_rewards = boosted_rewards + 1, "
+            "extra_cr = extra_cr + ?, extra_uri = extra_uri + ?, extra_xp = extra_xp + ?, extra_hon = extra_hon + ? "
+            "WHERE id = ?",
+            (max(int(cr), 0), max(int(uri), 0), max(float(xp), 0.0), max(float(hon), 0.0), int(event_id)))
+        return {"ok": True}
+    except Exception as e:
+        log.error("record_event_bonus hata: %s", e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
 def get_account_status(account_id: int) -> dict:
     """Hesap ban/mute durumunu dondurur."""
     conn = get_db()
@@ -1335,6 +1410,14 @@ def change_faction(account_id: int, new_faction: int) -> dict:
     new_faction = int(new_faction)
     if new_faction not in FACTION_HOME_MAP:
         return {"ok": False, "error": "gecersiz_sirket"}
+    _gc = get_db()
+    try:
+        if _gc.execute("SELECT 1 FROM clan_members WHERE account_id = ?", (account_id,)).fetchone():
+            return {"ok": False, "error": "klanda"}   # klan sirkete bagli: once klandan ayril
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        _gc.close()
     a = _auth_db()
     try:
         row = a.execute("SELECT faction, faction_changed_at FROM accounts WHERE id = ?", (account_id,)).fetchone()
@@ -1811,6 +1894,425 @@ def run_restore(encrypted_path: str, backup_key: bytes, restore_db_path: str) ->
 # ---------------------------------------------------------------------------
 # TCP/JSON SUNUCU (127.0.0.1:54321)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# KLAN SISTEMI  -- tum dogrulama SUNUCUDA (istemci verisine guvenilmez)
+# ---------------------------------------------------------------------------
+CLAN_MAX_MEMBERS = 50
+CLAN_NAME_MIN, CLAN_NAME_MAX = 3, 20
+CLAN_TAG_MIN, CLAN_TAG_MAX = 2, 4
+CLAN_DESC_MAX = 200
+CLAN_CREATE_COST_CR = 0          # klan kurma bedeli (kredi). 0 = ucretsiz. Istersen buradan ayarla.
+CLAN_ROLE_MEMBER, CLAN_ROLE_OFFICER, CLAN_ROLE_LEADER = 0, 1, 2
+
+
+def init_clan_tables() -> None:
+    conn = get_db()
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS clans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                tag TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                faction INTEGER NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS clan_members (
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+                role INTEGER NOT NULL DEFAULT 0,
+                joined_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_clan_members_clan ON clan_members(clan_id);
+            CREATE TABLE IF NOT EXISTS clan_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clan_id INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('apply','invite')),
+                by_account INTEGER,
+                created_at INTEGER NOT NULL,
+                UNIQUE(clan_id, account_id, kind)
+            );
+        """)
+    finally:
+        conn.close()
+
+
+init_clan_tables()
+
+
+def _clan_name_ok(name: str) -> bool:
+    if not (CLAN_NAME_MIN <= len(name) <= CLAN_NAME_MAX) or not name.isascii():
+        return False
+    if name != name.strip() or "  " in name:
+        return False
+    return all(ch.isalnum() or ch in " _-" for ch in name)
+
+
+def _clan_tag_ok(tag: str) -> bool:
+    return CLAN_TAG_MIN <= len(tag) <= CLAN_TAG_MAX and tag.isascii() and tag.isalnum()
+
+
+def _clan_of(conn, account_id: int):
+    return conn.execute(
+        "SELECT c.*, m.role AS my_role FROM clan_members m JOIN clans c ON c.id = m.clan_id WHERE m.account_id = ?",
+        (account_id,)).fetchone()
+
+
+def _clan_count(conn, clan_id: int) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM clan_members WHERE clan_id = ?", (clan_id,)).fetchone()[0])
+
+
+def clan_tag_of(account_id: int) -> dict:
+    """Giris aninda / uyelik degisince: oyuncunun klan kimligi."""
+    conn = get_db()
+    try:
+        c = _clan_of(conn, int(account_id))
+        if not c:
+            return {"ok": True, "clan_id": 0, "tag": "", "name": "", "role": 0}
+        return {"ok": True, "clan_id": int(c["id"]), "tag": str(c["tag"]), "name": str(c["name"]), "role": int(c["my_role"])}
+    finally:
+        conn.close()
+
+
+def _clan_state(conn, account_id: int) -> dict:
+    me = conn.execute("SELECT faction FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    out = {"ok": True, "clan": None, "invites": [], "applied": [], "cost": CLAN_CREATE_COST_CR}
+    c = _clan_of(conn, account_id)
+    if c:
+        role = int(c["my_role"])
+        members = conn.execute(
+            "SELECT m.account_id, m.role, m.joined_at, a.callsign FROM clan_members m "
+            "JOIN accounts a ON a.id = m.account_id WHERE m.clan_id = ? ORDER BY m.role DESC, m.joined_at ASC",
+            (int(c["id"]),)).fetchall()
+        clan = {
+            "id": int(c["id"]), "name": str(c["name"]), "tag": str(c["tag"]), "faction": int(c["faction"]),
+            "description": str(c["description"]), "created_at": int(c["created_at"]), "role": role,
+            "max": CLAN_MAX_MEMBERS,
+            "members": [{"account_id": int(r["account_id"]), "callsign": str(r["callsign"]), "role": int(r["role"]),
+                         "joined_at": int(r["joined_at"])} for r in members],
+            "requests": [], "invited": [],
+        }
+        if role >= CLAN_ROLE_OFFICER:
+            rq = conn.execute(
+                "SELECT r.account_id, r.kind, r.created_at, a.callsign FROM clan_requests r "
+                "JOIN accounts a ON a.id = r.account_id WHERE r.clan_id = ? ORDER BY r.created_at ASC",
+                (int(c["id"]),)).fetchall()
+            clan["requests"] = [{"account_id": int(r["account_id"]), "callsign": str(r["callsign"]),
+                                 "created_at": int(r["created_at"])} for r in rq if r["kind"] == "apply"]
+            clan["invited"] = [{"account_id": int(r["account_id"]), "callsign": str(r["callsign"])}
+                               for r in rq if r["kind"] == "invite"]
+        out["clan"] = clan
+    else:
+        inv = conn.execute(
+            "SELECT c.id, c.name, c.tag, c.description FROM clan_requests r JOIN clans c ON c.id = r.clan_id "
+            "WHERE r.account_id = ? AND r.kind = 'invite' ORDER BY r.created_at DESC", (account_id,)).fetchall()
+        out["invites"] = [{"clan_id": int(r["id"]), "name": str(r["name"]), "tag": str(r["tag"]),
+                           "members": _clan_count(conn, int(r["id"]))} for r in inv]
+        ap = conn.execute(
+            "SELECT c.id, c.name, c.tag FROM clan_requests r JOIN clans c ON c.id = r.clan_id "
+            "WHERE r.account_id = ? AND r.kind = 'apply' ORDER BY r.created_at DESC", (account_id,)).fetchall()
+        out["applied"] = [{"clan_id": int(r["id"]), "name": str(r["name"]), "tag": str(r["tag"])} for r in ap]
+    return out
+
+
+def _clan_join(conn, clan_id: int, account_id: int, faction: int) -> str:
+    """Hesabi klana ekler. Hata kodu dondurur ('' = basarili). Cagiran BEGIN IMMEDIATE icinde olmali."""
+    clan = conn.execute("SELECT * FROM clans WHERE id = ?", (clan_id,)).fetchone()
+    if not clan:
+        return "klan_yok"
+    if _clan_of(conn, account_id):
+        return "zaten_klanda"
+    if int(clan["faction"]) != int(faction):
+        return "farkli_sirket"
+    if _clan_count(conn, clan_id) >= CLAN_MAX_MEMBERS:
+        return "klan_dolu"
+    conn.execute("INSERT INTO clan_members(account_id, clan_id, role, joined_at) VALUES (?,?,?,?)",
+                 (account_id, clan_id, CLAN_ROLE_MEMBER, now_ts()))
+    conn.execute("DELETE FROM clan_requests WHERE account_id = ?", (account_id,))
+    return ""
+
+
+def _sync_game_account_from_auth(conn, account_id: int) -> bool:
+    """Auth DB'deki hesabi (varsa) oyun DB'sine kopyalar. Hesap auth DB'de de yoksa False doner."""
+    try:
+        a = _auth_db()
+        try:
+            r = a.execute("SELECT username, callsign, faction FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        finally:
+            a.close()
+        if not r:
+            return False
+        conn.execute(
+            "INSERT OR IGNORE INTO accounts (id, username, password_hash, faction, callsign, created_at) "
+            "VALUES (?, ?, '', ?, ?, ?)",
+            (account_id, r[0], int(r[2]), r[1], now_ts()),
+        )
+        return True
+    except Exception as e:
+        log.warning("auth->oyun hesap aktarimi basarisiz (account_id=%s): %s", account_id, e)
+        return False
+
+
+def clan_op(account_id: int, op: str, args: dict) -> dict:
+    account_id = int(account_id)
+    if not isinstance(args, dict):
+        args = {}
+    conn = get_db()
+    try:
+        acc = conn.execute("SELECT id, faction, callsign FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not acc:
+            # [KLAN-FIX] Yeni kayitli hesap auth DB'de var ama oyun DB'sine henuz oyuna girilmedigi icin
+            # aktarilmamis olabilir: auth DB'de gercekten varsa oyun DB'sine aktar, yoksa hesap_yok.
+            if _sync_game_account_from_auth(conn, account_id):
+                acc = conn.execute("SELECT id, faction, callsign FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not acc:
+            return {"ok": False, "error": "hesap_yok"}
+        faction = int(acc["faction"])
+
+        # ---------------- salt-okunur islemler
+        if op == "me":
+            return _clan_state(conn, account_id)
+        if op == "list":
+            q = str(args.get("q", "")).strip()[:20]
+            rows = conn.execute(
+                "SELECT c.id, c.name, c.tag, c.description, (SELECT COUNT(*) FROM clan_members m WHERE m.clan_id = c.id) AS n, "
+                "(SELECT 1 FROM clan_requests r WHERE r.clan_id = c.id AND r.account_id = ? AND r.kind = 'apply') AS applied "
+                "FROM clans c WHERE c.faction = ? AND (? = '' OR c.name LIKE ? ESCAPE '\\' OR c.tag LIKE ? ESCAPE '\\') "
+                "ORDER BY n DESC, c.name ASC LIMIT 50",
+                (account_id, faction, q, "%" + q.replace("%", "").replace("_", "\\_") + "%",
+                 "%" + q.replace("%", "").replace("_", "\\_") + "%")).fetchall()
+            return {"ok": True, "clans": [{"id": int(r["id"]), "name": str(r["name"]), "tag": str(r["tag"]),
+                                           "description": str(r["description"]), "members": int(r["n"]),
+                                           "max": CLAN_MAX_MEMBERS, "applied": bool(r["applied"])} for r in rows]}
+
+        # ---------------- yazan islemler (tek transaction)
+        conn.execute("BEGIN IMMEDIATE")
+        affected = [account_id]
+        err = ""
+        mine = _clan_of(conn, account_id)
+        my_role = int(mine["my_role"]) if mine else -1
+        # Islemden ONCE uyeleri topla (dagitma / ayrilma sonrasi satirlar silinir).
+        prev_members = [int(r["account_id"]) for r in conn.execute(
+            "SELECT account_id FROM clan_members WHERE clan_id = ?", (int(mine["id"]),)).fetchall()] if mine else []
+        extra_clan = 0
+        target_id = 0
+
+        def target_row(tid: int):
+            return conn.execute(
+                "SELECT m.account_id, m.role, a.callsign FROM clan_members m JOIN accounts a ON a.id = m.account_id "
+                "WHERE m.account_id = ? AND m.clan_id = ?", (tid, int(mine["id"]))).fetchone() if mine else None
+
+        if op == "create":
+            name = str(args.get("name", "")).strip()
+            tag = str(args.get("tag", "")).strip().upper()
+            desc = str(args.get("description", "")).strip()[:CLAN_DESC_MAX]
+            if mine:
+                err = "zaten_klanda"
+            elif not _clan_name_ok(name):
+                err = "gecersiz_klan_adi"
+            elif not _clan_tag_ok(tag):
+                err = "gecersiz_tag"
+            elif conn.execute("SELECT 1 FROM clans WHERE name = ? COLLATE NOCASE", (name,)).fetchone():
+                err = "klan_adi_kullanimda"
+            elif conn.execute("SELECT 1 FROM clans WHERE tag = ? COLLATE NOCASE", (tag,)).fetchone():
+                err = "tag_kullanimda"
+            else:
+                if CLAN_CREATE_COST_CR > 0:
+                    row = conn.execute("SELECT cr FROM player_data WHERE account_id = ?", (account_id,)).fetchone()
+                    if not row or int(row["cr"]) < CLAN_CREATE_COST_CR:
+                        err = "yetersiz_kredi"
+                    else:
+                        conn.execute("UPDATE player_data SET cr = cr - ? WHERE account_id = ?", (CLAN_CREATE_COST_CR, account_id))
+                if not err:
+                    cur = conn.execute("INSERT INTO clans(name, tag, faction, description, created_at) VALUES (?,?,?,?,?)",
+                                       (name, tag, faction, desc, now_ts()))
+                    conn.execute("INSERT INTO clan_members(account_id, clan_id, role, joined_at) VALUES (?,?,?,?)",
+                                 (account_id, int(cur.lastrowid), CLAN_ROLE_LEADER, now_ts()))
+                    conn.execute("DELETE FROM clan_requests WHERE account_id = ?", (account_id,))
+
+        elif op == "apply":
+            cid = int(args.get("clan_id", 0))
+            clan = conn.execute("SELECT * FROM clans WHERE id = ?", (cid,)).fetchone()
+            if mine:
+                err = "zaten_klanda"
+            elif not clan:
+                err = "klan_yok"
+            elif int(clan["faction"]) != faction:
+                err = "farkli_sirket"
+            elif _clan_count(conn, cid) >= CLAN_MAX_MEMBERS:
+                err = "klan_dolu"
+            elif conn.execute("SELECT COUNT(*) FROM clan_requests WHERE account_id = ? AND kind = 'apply'", (account_id,)).fetchone()[0] >= 5:
+                err = "cok_basvuru"
+            else:
+                conn.execute("INSERT OR IGNORE INTO clan_requests(clan_id, account_id, kind, by_account, created_at) VALUES (?,?,?,?,?)",
+                             (cid, account_id, "apply", account_id, now_ts()))
+                extra_clan = cid
+
+        elif op == "cancel_apply":
+            extra_clan = int(args.get("clan_id", 0))
+            conn.execute("DELETE FROM clan_requests WHERE clan_id = ? AND account_id = ? AND kind = 'apply'",
+                         (extra_clan, account_id))
+
+        elif op == "accept_invite":
+            cid = int(args.get("clan_id", 0))
+            inv = conn.execute("SELECT 1 FROM clan_requests WHERE clan_id = ? AND account_id = ? AND kind = 'invite'", (cid, account_id)).fetchone()
+            if not inv:
+                err = "davet_yok"
+            else:
+                err = _clan_join(conn, cid, account_id, faction)
+
+        elif op == "decline_invite":
+            conn.execute("DELETE FROM clan_requests WHERE clan_id = ? AND account_id = ? AND kind = 'invite'",
+                         (int(args.get("clan_id", 0)), account_id))
+
+        elif op == "invite":
+            if my_role < CLAN_ROLE_OFFICER:
+                err = "yetki_yok"
+            else:
+                nm = str(args.get("callsign", "")).strip()
+                tgt = conn.execute("SELECT id, faction FROM accounts WHERE callsign = ? COLLATE NOCASE", (nm,)).fetchone()
+                if not tgt:
+                    err = "oyuncu_yok"
+                elif int(tgt["faction"]) != int(mine["faction"]):
+                    err = "farkli_sirket"
+                elif _clan_of(conn, int(tgt["id"])):
+                    err = "oyuncu_klanda"
+                elif _clan_count(conn, int(mine["id"])) >= CLAN_MAX_MEMBERS:
+                    err = "klan_dolu"
+                else:
+                    conn.execute("INSERT OR IGNORE INTO clan_requests(clan_id, account_id, kind, by_account, created_at) VALUES (?,?,?,?,?)",
+                                 (int(mine["id"]), int(tgt["id"]), "invite", account_id, now_ts()))
+                    affected.append(int(tgt["id"]))
+                    target_id = int(tgt["id"])
+
+        elif op == "cancel_invite":
+            if my_role < CLAN_ROLE_OFFICER:
+                err = "yetki_yok"
+            else:
+                tid = int(args.get("account_id", 0))
+                conn.execute("DELETE FROM clan_requests WHERE clan_id = ? AND account_id = ? AND kind = 'invite'", (int(mine["id"]), tid))
+                affected.append(tid)
+
+        elif op in ("accept_request", "reject_request"):
+            if my_role < CLAN_ROLE_OFFICER:
+                err = "yetki_yok"
+            else:
+                tid = int(args.get("account_id", 0))
+                rq = conn.execute("SELECT 1 FROM clan_requests WHERE clan_id = ? AND account_id = ? AND kind = 'apply'", (int(mine["id"]), tid)).fetchone()
+                if not rq:
+                    err = "basvuru_yok"
+                elif op == "reject_request":
+                    conn.execute("DELETE FROM clan_requests WHERE clan_id = ? AND account_id = ? AND kind = 'apply'", (int(mine["id"]), tid))
+                    affected.append(tid)
+                else:
+                    trow = conn.execute("SELECT faction FROM accounts WHERE id = ?", (tid,)).fetchone()
+                    if not trow:
+                        err = "oyuncu_yok"
+                    else:
+                        err = _clan_join(conn, int(mine["id"]), tid, int(trow["faction"]))
+                        affected.append(tid)
+
+        elif op == "leave":
+            if not mine:
+                err = "klanda_degil"
+            elif my_role == CLAN_ROLE_LEADER and _clan_count(conn, int(mine["id"])) > 1:
+                err = "lider_ayrilamaz"
+            elif my_role == CLAN_ROLE_LEADER:
+                conn.execute("DELETE FROM clans WHERE id = ?", (int(mine["id"]),))
+            else:
+                conn.execute("DELETE FROM clan_members WHERE account_id = ?", (account_id,))
+
+        elif op == "kick":
+            tid = int(args.get("account_id", 0))
+            t = target_row(tid)
+            if my_role < CLAN_ROLE_OFFICER:
+                err = "yetki_yok"
+            elif not t or tid == account_id:
+                err = "uye_yok"
+            elif int(t["role"]) >= my_role:
+                err = "yetki_yok"
+            else:
+                conn.execute("DELETE FROM clan_members WHERE account_id = ?", (tid,))
+                affected.append(tid)
+
+        elif op in ("promote", "demote"):
+            tid = int(args.get("account_id", 0))
+            t = target_row(tid)
+            if my_role != CLAN_ROLE_LEADER:
+                err = "yetki_yok"
+            elif not t or tid == account_id:
+                err = "uye_yok"
+            else:
+                new_role = CLAN_ROLE_OFFICER if op == "promote" else CLAN_ROLE_MEMBER
+                if int(t["role"]) == new_role:
+                    err = "rol_ayni"
+                else:
+                    conn.execute("UPDATE clan_members SET role = ? WHERE account_id = ?", (new_role, tid))
+                    affected.append(tid)
+
+        elif op == "transfer":
+            tid = int(args.get("account_id", 0))
+            t = target_row(tid)
+            if my_role != CLAN_ROLE_LEADER:
+                err = "yetki_yok"
+            elif not t or tid == account_id:
+                err = "uye_yok"
+            else:
+                conn.execute("UPDATE clan_members SET role = ? WHERE account_id = ?", (CLAN_ROLE_LEADER, tid))
+                conn.execute("UPDATE clan_members SET role = ? WHERE account_id = ?", (CLAN_ROLE_OFFICER, account_id))
+                affected.append(tid)
+
+        elif op == "update":
+            if my_role != CLAN_ROLE_LEADER:
+                err = "yetki_yok"
+            else:
+                conn.execute("UPDATE clans SET description = ? WHERE id = ?",
+                             (str(args.get("description", "")).strip()[:CLAN_DESC_MAX], int(mine["id"])))
+
+        elif op == "disband":
+            if my_role != CLAN_ROLE_LEADER:
+                err = "yetki_yok"
+            else:
+                conn.execute("DELETE FROM clans WHERE id = ?", (int(mine["id"]),))
+
+        else:
+            err = "bilinmeyen_islem"
+
+        if err:
+            conn.execute("ROLLBACK")
+            return {"ok": False, "error": err}
+
+        conn.execute("COMMIT")
+        # Etkilenen hesaplar: islem oncesi uyeler + yeni klanin uyeleri + (basvuru) hedef klanin uyeleri.
+        affected += prev_members
+        now_clan = _clan_of(conn, account_id)
+        for cid in ([int(now_clan["id"])] if now_clan else []) + ([extra_clan] if extra_clan else []):
+            affected += [int(r["account_id"]) for r in conn.execute(
+                "SELECT account_id FROM clan_members WHERE clan_id = ?", (cid,)).fetchall()]
+        res = _clan_state(conn, account_id)
+        res["affected"] = sorted(set(affected))
+        res["target"] = target_id
+        return res
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("clan_op %s: %s", op, e)
+        return {"ok": False, "error": "internal"}
+    finally:
+        conn.close()
+
+
+def clan_member_ids(clan_id: int) -> list:
+    conn = get_db()
+    try:
+        return [int(r["account_id"]) for r in conn.execute("SELECT account_id FROM clan_members WHERE clan_id = ?", (int(clan_id),)).fetchall()]
+    finally:
+        conn.close()
+
+
 def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) -> None:
     try:
         data = b""
@@ -1890,6 +2392,12 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
             resp = {"ok": True, "deleted": cleanup_stale_locks(instance_id)}
         elif method == "get_npc_overrides":
             resp = {"ok": True, "overrides": get_npc_overrides()}
+        elif method == "get_active_events":
+            resp = {"ok": True, "events": get_active_events()}
+        elif method == "record_event_bonus":
+            resp = record_event_bonus(
+                int(msg.get("event_id", 0)), int(msg.get("cr", 0)), int(msg.get("uri", 0)),
+                float(msg.get("xp", 0.0)), float(msg.get("hon", 0.0)))
         elif method == "get_account_status":
             resp = get_account_status(int(msg.get("account_id", 0)))
         elif method == "get_player_balance":
@@ -1932,6 +2440,12 @@ def handle_db_client(conn_stream: socket.socket, addr: tuple, instance_id: str) 
                 float(msg.get("px", 0.0)),
                 float(msg.get("pz", 0.0)),
             )
+        elif method == "clan_op":
+            resp = clan_op(int(msg.get("account_id", 0)), str(msg.get("op", "")), msg.get("args", {}))
+        elif method == "clan_tag_of":
+            resp = clan_tag_of(int(msg.get("account_id", 0)))
+        elif method == "clan_member_ids":
+            resp = {"ok": True, "ids": clan_member_ids(int(msg.get("clan_id", 0)))}
         elif method == "backup":
             backup_key = msg.get("backup_key", "")
             if isinstance(backup_key, str):

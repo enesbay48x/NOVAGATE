@@ -27,6 +27,54 @@ const REDRAW_HZ := 12.0
 var _redraw_acc := 0.0
 
 
+# ---- KOORDINAT IZGARASI (PC minimap + mobil buyuk harita ortak kullanir) ----
+# 8 sutun (1-8) x 6 satir (A-F). Hucre adlari (A1..F8) hucre ortasinda SEFFAF yazilir,
+# hucre kose kesisimlerinde kucuk "+" isaretleri, gemi konumundan gecen ince capraz cizgiler cizilir.
+const GRID_COLS := 8
+const GRID_ROWS := 6
+
+
+static func sector_name(nx: float, nz: float) -> String:
+	var c: int = clampi(int(nx * float(GRID_COLS)), 0, GRID_COLS - 1) + 1
+	var r: int = clampi(int(nz * float(GRID_ROWS)), 0, GRID_ROWS - 1)
+	return "%s%d" % [char(65 + r), c]
+
+
+# ci: cizim yapan CanvasItem (kendi _draw'i icinde cagrilmali), rc: harita dikdortgeni,
+# ship: gemi konumu (rc icinde piksel) - (-1,-1) verilirse capraz cizgi cizilmez.
+static func draw_coord_grid(ci: CanvasItem, rc: Rect2, font: Font, fs: int, ship: Vector2 = Vector2(-1.0, -1.0), cur_sector: String = "") -> void:
+	var cw: float = rc.size.x / float(GRID_COLS)
+	var ch: float = rc.size.y / float(GRID_ROWS)
+	var line_col := Color(0.4, 0.7, 0.9, 0.10)
+	for i in range(1, GRID_COLS):
+		var gx: float = rc.position.x + cw * float(i)
+		ci.draw_line(Vector2(gx, rc.position.y), Vector2(gx, rc.end.y), line_col, 1.0)
+	for j in range(1, GRID_ROWS):
+		var gy: float = rc.position.y + ch * float(j)
+		ci.draw_line(Vector2(rc.position.x, gy), Vector2(rc.end.x, gy), line_col, 1.0)
+	# kesisim "+" isaretleri
+	var arm: float = clampf(minf(cw, ch) * 0.12, 1.5, 6.0)
+	var plus_col := Color(0.7, 0.9, 1.0, 0.28)
+	for j in range(1, GRID_ROWS):
+		for i in range(1, GRID_COLS):
+			var q := Vector2(rc.position.x + cw * float(i), rc.position.y + ch * float(j))
+			ci.draw_line(q - Vector2(arm, 0.0), q + Vector2(arm, 0.0), plus_col, 1.0)
+			ci.draw_line(q - Vector2(0.0, arm), q + Vector2(0.0, arm), plus_col, 1.0)
+	# seffaf hucre adlari (gemi hangi hucredeyse biraz daha belirgin)
+	if font != null:
+		for j in GRID_ROWS:
+			for i in GRID_COLS:
+				var lab := "%s%d" % [char(65 + j), i + 1]
+				var a: float = 0.55 if lab == cur_sector else 0.20
+				var base := Vector2(rc.position.x + cw * float(i), rc.position.y + ch * float(j) + ch * 0.5 + float(fs) * 0.36)
+				ci.draw_string(font, base, lab, HORIZONTAL_ALIGNMENT_CENTER, cw, fs, Color(0.75, 0.9, 1.0, a))
+	# gemi konumundan gecen capraz cizgiler
+	if ship.x >= rc.position.x and ship.x <= rc.end.x and ship.y >= rc.position.y and ship.y <= rc.end.y:
+		var cc := Color(1.0, 1.0, 1.0, 0.30)
+		ci.draw_line(Vector2(rc.position.x, ship.y), Vector2(rc.end.x, ship.y), cc, 1.0)
+		ci.draw_line(Vector2(ship.x, rc.position.y), Vector2(ship.x, rc.end.y), cc, 1.0)
+
+
 func _init() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
@@ -96,7 +144,7 @@ func _draw() -> void:
 	var font: Font = _get_font()
 	var img_rect := Rect2(PAD, HEAD + 0.0, IMG_W, img_h)
 	var pp: Vector3 = game.P.node.position
-	var coord := "%d / %d" % [int(pp.x / DOData.S), int(pp.z / DOData.S)]
+	var coord := "%s  %d / %d" % [sector_name(pp.x / (map_w * DOData.S), pp.z / (map_h * DOData.S)), int(pp.x / DOData.S), int(pp.z / DOData.S)]
 	if title_win != null and (title_win.title != map_name or title_win.subtitle != coord):
 		title_win.title = map_name
 		title_win.subtitle = coord
@@ -104,13 +152,10 @@ func _draw() -> void:
 
 	# Arka plan: duz siyah (harita resmi cizilmez)
 	draw_rect(img_rect, Color(0.0, 0.0, 0.0, 1.0))
-	# Izgara (DO minimap hissi)
-	for i in range(1, 4):
-		var gx := img_rect.position.x + img_rect.size.x * float(i) / 4.0
-		draw_line(Vector2(gx, img_rect.position.y), Vector2(gx, img_rect.end.y), Color(0.4, 0.7, 0.9, 0.12), 1.0)
-	for j in range(1, 3):
-		var gy := img_rect.position.y + img_rect.size.y * float(j) / 3.0
-		draw_line(Vector2(img_rect.position.x, gy), Vector2(img_rect.end.x, gy), Color(0.4, 0.7, 0.9, 0.12), 1.0)
+	# Koordinat izgarasi (8x6, A1..F8, seffaf adlar + gemi capraz cizgileri)
+	var my_sp := _g2m(pp)
+	var my_sec: String = sector_name(pp.x / (map_w * DOData.S), pp.z / (map_h * DOData.S))
+	draw_coord_grid(self, img_rect, font, clampi(int(IMG_W / 20.0), 8, 12), my_sp, my_sec)
 	draw_rect(img_rect, Color(0.45, 0.7, 0.85, 0.85), false, 1.0)
 
 	# Ust + guvenli bolge
@@ -157,6 +202,17 @@ func _draw() -> void:
 			var fp := _g2m(fe.node.position)
 			draw_rect(Rect2(fp - Vector2(2.0, 2.0), Vector2(4, 4)), Color(1, 1, 1))
 
+	# Klan uyeleri: YESIL NOKTA (haritadaki tum klan arkadaslari; menzil siniri yok)
+	var n_clan := 0
+	if Net.online and Net.gm != null and Net.gm.clan != null and Net.gm.clan.in_clan():
+		for ce in Net.gm.players.values():
+			if not is_instance_valid(ce.node) or not Net.gm.clan.is_clanmate(int(ce.get("peer", 0))):
+				continue
+			var cp := _g2m(ce.node.position)
+			draw_circle(cp, 3.4, Color(0.15, 1.0, 0.3))
+			draw_arc(cp, 3.4, 0.0, TAU, 14, Color(0.0, 0.3, 0.08), 1.0)
+			n_clan += 1
+
 	# Hedef
 	if game.target != null and is_instance_valid(game.target.node):
 		var tp := _g2m(game.target.node.position)
@@ -193,3 +249,6 @@ func _draw() -> void:
 	draw_string(font, Vector2(PAD + 10.0, fy), "Dusman %d" % n_en, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.93, 1.0))
 	draw_rect(Rect2(sz.x * 0.5 + 4.0, fy - 8.0, 6, 6), Color(0.3, 0.95, 1.0))
 	draw_string(font, Vector2(sz.x * 0.5 + 14.0, fy), "Kapi %d" % game.portals.size(), HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.93, 1.0))
+	if n_clan > 0:
+		draw_circle(Vector2(sz.x - 44.0, fy - 5.0), 3.2, Color(0.15, 1.0, 0.3))
+		draw_string(font, Vector2(sz.x - 38.0, fy), "Klan %d" % n_clan, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.6, 1.0, 0.7))

@@ -1,0 +1,17 @@
+NOVAGATE - OYUN DOSYALARI (Godot projesi)
+=========================================
+Bu zipi Godot projenin ANA KLASORUNE (project.godot'un oldugu yer) cikar, uzerine yaz.
+Once projenin yedegini al.
+
+Icindekiler:
+  main.gd       - formasyon satin alma sunucuya gider, droid ekipmani giriste silinmez
+  data.gd       - X-5..X-8 kapi guvenli bolgesi acildi
+  net.gd        - PROTO 9, giriste surum gonderir, genel c_event/s_event kanali
+  net_server.gd - on_event / send_event_to
+  net_game.gd   - on_event
+
+Sonra:
+  1) Godot'ta projeyi ac, hata var mi bak
+  2) Oyunu export et (PC / Android / iOS) ve oyunculara bu surumu ver
+  3) SUNUCU.zip'i de kur ve deploy.ps1'i calistir
+Not: Bu .gd dosyalari sunucuda da calisir; deploy.ps1 bunlari sunucuya kendisi yukler.

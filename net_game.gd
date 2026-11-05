@@ -10,13 +10,18 @@ var npcs: Dictionary = {}   # uid  -> enemies girdisi
 var players: Dictionary = {}  # peer -> girdi (dost + dusman oyuncular)
 var state_t: float = 0.0
 var auc = null              # saatlik acik artirma istemcisi
+var clan = null             # klan sistemi istemcisi (clan_client.gd)
 var last_attacker: int = 0
 var last_attacker_t: float = -100.0
 
 const DOData := preload("res://data.gd")
 const AucClient := preload("res://auction_client.gd")
-const STATE_DT := 0.066
-const SMOOTH := 12.0
+const ClanClient := preload("res://clan_client.gd")
+const STATE_DT := 0.033          # kendi konumumuzu sunucuya gonderme (~30 Hz)
+const SMOOTH := 18.0
+const EXTRAP_MAX := 0.12         # dead reckoning: son pakete gore en fazla bu kadar sn ileri tahmin
+const VEL_MAX := 140.0           # tahmin hizi ust siniri (dunya birimi/sn); ustu = isinlanma sayilir
+const TELEPORT_JUMP := 15.0      # iki paket arasi bu kadar atlama = isinlanma (hiz hesaplanmaz)
 const FRIEND_PICK_R := 4.5   # dost oyuncuya tiklama yaricapi (uyari icin)
 
 var drone_sig: String = ""   # sunucuya en son bildirilen droid dizilimi
@@ -26,6 +31,7 @@ func _init(main_node, net_node: Node) -> void:
 	g = main_node
 	net = net_node
 	auc = AucClient.new(main_node, net_node)
+	clan = ClanClient.new(main_node, net_node)
 
 
 var group_leader: int = 0
@@ -229,7 +235,9 @@ func on_npc_snap(arr: PackedFloat32Array) -> void:
 	while i + 7 <= arr.size():
 		var e = npcs.get(int(arr[i]))
 		if e != null:
-			e["net_pos"] = Vector3(arr[i + 1], 0.0, arr[i + 2])
+			var npos := Vector3(arr[i + 1], 0.0, arr[i + 2])
+			_note_snap(e, npos)
+			e["net_pos"] = npos
 			e["net_yaw"] = arr[i + 3]
 			e.hp = arr[i + 4]
 			e.sh = arr[i + 5]
@@ -271,6 +279,8 @@ func _drop_entry(e) -> void:
 	if plt != null and is_instance_valid(plt):
 		plt.queue_free()
 	if e.has("node") and is_instance_valid(e.node):
+		if g.extras != null:
+			g.extras.drop_fx_for(e.node)
 		e.node.queue_free()
 
 
@@ -299,6 +309,7 @@ func _npc_bolt_vis(e: Dictionary, nj: int, target_peer: int, gen: int) -> void:
 	dir = dir.normalized()
 	var side := Vector3(dir.z, 0.0, -dir.x)
 	var from: Vector3 = (e.node as Node3D).position + dir * 1.5 + side * [-0.9, 0.9, 0.0][nj % 3]
+	g.Sfx.play("npc", (e.node as Node3D).position, g.P.node.position)   # NPC baska oyuncuya ates ediyor: biz de duyalim
 	g.fire_bolt(from, tp, "enemy", Color(1.0, 0.3, 0.35), 0.0, _vis_vol(), "n_" + str(e.id))
 
 
@@ -355,6 +366,8 @@ func add_player(info: Array) -> void:
 		g.enemies.append(ent)
 	players[peer] = ent
 	_tint_plate(ent)
+	if g.has_method("clan_apply_ent"):
+		g.clan_apply_ent(ent)   # klan etiketi (isim yaninda)
 	if info.size() >= 13:
 		_set_drones(ent, str(info[11]), info[12] as Array)
 	if enemy:
@@ -366,6 +379,8 @@ func remove_player(peer: int) -> void:
 	if ent == null:
 		return
 	players.erase(peer)
+	if g.extras != null and is_instance_valid(ent.node):
+		g.extras.drop_fx_for(ent.node)   # ENC / koruma / EMA animasyonu gemiyle birlikte silinir
 	_drop_entry(ent)
 
 
@@ -374,7 +389,9 @@ func on_player_snap(arr: Array) -> void:
 		var ent = players.get(int(it[0]))
 		if ent == null:
 			continue
-		ent["net_pos"] = Vector3(float(it[1]), 0.0, float(it[2]))
+		var npos := Vector3(float(it[1]), 0.0, float(it[2]))
+		_note_snap(ent, npos)
+		ent["net_pos"] = npos
 		ent["net_yaw"] = float(it[3])
 		ent.hp = float(it[4])
 		ent.mx = maxf(float(it[5]), 1.0)
@@ -483,15 +500,42 @@ func step(dt: float) -> void:
 	_sync_my_drones()
 
 
+# Her pakette hiz kestirimi: iki paket arasi konum farki / gecen sure (yumusatilmis). Isinlanma/kapi = hiz 0.
+func _note_snap(e: Dictionary, npos: Vector3) -> void:
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var last_t: float = float(e.get("snap_t", -1.0))
+	var old: Vector3 = e.get("net_pos", npos)
+	var vel: Vector3 = e.get("net_vel", Vector3.ZERO)
+	if last_t > 0.0:
+		var dt: float = now - last_t
+		var jump: float = (npos - old).length()
+		if dt > 0.004 and dt < 0.6 and jump < TELEPORT_JUMP:
+			var raw: Vector3 = (npos - old) / dt
+			raw.y = 0.0
+			if raw.length() > VEL_MAX:
+				raw = raw.normalized() * VEL_MAX
+			vel = vel.lerp(raw, 0.6)
+		else:
+			vel = Vector3.ZERO
+	e["net_vel"] = vel
+	e["snap_t"] = now
+
+
+# Dead reckoning + yumusatma: hedef = son paket konumu + hiz x (paketten beri gecen sure, EXTRAP_MAX ile sinirli).
+# Gemi paketler arasinda DURMAZ, bir sonraki paket gelince de sicramaz (dusuk hata duzeltmesi).
 func _smooth(e, k: float) -> void:
 	if not is_instance_valid(e.node):
 		return
 	var n: Node3D = e.node
 	var np: Vector3 = e.net_pos
-	if n.position.distance_to(np) > 40.0:
-		n.position = np
+	var vel: Vector3 = e.get("net_vel", Vector3.ZERO)
+	var age: float = clampf(Time.get_ticks_msec() / 1000.0 - float(e.get("snap_t", 0.0)), 0.0, EXTRAP_MAX)
+	var goal: Vector3 = np + vel * age
+	if n.position.distance_to(goal) > 40.0:
+		n.position = goal
 	else:
-		n.position = n.position.lerp(np, k)
+		# hiz kadar ileri tasi, kalan hatayi yumusakca kapat
+		n.position = n.position.lerp(goal, k)
 	n.rotation.y = lerp_angle(n.rotation.y, float(e.net_yaw), k)
 
 
@@ -545,6 +589,8 @@ func on_fire_vis(shooter: int, kind: int, ref: int, nb: int, ammo: String) -> vo
 	var side := Vector3(dir.z, 0.0, -dir.x)
 	var col: Color = g._ammo_col(ammo)
 	var wf: float = float(g.AMMO_BOLT_W.get(ammo, 1.0))
+	if g.P != null and is_instance_valid(g.P.node):
+		g.Sfx.play(ammo, from0, g.P.node.position)   # diger oyuncunun lazer sesi (onun muhimmatina gore, mesafeye gore kisilir)
 	for j in mini(nb, 10):
 		var off: float = (float(j) - float(nb - 1) * 0.5) * 0.55
 		g.fire_bolt(from0 + dir * 1.2 + side * off + Vector3(0, 0.6, 0), tgt, "lf1", col, 0.0, _vis_vol(), ammo, wf)
@@ -556,6 +602,13 @@ func on_extra(peer: int, idx: int) -> void:
 	if sp == null or not is_instance_valid(sp.node) or g.extras == null:
 		return
 	g.extras.play_remote(idx, sp.node as Node3D)
+	# EMA (idx 2): bu oyuncu 3 sn hedeflenemez; bizde ona kilitliysek kilit ANINDA bozulur.
+	if idx == 2:
+		sp["ema_until"] = g.clock + g.extras.EMA_TIME
+		if g.target != null and is_same(g.target, sp):
+			g.target = null
+			g.fire = false
+			g.toast("%s EMA kullandı: hedef kilidin bozuldu." % str(sp.get("name", "Oyuncu")))
 
 
 # Sunucu GERCEK korumayi bildirir (0 yok, 1 ust, 2 kapi, 3 gecici gecis). Istemci koruma VEREMEZ; yalnizca gosterir.
@@ -653,3 +706,15 @@ func on_loadout_result(ship: String, loads_json: String, cfgi: int, seq: int) ->
 
 func on_select_ammo_result(ok: bool, ammo: String, error: String) -> void:
 	g.on_select_ammo_result(ok, ammo, error)
+
+
+# ------------------------------------------------------------------ GENEL OLAY KANALI (s_event)
+func on_event(tip: String, veri: Dictionary) -> void:
+	match tip:
+		"pong":
+			pass
+		"clan_state", "clan_list", "clan_result", "clan_tags", "clan_chat":
+			if clan != null:
+				clan.on_event(tip, veri)
+		_:
+			pass  # bilinmeyen tip: yok say

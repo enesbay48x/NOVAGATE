@@ -1,0 +1,8 @@
+MUZIK KURULUMU
+Bu klasordeki dosyalari Godot projenin ana klasorune (project.godot'un oldugu yer) kopyala, uzerine yaz.
+  music_player.gd   (yeni)  - muzik yoneticisi (autoload "Music")
+  project.godot             - Music autoload satiri eklendi
+  main.gd                   - giriste Music.start() cagrisi eklendi
+  control_panel.gd          - Ayarlar'a "Müzik sesi" kaydirici eklendi
+  music/                    - mp3 dosyasi (zaten projende varsa tekrar kopyalama)
+Sonra Godot editorunde projeyi ac (mp3 otomatik import edilir) ve oyunu calistir.

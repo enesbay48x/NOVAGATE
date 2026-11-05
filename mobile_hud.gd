@@ -21,6 +21,7 @@ const Extras = preload("res://extras.gd")
 
 const CFG_PATH := "user://mobile_ui.cfg"
 const MapBg := preload("res://map_bg.gd")
+const MiniMapGrid := preload("res://minimap.gd")   # ortak koordinat izgarasi (sector_name / draw_coord_grid)
 const SKIN_DIR := "res://assets/mobile/"
 const MOUSE_ID := -1000
 const TAP_MOVE := 16.0        # dokunus bu kadar piksel icinde kalirsa "tap" sayilir
@@ -246,6 +247,13 @@ class MBtn extends MCtl:
 				draw_arc(c + Vector2(0.0, r * 0.46), r * 0.40, PI * 1.12, PI * 1.88, 16, col, w, true)
 				draw_arc(c + Vector2(-r * 0.46, r * 0.26), r * 0.24, PI * 1.10, PI * 1.60, 8, col, w, true)
 				draw_arc(c + Vector2(r * 0.46, r * 0.26), r * 0.24, PI * 1.40, PI * 1.90, 8, col, w, true)
+			"box":
+				# bonus kutusu: kupun on yuzu + kapak cizgisi + ustte kucuk parilti
+				draw_rect(Rect2(c + Vector2(-r * 0.38, -r * 0.14), Vector2(r * 0.76, r * 0.56)), col, false, w)
+				draw_line(c + Vector2(-r * 0.38, r * 0.04), c + Vector2(r * 0.38, r * 0.04), col, w, true)
+				draw_line(c + Vector2(0.0, -r * 0.14), c + Vector2(0.0, r * 0.04), col, w, true)
+				draw_polyline(PackedVector2Array([c + Vector2(-r * 0.38, -r * 0.14), c + Vector2(-r * 0.22, -r * 0.36), c + Vector2(r * 0.54, -r * 0.36), c + Vector2(r * 0.38, -r * 0.14)]), col, w, true)
+				draw_line(c + Vector2(r * 0.54, -r * 0.36), c + Vector2(r * 0.54, r * 0.20), col, w, true)
 			"info":
 				draw_arc(c, r * 0.46, 0.0, TAU, 40, col, w, true)
 				draw_circle(c + Vector2(0.0, -r * 0.24), r * 0.07, col)
@@ -445,6 +453,11 @@ class MMini extends MCtl:
 			var lw := c - fwd * 4.0 + side * 4.5
 			var rw := c - fwd * 4.0 - side * 4.5
 			draw_colored_polygon(PackedVector2Array([tip, lw, c - fwd * 1.5, rw]), Color(1, 1, 1, a))
+		# bulundugun sektor (A1..F8)
+		if g != null and g.P != null and is_instance_valid(g.P.node) and ui.font != null and ui.hud != null and ui.hud.minimap != null:
+			var mm2 = ui.hud.minimap
+			var sec: String = MiniMapGrid.sector_name(g.P.node.position.x / (float(mm2.map_w) * float(ui.ws)), g.P.node.position.z / (float(mm2.map_h) * float(ui.ws)))
+			draw_string(ui.font, Vector2(0.0, c.y + r * 0.62), sec, HORIZONTAL_ALIGNMENT_CENTER, size.x, int(maxf(11.0, r * 0.2)), Color(0.75, 0.92, 1.0, 0.55 * a))
 		draw_arc(c, r - 2.0, 0.0, TAU, 64, Color(cy.r, cy.g, cy.b, 0.90 * a), 2.6, true)
 		draw_arc(c, r - 7.0, 0.0, TAU, 64, Color(cy.r, cy.g, cy.b, 0.15 * a), 1.0, true)
 		for k2 in 4:
@@ -485,19 +498,13 @@ class MMapView extends Control:
 		# panel
 		draw_rect(rc.grow(10.0), Color(0.0, 0.03, 0.05, 0.96))
 		draw_rect(rc, Color(0.0, 0.0, 0.0, 1.0))   # arka plan duz siyah
-		# izgara + sektor adlari (A1, B1 ...)
-		var cols := 4
-		var rows := 3
-		for i in range(1, cols):
-			var gx := rc.position.x + rc.size.x * float(i) / float(cols)
-			draw_line(Vector2(gx, rc.position.y), Vector2(gx, rc.end.y), Color(cy.r, cy.g, cy.b, 0.16), 1.0)
-		for j in range(1, rows):
-			var gy := rc.position.y + rc.size.y * float(j) / float(rows)
-			draw_line(Vector2(rc.position.x, gy), Vector2(rc.end.x, gy), Color(cy.r, cy.g, cy.b, 0.16), 1.0)
-		for j in rows:
-			for i in cols:
-				var lab := "%s%d" % [char(65 + i), j + 1]
-				_t(lab, rc.position + Vector2(rc.size.x * float(i) / float(cols) + 8.0, rc.size.y * float(j) / float(rows) + 20.0), 14, Color(0.7, 0.9, 1.0, 0.45))
+		# koordinat izgarasi: 8x6, A1..F8 seffaf adlar + gemi capraz cizgileri (PC minimap ile ayni)
+		var ship_px := Vector2(-1.0, -1.0)
+		var cur_sec := ""
+		if g.P != null and is_instance_valid(g.P.node):
+			ship_px = _w2m(g.P.node.position, rc, mw, mh, sc)
+			cur_sec = MiniMapGrid.sector_name(g.P.node.position.x / (mw * sc), g.P.node.position.z / (mh * sc))
+		MiniMapGrid.draw_coord_grid(self, rc, ui.font, int(clampf(rc.size.x / 8.0 * 0.30, 11.0, 24.0)), ship_px, cur_sec)
 		draw_rect(rc, Color(cy.r, cy.g, cy.b, 0.95), false, 2.0)
 		# ust + guvenli bolge
 		if g.base_pos != null:
@@ -570,6 +577,8 @@ class MMapView extends Control:
 		var title: String = str(mm.map_name)
 		if title == "":
 			title = "HARİTA"
+		if cur_sec != "":
+			title += "   ·   " + cur_sec
 		_t(title, Vector2(rc.position.x, rc.position.y - 16.0), 20, Color(1.0, 0.85, 0.30))
 		_t("Gitmek istedigin noktaya dokun", Vector2(rc.position.x, rc.end.y + 30.0), 16, Color(0.85, 0.95, 1.0))
 		_t("Dusman %d   Kapi %d" % [n_en, g.portals.size()], Vector2(rc.position.x, rc.end.y + 30.0), 16, Color(0.85, 0.95, 1.0), HORIZONTAL_ALIGNMENT_RIGHT, rc.size.x)
@@ -700,6 +709,7 @@ func _make_controls() -> void:
 	_add_btn("chat", "", 60.0, {}).glyph = "chat"
 	_add_btn("grp", "", 60.0, {}).glyph = "group"
 	_add_btn("info", "", 60.0, {}).glyph = "info"   # bilgi penceresi (oyuncu bilgisi) ac/kapat
+	_add_btn("box", "", 60.0, {}).glyph = "box"     # en yakin bonus kutusunu topla (tekrar bas: iptal)
 	minimap_btn = MMini.new()
 	minimap_btn.cid = "minimap"
 	minimap_btn.ui = self
@@ -866,6 +876,8 @@ func _default_center(id: String, sr: Rect2) -> Vector2:
 			return mm_c + Vector2(-112.0, 36.0)
 		"info":
 			return mm_c + Vector2(-180.0, 36.0)
+		"box":
+			return mm_c + Vector2(-248.0, 36.0)
 	return Vector2(cx, (t + b) * 0.5)
 
 
@@ -977,6 +989,8 @@ func _name_of(id: String) -> String:
 			return "Grup"
 		"info":
 			return "Bilgi"
+		"box":
+			return "Kutu topla"
 		"chat":
 			return "Chat"
 	if id in LASERS:
@@ -1279,6 +1293,8 @@ func _btn_action(id: String) -> void:
 			call_deferred("_open_hud_edit")
 		"info":
 			hud.toggle_info()
+		"box":
+			game.collect_nearest_box()
 		"grp":
 			hud.toggle_group()
 		"chat":
@@ -1496,7 +1512,7 @@ func _find_in_cone(po: Vector3, wd: Vector2):
 	var best = null
 	var best_score := 1e9
 	for e in game.enemies:
-		if not is_instance_valid(e.node) or float(e.hp) <= 0.0:
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0 or not game.target_ok(e):
 			continue
 		var v := Vector2(float(e.node.position.x) - po.x, float(e.node.position.z) - po.z)
 		var dist := v.length()
@@ -1526,7 +1542,7 @@ func _find_nearest_enemy() -> Object:
 		return null
 	var po: Vector3 = game.P.node.position
 	for e in game.enemies:
-		if not is_instance_valid(e.node) or float(e.hp) <= 0.0 or not e.node.visible:
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0 or not e.node.visible or not game.target_ok(e):
 			continue
 		var v := Vector2(float(e.node.position.x) - po.x, float(e.node.position.z) - po.z)
 		var dist := v.length()
@@ -1538,6 +1554,14 @@ func _find_nearest_enemy() -> Object:
 
 # Hedef joystigi dokunusu: en yakin dusmani sec ve atesi baslat.
 func _fire_nearest() -> void:
+	# Zaten gecerli bir hedef isaretliyse (elle secilmis ya da onceki atesten kalmis) onu DEGISTIRME:
+	# yalnizca atesi yeniden baslat. Hedef yoksa / olduyse en yakin dusman NPC ya da oyuncu secilir.
+	var cur = game.target
+	if cur != null and is_instance_valid(cur.node) and float(cur.hp) > 0.0 and cur.node.visible and game.target_ok(cur):
+		game._cancel_collect()
+		_haptic(30)
+		game._set_fire(true)
+		return
 	var t = _find_nearest_enemy()
 	if t == null or not is_instance_valid(t.node):
 		game.toast("Yakinda hedef yok.")
@@ -1883,6 +1907,8 @@ func _refresh() -> void:
 				b.set_state("", false, true, 0.0)
 			"info":
 				b.set_state("", bool(hud.user_win.visible), true, 0.0)
+			"box":
+				b.set_state("", game.collect_box != null, true, 0.0)
 			"grp":
 				b.set_state("", bool(hud.group_win.visible), true, 0.0)
 			"chat":

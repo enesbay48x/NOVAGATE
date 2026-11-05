@@ -22,7 +22,8 @@ $SSH_KEY  = "C:\Users\Pc\.ssh\novagate_vds_ed25519"
 $SSH_USER = "ubuntu"
 $SSH_HOST = "18.117.15.199"
 $TARGET   = "${SSH_USER}@${SSH_HOST}"
-$SSH_OPTS = @("-i", $SSH_KEY, "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new")
+# BatchMode: sifre/passphrase sorusunda sessizce beklemez, hata verir. ServerAlive*: baglanti takilirsa ~30 sn'de kopar (sonsuz beklemez).
+$SSH_OPTS = @("-i", $SSH_KEY, "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3")
 
 $PROJECT_DIR = "/opt/novagate"
 $STAGE_DIR   = "/tmp/novagate_upload"
@@ -40,8 +41,8 @@ function SSH-Exec([string]$cmd, [switch]$AllowFail) {
 }
 
 function SCP-Upload([string]$local, [string]$remote) {
-    & scp @SSH_OPTS $local "${TARGET}:$remote" 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "SCP yukleme basarisiz: $local -> $remote" }
+    $out = & scp @SSH_OPTS $local "${TARGET}:$remote" 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "SCP yukleme basarisiz: $local -> $remote`n$($out -join "`n")" }
 }
 
 # --- Yuklenecek dosyalar (proje kokune gore GORECE yollar) ---
@@ -79,14 +80,24 @@ try {
     $list = ($files | ForEach-Object { "'$_'" }) -join " "
     SSH-Exec ("sudo mkdir -p '$BACKUP_DIR' && cd '$PROJECT_DIR' && for f in $list; do if [ -f " + '"$f"' + " ]; then sudo cp --parents " + '"$f"' + " '$BACKUP_DIR'/; fi; done; true") | Out-Null
 
-    # --- 3. Yukle (once /tmp'ye, sonra sudo ile yerine) ---
-    Write-Host "[3/6] Dosyalar yukleniyor..." -ForegroundColor Yellow
-    SSH-Exec "rm -rf '$STAGE_DIR' && mkdir -p '$STAGE_DIR/server'" | Out-Null
-    foreach ($f in $files) {
-        SCP-Upload $f "$STAGE_DIR/$f"
-    }
+    # --- 3. Yukle (TEK paket: 27 ayri scp baglantisi yerine tek tar dosyasi; once /tmp'ye, sonra sudo ile yerine) ---
+    Write-Host "[3/6] Dosyalar yukleniyor (tek paket)..." -ForegroundColor Yellow
+    $archive = Join-Path $env:TEMP "novagate_upload_$BACKUP_TS.tar"
+    & tar -cf $archive @files
+    if ($LASTEXITCODE -ne 0) { throw "tar paketi olusturulamadi (Windows 10+ icindeki tar.exe gerekli)." }
+    $sizeKb = [math]::Round((Get-Item $archive).Length / 1KB)
+    Write-Host "  Paket hazir: $sizeKb KB. Sunucuya gonderiliyor..."
+    SSH-Exec "rm -rf '$STAGE_DIR' && mkdir -p '$STAGE_DIR'" | Out-Null
+    SCP-Upload $archive "/tmp/novagate_upload.tar"
+    Remove-Item $archive -Force -ErrorAction SilentlyContinue
+    Write-Host "  Gonderildi, sunucuda aciliyor..."
+    SSH-Exec "tar -xf /tmp/novagate_upload.tar -C '$STAGE_DIR' && rm -f /tmp/novagate_upload.tar" | Out-Null
     SSH-Exec "sudo cp -r '$STAGE_DIR'/. '$PROJECT_DIR'/ && sudo chown -R novagate:novagate '$PROJECT_DIR' && rm -rf '$STAGE_DIR'" | Out-Null
     Write-Host "  Yuklendi."
+
+    # --- 3b. Godot sinif onbellegini (class_name kayitlari) yenile ---
+    Write-Host "[3b] Godot sinif onbellegi yenileniyor..." -ForegroundColor Yellow
+    SSH-Exec "cd '$PROJECT_DIR' && G=`$(command -v godot || command -v godot4 || ls /opt/godot/* 2>/dev/null | head -1); if test -x `$G; then sudo -u novagate timeout 120 `$G --headless --path '$PROJECT_DIR' --import >/dev/null 2>&1; fi; true" -AllowFail | Out-Null
 
     # --- 4. Sunucuda Python derleme denetimi ---
     Write-Host "[4/6] Sunucuda Python denetimi..." -ForegroundColor Yellow
@@ -139,7 +150,7 @@ try {
         SCP-Upload $TEST_SCRIPT "/tmp/$TEST_SCRIPT"
         $testResult = SSH-Exec "sudo -u novagate python3 /tmp/$TEST_SCRIPT 2>&1" -AllowFail
         Write-Host $testResult
-        if ($testResult -match "SUCCESS: Token verified") {
+        if (($testResult -match "SUCCESS: Token verified") -and ($testResult -match "SUCCESS: Clan verified")) {
             $testOk = $true
             break
         }

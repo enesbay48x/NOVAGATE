@@ -55,8 +55,24 @@ var reward_run_id: String = ""        # her sunucu acilisinda benzersiz odul ola
 var next_box_id: int = 1              # kutular dunya yeniden kurulsa da tekrar etmeyen kimlik
 var next_pvp_seq: int = 1             # PvP odul olay sayaci
 
-const PSNAP_DT := 0.066         # oyuncu konum yayini (~15 Hz)
-const NSNAP_DT := 0.1           # NPC konum yayini (10 Hz)
+const PSNAP_DT := 0.033         # oyuncu konum yayini (~30 Hz)
+const NSNAP_DT := 0.05          # NPC konum yayini (20 Hz)
+const NEAR_R := 3200.0          # YAKIN bolge (DO birimi): bu mesafedeki gemiler her pakette, uzaktakiler seyrek (bant genisligi)
+const FAR_EVERY := 5            # uzaktaki oyuncu/NPC'ler her 5. pakette gonderilir (30 Hz -> 6 Hz)
+var psnap_n: int = 0
+var nsnap_n: int = 0
+
+# ---- SUNUCU OTORITER HASAR ----
+# Istemcinin bildirdigi hasar OLDUGU GIBI uygulanmaz: sunucu, oyuncunun gemisinin (lazer sayisi, droidleri, formasyonu,
+# yetenekleri) TEORIK azami hasarindan bir 'hasar kovasi' kurar ve bildirimi bu kovayla sinirlar.
+const HIT_RANGE_MUL := 2.2       # vurus menzil toleransi (lazer menzili x bu; gecikme + hareket payi)
+const DMG_RAND_MAX := 1.12       # istemci salvo rastgeleligi ust siniri (0.88..1.12)
+const SV_ROCKET_DMG := 400.0     # R-310 (istemci ile ayni)
+const SV_ROCKET_CD := 5.0
+const SV_NUKE_FRAC := 0.15       # extras.gd NUKE_FRAC ile ayni
+const SV_NUKE_WINDOW := 2.0      # Nukleer vuruslarinin kabul edildigi pencere (sn)
+const KILL_CREDIT_WINDOW := 20.0 # oldurme kredisi icin son hasar suresi (sn)
+const KILL_CREDIT_FRAC := 0.25   # kurbanin (can+kalkan) en az bu kadari saldirandan gelmis olmali
 const NPC_SPACING := 2200.0     # iki NPC dogma noktasi arasi asgari mesafe (DO birimi)
 
 
@@ -166,6 +182,55 @@ func _players_in(map_name: String) -> Array:
 		if str(players[pid].map) == map_name:
 			out.append(int(pid))
 	return out
+
+
+# ------------------------------------------------------------------ SIRKET BONUS ETKINLIKLERI
+# Admin panelinden baslatilir (DB: company_events). Sunucu 5 sn'de bir okur. Bonus YALNIZCA etkinligin
+# sirketindeki oyuncunun KENDI NPC/PvP oduluna uygulanir; baska sirketin odulu degismez.
+# Carpan = 1 + bonus_pct/100  (ornek: +%300 => odul 4 kati). Sonuc DB'nin MAX_REWARD sinirlarini asmaz.
+var active_events: Array = []
+var event_poll_t: float = 0.0
+const EV_CAP_CR := 50000000
+const EV_CAP_URI := 5000000
+const EV_CAP_XP := 50000000.0
+const EV_CAP_HON := 5000000.0
+
+
+func _event_for(p: Dictionary, kind: String) -> Dictionary:
+	if active_events.is_empty():
+		return {}
+	var now: float = Time.get_unix_time_from_system()
+	var fac: int = int(p.get("faction", 0))
+	for ev in active_events:
+		if now < float(ev.get("starts_at", 0)) or now >= float(ev.get("ends_at", 0)):
+			continue
+		if int(ev.get("faction", 0)) != 0 and int(ev.get("faction", 0)) != fac:
+			continue
+		if kind == "npc" and int(ev.get("scope_npc", 0)) == 0:
+			continue
+		if kind == "pvp" and int(ev.get("scope_pvp", 0)) == 0:
+			continue
+		return ev
+	return {}
+
+
+func _event_apply(ev: Dictionary, cr: int, uri: int, xp: float, hon: float) -> Dictionary:
+	var mult: float = 1.0 + float(ev.get("bonus_pct", 0)) / 100.0
+	var res: String = "," + str(ev.get("resources", "cr,uri,xp,hon")) + ","
+	var out: Dictionary = {"cr": cr, "uri": uri, "xp": xp, "hon": hon}
+	if res.contains(",cr,"):
+		out["cr"] = mini(int(round(float(cr) * mult)), EV_CAP_CR)
+	if res.contains(",uri,"):
+		out["uri"] = mini(int(round(float(uri) * mult)), EV_CAP_URI)
+	if res.contains(",xp,"):
+		out["xp"] = minf(xp * mult, EV_CAP_XP)
+	if res.contains(",hon,"):
+		out["hon"] = minf(hon * mult, EV_CAP_HON)
+	return out
+
+
+func _event_record(ev: Dictionary, d_cr: int, d_uri: int, d_xp: float, d_hon: float) -> void:
+	db_send("record_event_bonus", {"event_id": int(ev.get("id", 0)), "cr": d_cr, "uri": d_uri, "xp": d_xp, "hon": d_hon})
 
 
 # ------------------------------------------------------------------ SUNUCU TARAFI ODUL KAYDI
@@ -312,6 +377,11 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_session_hash": session_hash,   # tek cihaz kurali: bu oturumun kilit kimligi
 	}
 	var p: Dictionary = players[peer_id]
+	# Klan kimligi (etiket + rol): isim etiketi ve klan sohbeti icin
+	var clan_id_resp: Dictionary = db_send("clan_tag_of", {"account_id": acct_id})
+	p["_clan_id"] = int(clan_id_resp.get("clan_id", 0)) if bool(clan_id_resp.get("ok", false)) else 0
+	p["_clan_tag"] = str(clan_id_resp.get("tag", "")) if bool(clan_id_resp.get("ok", false)) else ""
+	p["_clan_role"] = int(clan_id_resp.get("role", 0)) if bool(clan_id_resp.get("ok", false)) else 0
 	# Adminlik varsa police'i giris aninda owned'e ekle (30 sn tick'e bagli kalma)
 	if bool(p.get("_sv_admin", 0)) and not "police" in p.get("_sv_owned", []):
 		p["_sv_owned"].append("police")
@@ -401,6 +471,8 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 		net.callv("rpc_id", [peer, "s_disconnect", "Hesap yasakli: " + str(join_ban.get("ban_reason", "bilinmeyen"))])
 		players.erase(peer)
 		return [false, "Hesap yasakli"]
+	_clan_send_state(peer)
+	_clan_push_tags()
 	return [true, "Hos geldin, %s!" % nm]
 
 
@@ -684,6 +756,7 @@ func on_disconnect(peer: int, release_lock: bool = true, force_remove: bool = fa
 	p["ghost"] = true
 	p["ghost_t"] = logout_sec
 	p["ut"] = false
+	p["ema_until"] = 0.0
 	print("[COMBAT LOGOUT] %s haritada kaliyor: sure=%.0f sn, acct=%d" % [str(p.name), logout_sec, int(p.get("account_id", 0))])
 	_system_chat("%s sunucudan ayrildi (gemi %.0f sn haritada kalir)." % [str(p.name), logout_sec])
 
@@ -960,10 +1033,133 @@ func on_extra(peer: int, idx: int) -> void:
 	if idx < 0 or idx > 4:
 		return
 	var xp: Dictionary = players[peer]
-	if clock - float(xp.get("extra_t", -99.0)) < 2.0:
+	# Spam korumasi ekstra BASINA (farkli ekstralar art arda kullanilinca biri digerini yutmasin).
+	var key: String = "extra_t_%d" % idx
+	if clock - float(xp.get(key, -99.0)) < 0.5:
 		return
-	xp["extra_t"] = clock
+	xp[key] = clock
+	if idx == 0:
+		# Nukleer: kisa bir pencere boyunca her hedefe TEK vurus (en fazla %15 gövde canı) kabul edilir.
+		if clock - float(xp.get("nuke_grant_t", -99.0)) >= 10.0:
+			xp["nuke_grant_t"] = clock
+			xp["nuke_until"] = clock + SV_NUKE_WINDOW
+			xp["nuke_hit"] = {}
+	if idx == 2:
+		# EMA: sunucu da 3 sn boyunca bu oyuncuyu hedeflenemez sayar (state paketini beklemeden).
+		# En fazla 5 sn'de bir verilir (kalici dokunulmazlik hilesi olmasin).
+		if clock - float(xp.get("ema_grant_t", -99.0)) >= 5.0:
+			xp["ema_grant_t"] = clock
+			xp["ema_until"] = clock + 3.0
 	_bcast(str(xp.map), "s_extra", [peer, idx], peer)
+
+
+# EMA ya da state bayragi ile hedeflenemez mi?
+func _untargetable(p: Dictionary) -> bool:
+	return bool(p.get("ut", false)) or clock < float(p.get("ema_until", 0.0))
+
+
+# ------------------------------------------------------------------ SUNUCU OTORITER HASAR YARDIMCILARI
+func _skill_best(p: Dictionary, effect: String) -> float:
+	var skills: Dictionary = p.get("_sv_skills", {}) if typeof(p.get("_sv_skills", {})) == TYPE_DICTIONARY else {}
+	var best: float = 0.0
+	for sk in SkillTree.SKILLS:
+		if str(sk.effect) != effect:
+			continue
+		var r: int = clampi(int(skills.get(str(sk.id), 0)), 0, int(sk.pts))
+		if r <= 0:
+			continue
+		best = maxf(best, float(sk.bonus) * float(r) / float(sk.pts))
+	return best
+
+
+# Bu oyuncunun TEK lazer salvosunda verebilecegi teorik azami hasar (gemi lazer sayisi + droid lazerleri,
+# formasyon/droid hasar bonusu, en guclu muhimmat carpani, yetenek bonusu, salvo rastgeleligi).
+func _volley_cap(p: Dictionary) -> float:
+	var max_l: float = 0.0
+	for k in DOData.LASERS.keys():
+		max_l = maxf(max_l, float(DOData.LASERS[k].dmg))
+	var max_ammo: float = 1.0
+	for am in DOData.AMMO:
+		max_ammo = maxf(max_ammo, float(am.mult))
+	var las: int = 2
+	for s in DOData.SHIPS:
+		if str(s.id) == str(p.ship):
+			las = int(s.las)
+			break
+	var drn: Array = p.get("drn", []) as Array
+	var dslots: int = 0
+	var dbonus: float = 0.0
+	for d in drn:
+		if DOData.DRONES.has(str(d)):
+			dslots += int(DOData.DRONES[str(d)].slots)
+			dbonus += float(DOData.DRONES[str(d)].dmg)
+	if not drn.is_empty() and DOData.FORMS.has(str(p.get("form", "std"))):
+		dbonus += float(DOData.FORMS[str(p.get("form", "std"))].dmg)
+	var base: float = (float(las) + float(dslots)) * max_l
+	var skill: float = 1.0 + maxf(_skill_best(p, "laser_pvp"), _skill_best(p, "laser_npc"))
+	return base * maxf(0.2, 1.0 + dbonus) * max_ammo * skill * DMG_RAND_MAX
+
+
+func _rocket_cap(p: Dictionary) -> float:
+	return SV_ROCKET_DMG * (1.0 + _skill_best(p, "rocket_dmg")) * 1.1
+
+
+# Hasar kovasi: kapasite = birkac salvo (ag gecikmesiyle birikip gelen vuruslar icin), dolum hizi = azami salvo hasari /
+# atis araligi + roket. Nukleer penceresinde hedef basina tek vurus (<= %15 maks can) kovadan bagimsiz kabul edilir.
+# Donus: UYGULANACAK hasar (bildirilenden kucuk olabilir, 0 = reddet).
+func _grant_dmg(p: Dictionary, dmg: float, key: String, target_max: float) -> float:
+	if clock < float(p.get("nuke_until", 0.0)):
+		var nh: Dictionary = p.get("nuke_hit", {}) as Dictionary
+		if not nh.has(key) and dmg <= target_max * SV_NUKE_FRAC * 1.02 + 1.0:
+			nh[key] = true
+			p["nuke_hit"] = nh
+			return dmg
+	var vc: float = _volley_cap(p)
+	var rc: float = _rocket_cap(p)
+	var rate: float = vc / DOData.PLAYER_FIRE_INTERVAL + rc / SV_ROCKET_CD
+	var cap: float = vc * (FIRE_BURST + 1.0) + rc * 2.0
+	var bk: float = float(p.get("dmg_bkt", cap))
+	bk = minf(cap, bk + maxf(0.0, clock - float(p.get("dmg_bkt_t", clock))) * rate)
+	p["dmg_bkt_t"] = clock
+	var ok: float = minf(dmg, bk)
+	p["dmg_bkt"] = bk - ok
+	if ok < dmg - 0.5:
+		p["dmg_clip"] = float(p.get("dmg_clip", 0.0)) + (dmg - ok)
+		if clock - float(p.get("clip_log_t", -99.0)) > 10.0:
+			p["clip_log_t"] = clock
+			print("[HASAR-LIMIT] %s (%s): bildirilen=%.0f uygulanan=%.0f salvo_tavani=%.0f toplam_kesilen=%.0f" % [
+				str(p.name), str(p.ship), dmg, ok, vc, float(p.dmg_clip)])
+	return ok
+
+
+func _note_damage_from(v: Dictionary, attacker: int, dmg: float) -> void:
+	var df: Dictionary = v.get("dmg_from", {}) as Dictionary
+	var ent: Array = df.get(attacker, [0.0, -1.0e9]) as Array
+	if clock - float(ent[1]) > KILL_CREDIT_WINDOW:
+		ent = [0.0, clock]
+	ent[0] = float(ent[0]) + dmg
+	ent[1] = clock
+	df[attacker] = ent
+	v["dmg_from"] = df
+
+
+# Katil dogrulamasi: bildirilen katil, kurbana son KILL_CREDIT_WINDOW sn'de yeterli hasar vermis olmali. Degilse
+# yeterli hasar veren en cok vuran oyuncu katil sayilir; kimse yoksa 0 (odul yok).
+func _verify_killer(v: Dictionary, reported: int) -> int:
+	var need: float = (float(v.get("mhp", 1.0)) + float(v.get("msh", 0.0))) * KILL_CREDIT_FRAC
+	var df: Dictionary = v.get("dmg_from", {}) as Dictionary
+	var best: int = 0
+	var bv: float = -1.0
+	for k in df.keys():
+		var ent: Array = df[k] as Array
+		if clock - float(ent[1]) > KILL_CREDIT_WINDOW or float(ent[0]) < need:
+			continue
+		if int(k) == reported:
+			return reported
+		if float(ent[0]) > bv:
+			bv = float(ent[0])
+			best = int(k)
+	return best
 
 
 func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
@@ -980,8 +1176,12 @@ func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
 		return
 	var dd: Vector3 = (e.pos as Vector3) - (p.pos as Vector3)
 	dd.y = 0.0
-	if dd.length() > DOData.LASER_RANGE * DOData.S * 3.0:
+	if dd.length() > DOData.LASER_RANGE * DOData.S * HIT_RANGE_MUL:
 		return    # cok uzaktan gelen vurus: reddedildi
+	# SUNUCU OTORITER HASAR: bildirilen hasar, oyuncunun gemisinin teorik azami hasar kovasina gore SINIRLANIR.
+	dmg = _grant_dmg(p, dmg, "n%d" % uid, float(e.get("mx", e.hp)))
+	if dmg <= 0.0:
+		return
 	_register_attack(p)   # guvenli bolgede NPC'ye saldirmak korumayi kaldirir
 	# --- Sahiplik mantigi (A) ---
 	if e.owner == 0:
@@ -1035,11 +1235,17 @@ func on_hit_player(peer: int, victim: int, dmg: float) -> void:
 		return
 	if int(a.faction) == int(v.faction):
 		return   # dost ateşi yok
+	if clock < float(v.get("ema_until", 0.0)):
+		return   # EMA: kurbanin kilidi bozuk, hedeflenemez
 	if not worlds.has(str(a.map)):
 		return
 	var dd: Vector3 = (a.pos as Vector3) - (v.pos as Vector3)
 	dd.y = 0.0
-	if dd.length() > DOData.LASER_RANGE * DOData.S * 3.0:
+	if dd.length() > DOData.LASER_RANGE * DOData.S * HIT_RANGE_MUL:
+		return
+	# SUNUCU OTORITER HASAR: (bkz. _grant_dmg) bildirilen hasar teorik azami kovayla sinirlanir.
+	dmg = _grant_dmg(a, dmg, "p%d" % victim, float(v.get("mhp", 1.0)))
+	if dmg <= 0.0:
 		return
 	# 1) Saldiran, guvenli bolgede olsa bile koruma DERHAL kalkar (ve kilitlenir: kacarak kurtulamaz).
 	_register_attack(a)
@@ -1054,6 +1260,7 @@ func on_hit_player(peer: int, victim: int, dmg: float) -> void:
 	v.last_dmg_t = clock
 	a["last_pvp_t"] = clock
 	v["last_pvp_t"] = clock
+	_note_damage_from(v, peer, dmg)   # oldurme kredisi dogrulamasi icin kim ne kadar vurdu
 	if _is_ghost(v):
 		_ghost_damage(victim, dmg, peer, true)   # baglantisi kopmus gemi: hasari sunucu uygular, sure yenilenir
 		return
@@ -1064,6 +1271,8 @@ func on_died(victim: int, killer: int) -> void:
 	if not players.has(victim):
 		return
 	var v: Dictionary = players[victim]
+	killer = _verify_killer(v, killer)   # istemcinin bildirdigi katil dogrulanir (sahte oldurme odulu engellenir)
+	v["dmg_from"] = {}
 	var map_name: String = str(v.map)
 	# Olum: yeniden dogus yeni bir baslangic (kilit/catisma sifirlanir); yalnizca ev haritasina donus izni verilir.
 	v.lock_t = -1.0e9
@@ -1081,9 +1290,16 @@ func on_died(victim: int, killer: int) -> void:
 		# PvP odulu de DB'ye yazilir; ayni olum olayi tekrar islenemez.
 		var event_id: String = "pvp:%s:%d:%d:%d" % [reward_run_id, next_pvp_seq, int(k.get("account_id", 0)), victim]
 		next_pvp_seq += 1
+		# Sirket bonus etkinligi (varsa): PvP odulu Onur'dur.
+		var pvp_hon: float = 100.0
+		var pvp_ev: Dictionary = _event_for(k, "pvp")
+		if not pvp_ev.is_empty():
+			pvp_hon = float(_event_apply(pvp_ev, 0, 0, 0.0, 100.0).hon)
 		var pvp_res: Dictionary = _grant_reward(k, event_id, "reward_pvp",
-			0, 0, 0.0, 100.0, 0, 0, 1, {}, {}, {"victim": int(v.get("account_id", 0)), "map": map_name})
+			0, 0, 0.0, pvp_hon, 0, 0, 1, {}, {}, {"victim": int(v.get("account_id", 0)), "map": map_name, "event": int(pvp_ev.get("id", 0))})
 		if pvp_res.has("ok") and pvp_res.get("ok", false):
+			if not pvp_ev.is_empty():
+				_event_record(pvp_ev, 0, 0, 0.0, pvp_hon - 100.0)
 			_to(killer, "s_pvp_reward", [victim, pvp_res])
 	else:
 		_bcast(map_name, "s_kill", ["%s yok edildi." % str(v.name)])
@@ -1114,7 +1330,7 @@ func on_chat(peer: int, text: String, ch: int = 0) -> void:
 			continue
 		if ch == 2 and (int(p.group) == 0 or int(q.group) != int(p.group)):
 			continue
-		net.callv("rpc_id", [int(pid), "s_chat", str(p.name), int(p.faction), text, clampi(ch, 0, 2)])
+		net.callv("rpc_id", [int(pid), "s_chat", _chat_nm(p), int(p.faction), text, clampi(ch, 0, 2)])
 
 
 func _system_chat(text: String) -> void:
@@ -1500,18 +1716,34 @@ func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 			if acct_id <= 0:
 				continue
 			var event_id: String = "npc:%s:%d:%d" % [reward_run_id, int(e.uid), acct_id]
+			# Sirket bonus etkinligi (varsa): yalnizca alicinin sirketi etkinlikteyse carpan uygulanir.
+			var r_cr: int = per_cr
+			var r_uri: int = per_uri
+			var r_xp: int = per_xp
+			var r_hon: int = per_hon
+			var r_sep: int = per_sep
+			var r_ev: Dictionary = _event_for(rp, "npc")
+			if not r_ev.is_empty():
+				var boosted: Dictionary = _event_apply(r_ev, per_cr, per_uri, float(per_xp), float(per_hon))
+				r_cr = int(boosted.cr)
+				r_uri = int(boosted.uri)
+				r_xp = int(round(float(boosted.xp)))
+				r_hon = int(round(float(boosted.hon)))
+				r_sep = int(round(float(r_uri) * float(SkillTree.SEPROM_PER_URI)))
 			var res: Dictionary = _grant_reward(rp, event_id, "reward_npc",
-				per_cr, per_uri, float(per_xp), float(per_hon), 1, per_sep, 0,
-				{}, {}, {"map": str(w.name), "npc": str(e.id), "uid": int(e.uid)})
+				r_cr, r_uri, float(r_xp), float(r_hon), 1, r_sep, 0,
+				{}, {}, {"map": str(w.name), "npc": str(e.id), "uid": int(e.uid), "event": int(r_ev.get("id", 0))})
 			if res.has("ok") and res.get("ok", false):
+				if not r_ev.is_empty():
+					_event_record(r_ev, r_cr - per_cr, r_uri - per_uri, float(r_xp - per_xp), float(r_hon - per_hon))
 				_to(int(r), "s_npc_reward", [{
 					"npc_id": str(e.id),
 					"uid": int(e.uid),
-					"cr": per_cr,
-					"uri": per_uri,
-					"xp": per_xp,
-					"hon": per_hon,
-					"sep": per_sep,
+					"cr": r_cr,
+					"uri": r_uri,
+					"xp": r_xp,
+					"hon": r_hon,
+					"sep": r_sep,
 					"kills": 1,
 					"state": res,
 				}])
@@ -1581,10 +1813,25 @@ func _cubikon_reward(w: Dictionary, e: Dictionary) -> void:
 		var hon: int = roundi(float(DOData.NPCS["cubikon"].hon) * pct)
 		var sep: int = int(round(float(uri) * float(SkillTree.SEPROM_PER_URI)))
 		var event_id: String = "npc:%s:%d:%d" % [reward_run_id, int(e.uid), acct_id]
+		# Sirket bonus etkinligi (varsa)
+		var base_cr: int = cr
+		var base_uri: int = uri
+		var base_xp: int = xp
+		var base_hon: int = hon
+		var c_ev: Dictionary = _event_for(p, "npc")
+		if not c_ev.is_empty():
+			var cb: Dictionary = _event_apply(c_ev, cr, uri, float(xp), float(hon))
+			cr = int(cb.cr)
+			uri = int(cb.uri)
+			xp = int(round(float(cb.xp)))
+			hon = int(round(float(cb.hon)))
+			sep = int(round(float(uri) * float(SkillTree.SEPROM_PER_URI)))
 		var res: Dictionary = _grant_reward(p, event_id, "reward_npc",
 			cr, uri, float(xp), float(hon), 1, sep, 0,
-			{}, {}, {"map": str(w.name), "npc": "cubikon", "uid": int(e.uid), "share": pct})
+			{}, {}, {"map": str(w.name), "npc": "cubikon", "uid": int(e.uid), "share": pct, "event": int(c_ev.get("id", 0))})
 		if res.has("ok") and res.get("ok", false):
+			if not c_ev.is_empty():
+				_event_record(c_ev, cr - base_cr, uri - base_uri, float(xp - base_xp), float(hon - base_hon))
 			_to(int(pid), "s_npc_reward", [{
 				"npc_id": "cubikon",
 				"uid": int(e.uid),
@@ -1660,6 +1907,13 @@ func tick(dt: float) -> void:
 				while npcs.size() > max_npc:
 					var first_uid: Variant = npcs.keys()[0]
 					npcs.erase(first_uid)
+	# Sirket bonus etkinliklerini DB'den oku (admin panelinden baslatilir/bitirilir)
+	event_poll_t += dt
+	if event_poll_t >= 5.0:
+		event_poll_t = 0.0
+		var ev_resp: Dictionary = db_send("get_active_events", {})
+		if ev_resp.has("ok") and ev_resp["ok"]:
+			active_events = ev_resp.get("events", [])
 	# Cele online oyuncularin ban durumunu kontrol et, banliysa kick et
 	if ban_tick_t >= 5.0:
 		ban_tick_t = 0.0
@@ -1789,23 +2043,32 @@ func _send_npc_snap(w: Dictionary) -> void:
 	var peers: Array = _players_in(str(w.name))
 	if peers.is_empty():
 		return
-	var arr := PackedFloat32Array()
-	for uid in (w.npcs as Dictionary).keys():
-		var e: Dictionary = w.npcs[uid]
-		arr.append(float(e.uid))
-		arr.append((e.pos as Vector3).x)
-		arr.append((e.pos as Vector3).z)
-		arr.append(float(e.yaw))
-		arr.append(float(e.hp))
-		arr.append(float(e.sh))
-		arr.append(1.0 if bool(e.aggro) else 0.0)
+	nsnap_n += 1
+	var far_tick: bool = nsnap_n % FAR_EVERY == 0
+	var near_u: float = NEAR_R * DOData.S
 	for pid in peers:
 		if _is_ghost(players[pid]):
 			continue
-		net.rpc_id(int(pid), "s_npc_snap", arr)
+		var mypos: Vector3 = players[pid].pos as Vector3
+		var arr := PackedFloat32Array()
+		for uid in (w.npcs as Dictionary).keys():
+			var e: Dictionary = w.npcs[uid]
+			# bant genisligi: uzaktaki NPC'ler seyrek, yakindakiler her pakette
+			if not far_tick and ((e.pos as Vector3) - mypos).length() > near_u:
+				continue
+			arr.append(float(e.uid))
+			arr.append((e.pos as Vector3).x)
+			arr.append((e.pos as Vector3).z)
+			arr.append(float(e.yaw))
+			arr.append(float(e.hp))
+			arr.append(float(e.sh))
+			arr.append(1.0 if bool(e.aggro) else 0.0)
+		if arr.size() > 0:
+			net.rpc_id(int(pid), "s_npc_snap", arr)
 
 
 func _send_player_snaps() -> void:
+	psnap_n += 1
 	var by_map: Dictionary = {}
 	for pid in players.keys():
 		var p: Dictionary = players[pid]
@@ -1822,10 +2085,15 @@ func _send_player_snaps() -> void:
 			if _is_ghost(players[pid]):
 				continue
 			var arr: Array = []
+			var mypos: Vector3 = players[pid].pos as Vector3
+			var near_u: float = NEAR_R * DOData.S
 			for oid in ids:
 				if oid == pid:
 					continue
 				var o: Dictionary = players[oid]
+				# bant genisligi: uzaktaki oyuncular seyrek (her FAR_EVERY. pakette), yakindakiler her pakette
+				if psnap_n % FAR_EVERY != 0 and ((o.pos as Vector3) - mypos).length() > near_u:
+					continue
 				arr.append([int(oid), (o.pos as Vector3).x, (o.pos as Vector3).z, float(o.yaw), float(o.hp), float(o.mhp), float(o.sh), float(o.msh), float(o.spd)])
 			net.rpc_id(int(pid), "s_psnap", arr)
 
@@ -1875,7 +2143,7 @@ func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 		var owner_ok: bool = false
 		if players.has(int(e.owner)):
 			var op: Dictionary = players[int(e.owner)]
-			if str(op.map) == str(w.name) and not bool(op.ut):
+			if str(op.map) == str(w.name) and not _untargetable(op):
 				owner_ok = true
 		if not owner_ok:
 			if clock - float(e.owner_hit_t) > 10.0:
@@ -1888,7 +2156,7 @@ func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 	var tl: float = 1.0e9
 	for pid in players.keys():
 		var p: Dictionary = players[pid]
-		if str(p.map) != str(w.name) or bool(p.in_safe) or bool(p.ut):
+		if str(p.map) != str(w.name) or bool(p.in_safe) or _untargetable(p):
 			continue
 		# Sahip varsa SADECE ona atis yapilabilir
 		if int(e.owner) != 0 and int(pid) != int(e.owner):
@@ -2087,7 +2355,7 @@ func _update_guard(w: Dictionary, e: Dictionary, dt: float) -> void:
 		e.pos = Vector3(hpos.x + gcl.x, (e.pos as Vector3).y, hpos.z + gcl.z)
 	var L: float = ((tp.pos as Vector3) - (e.pos as Vector3)).length()
 	var engaged: bool = pflat.length() <= float(C.engage_range) * DOData.S and L <= float(C.guard_range) * DOData.S
-	if engaged and not bool(tp.ut) and not bool(tp.in_safe):
+	if engaged and not _untargetable(tp) and not bool(tp.in_safe):
 		_face(e, (tp.pos as Vector3) - (e.pos as Vector3), dt)
 		var cd_prev: float = float(e.cd)
 		e.cd = cd_prev - dt
@@ -2144,6 +2412,7 @@ func _account_err_text(resp: Dictionary) -> String:
 		"ayni_isim": return "Bu zaten şu anki adın."
 		"gecersiz_sirket": return "Geçersiz şirket."
 		"ayni_sirket": return "Zaten bu şirkettesin."
+		"klanda": return "Bir klandayken şirket değiştirilemez; önce klandan ayrıl."
 		"bekleme": return "Tekrar değiştirmek için %s beklemelisin." % _wait_text(int(resp.get("kalan_sn", 0)))
 		"busy_retry", "db_baglanti_yok": return "Sunucu meşgul, biraz sonra tekrar dene."
 	return "İşlem yapılamadı."
@@ -2223,3 +2492,220 @@ func on_purchase_item(peer: int, item_id: String, quantity: int, tx_id: String) 
 		var err: String = str(resp.get("error", "bilinmeyen hata"))
 		print("[SUNUCU] market alimi basarisiz: account_id=%d, item=%s, hata=%s" % [acct_id, item_id, err])
 		net.callv("rpc_id", [peer, "s_purchase_result", false, err, tx_id, 0, 0])
+
+
+# ------------------------------------------------------------------ GENEL OLAY KANALI (c_event / s_event)
+# Yeni ozellikleri yeni RPC yerine buraya "tip" olarak ekle (bkz. net.gd). Gelen veri guvenilmezdir.
+func on_event(peer: int, tip: String, veri: Dictionary) -> void:
+	match tip:
+		"ping":
+			send_event_to(peer, "pong", {"t": veri.get("t", 0)})
+		"clan_op":
+			_clan_event(peer, veri)
+		"clan_chat":
+			_clan_chat(peer, str(veri.get("text", "")))
+		_:
+			pass  # bilinmeyen tip: yok say (eski/yeni surum uyumu)
+
+
+func send_event_to(peer: int, tip: String, veri: Dictionary = {}) -> void:
+	_to(peer, "s_event", [tip, veri])
+
+
+# ------------------------------------------------------------------ KLAN SISTEMI (sunucu)
+# Istemci -> sunucu:  "clan_op" {op, args}  /  "clan_chat" {text}     (genel olay kanali, yeni RPC YOK)
+# Sunucu -> istemci:  "clan_state" (kendi klanim + davetler), "clan_list", "clan_result", "clan_tags", "clan_chat"
+# Tum kurallar server_db.py clan_op() icinde dogrulanir; burada yalnizca yonlendirme, canli durum ve yayin var.
+const CLAN_OPS: Array = ["me", "list", "create", "apply", "cancel_apply", "accept_invite", "decline_invite", "invite",
+	"cancel_invite", "accept_request", "reject_request", "leave", "kick", "promote", "demote", "transfer", "update", "disband"]
+var _clan_op_t: Dictionary = {}   # peer -> son islem zamani (hiz siniri)
+
+
+func _peer_of_account(aid: int) -> int:
+	for pid in players.keys():
+		var q: Dictionary = players[pid]
+		if int(q.get("account_id", 0)) == aid and not _is_ghost(q):
+			return int(pid)
+	return 0
+
+
+func _chat_nm(p: Dictionary) -> String:
+	var t: String = str(p.get("_clan_tag", ""))
+	return ("[%s] %s" % [t, str(p.name)]) if t != "" else str(p.name)
+
+
+func _clan_err_text(code: String) -> String:
+	match code:
+		"zaten_klanda": return "Zaten bir klandasın."
+		"gecersiz_klan_adi": return "Klan adı 3-20 karakter olmalı (harf, rakam, boşluk, _ ve -)."
+		"gecersiz_tag": return "Klan etiketi 2-4 harf/rakam olmalı."
+		"klan_adi_kullanimda": return "Bu klan adı kullanılıyor."
+		"tag_kullanimda": return "Bu klan etiketi kullanılıyor."
+		"yetersiz_kredi": return "Klan kurmak için yeterli kredin yok."
+		"klan_yok": return "Klan bulunamadı."
+		"farkli_sirket": return "Klanlar yalnızca aynı şirketin oyuncularını kabul eder."
+		"klan_dolu": return "Klan dolu."
+		"cok_basvuru": return "En fazla 5 klana aynı anda başvurabilirsin."
+		"davet_yok": return "Bu davet artık geçerli değil."
+		"yetki_yok": return "Bu işlem için yetkin yok."
+		"oyuncu_yok": return "Oyuncu bulunamadı."
+		"oyuncu_klanda": return "Oyuncu zaten bir klanda."
+		"basvuru_yok": return "Başvuru bulunamadı."
+		"klanda_degil": return "Bir klanda değilsin."
+		"lider_ayrilamaz": return "Lider ayrılamaz: önce liderliği devret veya klanı dağıt."
+		"uye_yok": return "Üye bulunamadı."
+		"rol_ayni": return "Üye zaten bu rütbede."
+		"busy_retry", "db_baglanti_yok": return "Sunucu meşgul, biraz sonra tekrar dene."
+	return "İşlem yapılamadı."
+
+
+func _clan_ok_text(op: String) -> String:
+	match op:
+		"create": return "Klan kuruldu."
+		"apply": return "Başvuru gönderildi."
+		"cancel_apply": return "Başvuru geri çekildi."
+		"accept_invite": return "Klana katıldın."
+		"decline_invite": return "Davet reddedildi."
+		"invite": return "Davet gönderildi."
+		"cancel_invite": return "Davet iptal edildi."
+		"accept_request": return "Başvuru kabul edildi."
+		"reject_request": return "Başvuru reddedildi."
+		"leave": return "Klandan ayrıldın."
+		"kick": return "Üye klandan çıkarıldı."
+		"promote": return "Üye subay yapıldı."
+		"demote": return "Subay üyeliğe indirildi."
+		"transfer": return "Liderlik devredildi."
+		"update": return "Klan bilgileri kaydedildi."
+		"disband": return "Klan dağıtıldı."
+	return ""
+
+
+# Oyuncunun klan alanlarini DB durumuna esitler, istemciye "clan_state" yollar.
+func _clan_send_state(peer: int, st: Dictionary = {}) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]):
+		return
+	var p: Dictionary = players[peer]
+	if st.is_empty():
+		st = db_send("clan_op", {"account_id": int(p.account_id), "op": "me", "args": {}})
+	if not bool(st.get("ok", false)):
+		return
+	var clan = st.get("clan", null)
+	if typeof(clan) == TYPE_DICTIONARY:
+		p["_clan_id"] = int(clan.get("id", 0))
+		p["_clan_tag"] = str(clan.get("tag", ""))
+		p["_clan_role"] = int(clan.get("role", 0))
+		for m in (clan.get("members", []) as Array):
+			var mp: int = _peer_of_account(int(m.get("account_id", 0)))
+			m["on"] = mp != 0
+			m["map"] = str(players[mp].map) if mp != 0 else ""
+	else:
+		p["_clan_id"] = 0
+		p["_clan_tag"] = ""
+		p["_clan_role"] = 0
+	var out: Dictionary = {"clan": clan, "invites": st.get("invites", []), "applied": st.get("applied", []),
+		"cost": int(st.get("cost", 0)), "my_acct": int(p.account_id)}
+	send_event_to(peer, "clan_state", out)
+
+
+# Tum oyunculara: kimin hangi klanda oldugu (isim etiketi + yesil minimap noktasi icin).
+func _clan_push_tags() -> void:
+	var t: Dictionary = {}
+	for pid in players.keys():
+		var q: Dictionary = players[pid]
+		if _is_ghost(q):
+			continue
+		if int(q.get("_clan_id", 0)) > 0:
+			t[int(pid)] = [int(q._clan_id), str(q._clan_tag)]
+	for pid in players.keys():
+		if not _is_ghost(players[pid]):
+			send_event_to(int(pid), "clan_tags", {"t": t})
+
+
+func _clan_event(peer: int, veri: Dictionary) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]):
+		return
+	var p: Dictionary = players[peer]
+	var op: String = str(veri.get("op", ""))
+	if not CLAN_OPS.has(op):
+		return
+	if op != "me" and clock - float(_clan_op_t.get(peer, -1.0e9)) < 0.3:
+		return   # hiz siniri
+	_clan_op_t[peer] = clock
+	var args: Dictionary = {}
+	if typeof(veri.get("args", {})) == TYPE_DICTIONARY:
+		for k in (veri.args as Dictionary).keys():
+			var v = (veri.args as Dictionary)[k]
+			if typeof(v) == TYPE_STRING:
+				args[str(k)] = (v as String).substr(0, 220)
+			elif typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT:
+				args[str(k)] = int(v)
+	var acct: int = int(p.account_id)
+	var res: Dictionary = db_send("clan_op", {"account_id": acct, "op": op, "args": args})
+	if not bool(res.get("ok", false)):
+		send_event_to(peer, "clan_result", {"op": op, "ok": false, "msg": _clan_err_text(str(res.get("error", "")))})
+		return
+	if op == "list":
+		send_event_to(peer, "clan_list", {"clans": res.get("clans", [])})
+		return
+	if op != "me":
+		send_event_to(peer, "clan_result", {"op": op, "ok": true, "msg": _clan_ok_text(op)})
+	# Bildirimler (hedef oyuncu cevrimiciyse)
+	var tid: int = int(args.get("account_id", 0))
+	var tpeer: int = _peer_of_account(tid) if tid > 0 else 0
+	var my_tag: String = str(p.get("_clan_tag", ""))
+	match op:
+		"invite":
+			var ip: int = _peer_of_account(int(res.get("target", 0))) if int(res.get("target", 0)) > 0 else 0
+			if ip != 0:
+				_sys_to(ip, "[KLAN] %s seni [%s] klanına davet etti. (Kontrol Paneli > Klan)" % [str(p.name), my_tag])
+		"accept_request":
+			if tpeer != 0:
+				_sys_to(tpeer, "[KLAN] [%s] klanına başvurun kabul edildi." % my_tag)
+		"reject_request":
+			if tpeer != 0:
+				_sys_to(tpeer, "[KLAN] [%s] klanına başvurun reddedildi." % my_tag)
+		"kick":
+			if tpeer != 0:
+				_sys_to(tpeer, "[KLAN] [%s] klanından çıkarıldın." % my_tag)
+		"promote", "demote", "transfer":
+			if tpeer != 0:
+				_sys_to(tpeer, "[KLAN] Klan rütben güncellendi.")
+	var aff: Array = res.get("affected", [])
+	for aid in aff:
+		var q: int = _peer_of_account(int(aid))
+		if q == 0:
+			continue
+		if q == peer:
+			var st: Dictionary = res.duplicate(true)
+			st.erase("affected")
+			_clan_send_state(q, st)
+		else:
+			_clan_send_state(q)
+	if op == "me" and not aff.has(acct):
+		_clan_send_state(peer, res.duplicate(true))
+	if op != "me":
+		_clan_push_tags()
+
+
+func _clan_chat(peer: int, text: String) -> void:
+	if not players.has(peer) or _is_ghost(players[peer]):
+		return
+	var p: Dictionary = players[peer]
+	var cid: int = int(p.get("_clan_id", 0))
+	if cid == 0:
+		_sys_to(peer, "[KLAN] Bir klanda değilsin.")
+		return
+	var mute_status: Dictionary = db_send("get_account_status", {"account_id": int(p.account_id)})
+	if mute_status.has("ok") and mute_status["ok"] and mute_status.get("mute_active", false):
+		_sys_to(peer, "Sohbet engeli durmustur.")
+		return
+	text = text.strip_edges().substr(0, 120)
+	if text == "" or clock - float(p.chat_t) < 0.5:
+		return
+	p.chat_t = clock
+	print("[SOHBET-KLAN %s] %s: %s" % [str(p.get("_clan_tag", "")), str(p.name), text])
+	for pid in players.keys():
+		var q: Dictionary = players[pid]
+		if _is_ghost(q) or int(q.get("_clan_id", 0)) != cid:
+			continue
+		send_event_to(int(pid), "clan_chat", {"nm": str(p.name), "role": int(p.get("_clan_role", 0)), "text": text})

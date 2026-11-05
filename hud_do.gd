@@ -76,7 +76,7 @@ var q_bar: DOBar
 var chat_out: RichTextLabel
 var chat_in: LineEdit
 var chat_tab_btns: Array = []
-var chat_tab_ids: Array = [0, 2, 3, 1]   # buton sirasi -> sekme: GENEL, SIRKET, GRUP, SISTEM
+var chat_tab_ids: Array = [0, 2, 3, 4, 1]   # buton sirasi -> sekme: GENEL, SIRKET, GRUP, KLAN, SISTEM
 var chat_tab := 0
 
 # ---- Grup penceresi
@@ -92,7 +92,7 @@ var grp_inv_name := ""
 var grp_box: VBoxContainer
 var grp_leave_btn: Button
 var _grp_sig := ""
-var chat_lines: Array = [[], [], [], []]   # 0 genel, 1 sistem, 2 sirket, 3 grup
+var chat_lines: Array = [[], [], [], [], []]   # 0 genel, 1 sistem, 2 sirket, 3 grup, 4 klan
 var friend_in: LineEdit
 var friend_box: VBoxContainer
 var friend_count: Label
@@ -813,7 +813,7 @@ func _build_menu() -> void:
 	# DarkOrbit ust menu: sol ust 11 dugme, sag ust 3 dugme
 	top_left = Control.new()
 	top_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top_left.size = Vector2(8 * 42, 38)
+	top_left.size = Vector2(7 * 42, 38)
 	add_child(top_left)
 	var defs := [
 		["log", "Sistem mesajlari", _open_log, null],
@@ -823,7 +823,6 @@ func _build_menu() -> void:
 		["minimap", "Minimap", toggle_minimap, minimap_win],
 		["quests", "Gorevler  [Q]", toggle_quests, quests_win],
 		["chat", "Sohbet  [Enter]", toggle_chat, chat_win],
-		["pet", "Gorev takibi", toggle_tracker, tracker_win],
 	]
 	for i in defs.size():
 		var d: Array = defs[i]
@@ -1163,13 +1162,14 @@ func _flat_btn(text: String, pos: Vector2, size_: Vector2) -> Button:
 func _build_chat() -> void:
 	chat_win = _win("Sohbet", Vector2(320, 212))
 	var b := chat_win.body
-	var names := ["GENEL", "SIRKET", "GRUP", "SISTEM"]
+	var names := ["GENEL", "SIRKET", "GRUP", "KLAN", "SISTEM"]
 	for i in names.size():
-		var tb := _flat_btn(names[i], Vector2(8 + i * 62, 0), Vector2(60, 18))
+		var tb := _flat_btn(names[i], Vector2(8 + i * 60, 0), Vector2(58, 18))
 		tb.pressed.connect(_set_chat_tab.bind(int(chat_tab_ids[i])))
 		b.add_child(tb)
 		chat_tab_btns.append(tb)
 	chat_tab_btns[2].visible = false   # GRUP sekmesi yalnizca grupta iken acilir
+	chat_tab_btns[3].visible = false   # KLAN sekmesi yalnizca klandayken acilir
 	chat_out = RichTextLabel.new()
 	chat_out.position = Vector2(8, 22)
 	chat_out.size = Vector2(304, 96)
@@ -1246,6 +1246,19 @@ func _log_group(line: String) -> void:
 	_push(3, "[color=#6f8aa0]%s[/color] %s" % [_stamp(), line])
 
 
+func _log_clan(line: String) -> void:
+	_push(4, "[color=#6f8aa0]%s[/color] %s" % [_stamp(), line])
+
+
+# KLAN sohbet sekmesi: yalnizca klandayken gorunur
+func set_clan_tab(on: bool) -> void:
+	if chat_tab_btns.size() < 5:
+		return
+	chat_tab_btns[3].visible = on
+	if not on and chat_tab == 4:
+		_set_chat_tab(0)
+
+
 func log_system(line: String) -> void:
 	_log_system(line)
 
@@ -1264,6 +1277,12 @@ func _chat_submit(t: String) -> void:
 		return
 	if msg.begins_with("/sil "):
 		remove_friend(msg.substr(5))
+		return
+	if chat_tab == 4:   # KLAN sohbeti: yalnizca klan uyelerine gider
+		if Net.online and Net.gm != null and Net.gm.clan != null and Net.gm.clan.in_clan():
+			Net.gm.clan.send_chat(msg)
+		else:
+			_log_clan("[color=#00ccff]Sistem:[/color] Bir klanda değilsin.")
 		return
 	var ch := 0   # secili sekmeye gore kanal: GENEL=0, SIRKET=1, GRUP=2
 	if chat_tab == 2:
@@ -1541,6 +1560,7 @@ func _refresh_group(force := false) -> void:
 	chat_tab_btns[2].visible = in_g
 	if not in_g and chat_tab == 3:
 		_set_chat_tab(0)
+	set_clan_tab(Net.online and gm != null and gm.clan != null and gm.clan.in_clan())
 	if not force and sig == _grp_sig:
 		return
 	_grp_sig = sig
@@ -1707,7 +1727,7 @@ func _build_labels() -> void:
 	lbl_prompt.size = Vector2(600, 30)
 	lbl_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl_help = _lbl(self, Vector2.ZERO, 10, Color(1, 1, 1))
-	lbl_help.text = "Sol tik: git (basili tut: takip)  |  Dusmana tik: hedef, tekrar tik / Ctrl / Bosluk: ates  |  Sag tik / Esc: dur  |  Tab: sonraki hedef  |  1-6: cephane  |  R: roket  |  J: kapi  |  B: panel  |  M: harita  |  Q: gorev  |  F: arkadas  |  Enter: sohbet  |  C: konfig  |  H: bu yazi"
+	lbl_help.text = "Sol tik: git (basili tut: takip)  |  Dusmana tik: hedef, tekrar tik / Ctrl / Bosluk: ates  |  Sag tik / Esc: dur  |  Tab: sonraki hedef  |  1-6: cephane  |  R: roket  |  J: kapi  |  B: panel  |  Q: gorev  |  F: arkadas  |  Enter: sohbet  |  C: konfig  |  H: bu yazi"
 	lbl_help.modulate = Color(1, 1, 1, 0.6)
 	lbl_help.size = Vector2(1200, 18)
 

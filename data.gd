@@ -53,7 +53,7 @@ const COMBAT_LOGOUT_COMBAT_SEC := 30.0   # (eski ad; NPC/PvP ile ayni deger)
 const GHOST_SHIELD_ABSORB := 0.8         # baglantisi kopmus geminin kalkaninin hasari sogurma orani (kalkan bitene kadar)
 const AMMO_SWITCH_LOCK_SEC := 5.0        # son hasardan sonra lazer muhimmati degistirmenin yasak oldugu sure (sn)
 const NET_PEER_TIMEOUT_MAX_MS := 10000   # internet kopmasinin SUNUCUDA anlasilma ust siniri (ms). ENet varsayilani 30000
-const ADV_MAP_PORTAL_DMZ := false        # X-5..X-8'de kendi sirketinin kapi cevresi guvenli mi? Kaynak ayirmiyor -> kapali
+const ADV_MAP_PORTAL_DMZ := true         # X-5..X-8'de kendi sirketinin kapi cevresi guvenli (X-1..X-4 ile ayni). Kapatmak icin false
 const ENEMY_BASE_SAFE := false           # dusman ussunun yaninda guvenli bolge (kapali: sadece kendi ussun)
 const JUMP_BLOCK_NORMAL_MAPS := false    # normal sirket haritalarinda saldiri altinda atlamayi engelle (kaynakta yalnizca PvP haritalari)
 

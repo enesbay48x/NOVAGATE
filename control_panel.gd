@@ -10,6 +10,7 @@ extends Panel
 #   * Sol menü gruplu (Oyun / Çevrimiçi / Sistem), üstte kaynak çipleri, altta durum çubuğu
 # ============================================================================
 const DOData = preload("res://data.gd")
+const Music = preload("res://music_player.gd")
 const RankSys = preload("res://rank_system.gd")
 const SCI_FONT = preload("res://fonts/Orbitron-Regular.ttf")
 const DARK_GLASS_BG := Color(0.02, 0.05, 0.1, 0.95)
@@ -563,7 +564,7 @@ func build() -> void:
 	pages["stats"] = _build_stats()
 	pages["galaxy"] = _build_galaxy()
 	pages["auction"] = _build_auction()
-	pages["clan"] = _build_blocked_page("KLAN", "Klan bilgisi, üyeler, başvurular ve yetkiler sunucuya bağlıdır. Projede klan API'si veya çok oyunculu hesap altyapısı bulunmuyor; üyelik ve başvuru işlemleri kapalıdır.", "Klan sunucusu bağlı değil.")
+	pages["clan"] = _build_clan()
 	pages["settings"] = _build_settings()
 	pages["help"] = _build_help()
 
@@ -708,6 +709,8 @@ func _switch(tab: String) -> void:
 	refresh()
 	if tab == "auction" and Net.online and Net.gm != null and Net.gm.auc != null:
 		Net.gm.auc.request_open()
+	if tab == "clan":
+		_clan_open()
 	if pages.has(tab):
 		var pg: Control = pages[tab]
 		pg.modulate.a = 0.0
@@ -969,7 +972,6 @@ func _refresh_shop() -> void:
 			var cost: int = game.repair_cost()
 			var repair_desc := "Geminin canını ve kalkanını doldurur.  Phoenix için ücretsiz, diğer gemiler 500 Uridium."
 			_service_row("Tam Tamir", repair_desc, "TAMİR ET", _svc_repair, cost, true, cost > 0 or game.wrecked)
-			_service_row("Galaksi Haritası", "Kapılara uçmadan önce haritayı aç.", "AÇ", _open_galaxy, 0)
 
 
 func _service_row(title: String, desc: String, btn: String, cb: Callable, cost: int, in_uri: bool = false, usable: bool = true) -> void:
@@ -1988,6 +1990,469 @@ func _build_blocked_page(heading: String, explanation: String, status: String) -
 
 
 # ============================================================================
+#  KLAN  -  arama / kurma / başvuru / davet / üyeler / ayarlar
+#  Tüm kurallar sunucuda doğrulanır (server_db.py clan_op); bu sayfa yalnızca görünümdür.
+# ============================================================================
+const CLAN_ROLE_NAMES := ["Üye", "Subay", "Lider"]
+var clan_page_body: VBoxContainer
+var clan_sub: String = ""
+var clan_q: String = ""
+var clan_f_name: String = ""
+var clan_f_tag: String = ""
+var clan_f_desc: String = ""
+var clan_f_invite: String = ""
+var clan_desc_set: bool = false
+var clan_confirm: String = ""
+var clan_preview: Label
+
+
+func _clan() -> Variant:
+	if Net.gm != null and Net.gm.clan != null:
+		return Net.gm.clan
+	return null
+
+
+func _build_clan() -> Control:
+	var r := _make_scroll_page(10)
+	clan_page_body = r[1]
+	return r[0]
+
+
+func _clan_open() -> void:
+	var C = _clan()
+	if C != null:
+		C.changed = _on_clan_changed
+		if Net.online:
+			C.request_state()
+			C.request_list(clan_q)
+	clan_confirm = ""
+	_refresh_clan()
+
+
+func _on_clan_changed() -> void:
+	if cur_tab == "clan" and is_visible_in_tree():
+		_refresh_clan()
+
+
+func _clan_do(op: String, args: Dictionary = {}) -> void:
+	var C = _clan()
+	if C != null:
+		C.op(op, args)
+
+
+func _clan_ask(key: String, op: String, args: Dictionary) -> void:
+	if clan_confirm == key:
+		clan_confirm = ""
+		_clan_do(op, args)
+	else:
+		clan_confirm = key
+	_refresh_clan()
+
+
+func _clan_confirm_btn(text: String, key: String, op: String, args: Dictionary, kind := "ButtonDanger", w := 84) -> Button:
+	var armed: bool = clan_confirm == key
+	return _btn("EMİN MİSİN?" if armed else text, "ButtonGold" if armed else kind, _clan_ask.bind(key, op, args), Vector2(112 if armed else w, 30), true, 11)
+
+
+func _clan_set_sub(id: String) -> void:
+	clan_sub = id
+	clan_confirm = ""
+	_refresh_clan()
+
+
+func _clan_tabs(body: Control, items: Array) -> void:
+	var row := _flow(6)
+	for it in items:
+		var on: bool = clan_sub == str(it[0])
+		row.add_child(_btn(str(it[1]), "ButtonCurrent" if on else "Button", _clan_set_sub.bind(str(it[0])), Vector2(150, 34), true, 12))
+	body.add_child(row)
+
+
+func _clan_status(body: Control, C) -> void:
+	if str(C.last_msg) == "":
+		return
+	var note := _panel("PanelNote")
+	note.add_child(_wrap(str(C.last_msg), 13, GREEN if bool(C.last_ok) else Color(1.0, 0.72, 0.4)))
+	body.add_child(note)
+
+
+func _clan_title_row(body: Control, title: String, chip: String, chip_col: Color) -> void:
+	var top := HBoxContainer.new()
+	body.add_child(top)
+	var hl := _mk(title, 22, NEON_ORANGE, true)
+	hl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(hl)
+	if chip != "":
+		var tag := _panel("PanelChip")
+		tag.add_child(_mk(chip, 11, chip_col))
+		top.add_child(tag)
+	body.add_child(_line())
+
+
+func _clan_edit(text: String, ph: String, maxlen: int, on_change: Callable, on_submit := Callable()) -> LineEdit:
+	var le := LineEdit.new()
+	le.text = text
+	le.placeholder_text = ph
+	le.max_length = maxlen
+	le.custom_minimum_size = Vector2(220, 34)
+	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	le.text_changed.connect(on_change)
+	if on_submit.is_valid():
+		le.text_submitted.connect(on_submit)
+	return le
+
+
+func _refresh_clan() -> void:
+	if clan_page_body == null:
+		return
+	for c in clan_page_body.get_children():
+		clan_page_body.remove_child(c)
+		c.queue_free()
+	clan_preview = null
+	var body: VBoxContainer = clan_page_body
+	var C = _clan()
+	if not Net.online or C == null:
+		_clan_title_row(body, "KLAN", "ÇEVRİMDIŞI", Color(1.0, 0.72, 0.4))
+		var note := _panel("PanelNote")
+		note.add_child(_wrap("Klan sistemi sunucuya bağlıyken çalışır. Oyuna giriş yaptıktan sonra klan kurabilir, klanlara başvurabilir ve klan sohbetini kullanabilirsin.", 13, Color(1.0, 0.72, 0.4)))
+		body.add_child(note)
+		return
+	if not bool(C.has_state):
+		_clan_title_row(body, "KLAN", "", GOLD)
+		body.add_child(_wrap("Klan bilgisi sunucudan alınıyor…", 14, DIM))
+		return
+	if C.in_clan():
+		_clan_view_member(body, C)
+	else:
+		_clan_view_free(body, C)
+
+
+# ------------------------------------------------------------------ klansız görünüm
+func _clan_view_free(body: VBoxContainer, C) -> void:
+	_clan_title_row(body, "KLAN", "KLANSIZ", DIM)
+	body.add_child(_wrap("Bir klana katıl ya da kendi klanını kur. Klanlar şirkete bağlıdır: yalnızca kendi şirketindeki klanları görürsün. Klan etiketin, oyun içinde nickinin yanında görünür.", 13, TEXT2))
+	var n_inv: int = (C.invites as Array).size()
+	var n_app: int = (C.applied as Array).size()
+	if clan_sub not in ["list", "create", "invites", "applied"]:
+		clan_sub = "invites" if n_inv > 0 else "list"
+	_clan_tabs(body, [["list", "KLAN LİSTESİ"], ["create", "KLAN KUR"], ["invites", "DAVETLER (%d)" % n_inv], ["applied", "BAŞVURULARIM (%d)" % n_app]])
+	_clan_status(body, C)
+	match clan_sub:
+		"list":
+			_clan_free_list(body, C)
+		"create":
+			_clan_free_create(body, C)
+		"invites":
+			_clan_free_invites(body, C)
+		"applied":
+			_clan_free_applied(body, C)
+
+
+func _clan_search_changed(t: String) -> void:
+	clan_q = t
+
+
+func _clan_search_go(_t = "") -> void:
+	var C = _clan()
+	if C != null:
+		C.request_list(clan_q)
+
+
+func _clan_free_list(body: VBoxContainer, C) -> void:
+	var bar := HBoxContainer.new()
+	bar.add_theme_constant_override("separation", 8)
+	body.add_child(bar)
+	bar.add_child(_clan_edit(clan_q, "Klan adı veya etiket ara", 20, _clan_search_changed, _clan_search_go))
+	bar.add_child(_btn("ARA", "ButtonPrimary", _clan_search_go, Vector2(90, 34), true, 12))
+	var clans: Array = C.list
+	if clans.is_empty():
+		var note := _panel("PanelInset")
+		note.add_child(_wrap("Şirketinde şu an listelenecek klan yok. İlk klanı sen kurabilirsin: «KLAN KUR» sekmesi.", 13, DIM))
+		body.add_child(note)
+		return
+	for cl in clans:
+		var row := _panel("PanelRow")
+		body.add_child(row)
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 12)
+		row.add_child(h)
+		var v := VBoxContainer.new()
+		v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		v.add_theme_constant_override("separation", 2)
+		h.add_child(v)
+		v.add_child(_mk("[%s]  %s" % [str(cl.get("tag", "")), str(cl.get("name", ""))], 16, GOLD, true))
+		var d: String = str(cl.get("description", ""))
+		if d != "":
+			v.add_child(_wrap(d, 12, TEXT2))
+		var full: bool = int(cl.get("members", 0)) >= int(cl.get("max", 50))
+		h.add_child(_mk("%d / %d üye" % [int(cl.get("members", 0)), int(cl.get("max", 50))], 12, RED if full else DIM))
+		var cid: int = int(cl.get("id", 0))
+		if bool(cl.get("applied", false)):
+			h.add_child(_btn("GERİ ÇEK", "Button", _clan_do.bind("cancel_apply", {"clan_id": cid}), Vector2(110, 32), true, 12))
+		else:
+			h.add_child(_btn("BAŞVUR", "ButtonPrimary", _clan_do.bind("apply", {"clan_id": cid}), Vector2(110, 32), not full, 12))
+
+
+func _clan_f_name_changed(t: String) -> void:
+	clan_f_name = t
+	_clan_update_preview()
+
+
+func _clan_f_tag_changed(t: String) -> void:
+	clan_f_tag = t
+	_clan_update_preview()
+
+
+func _clan_f_desc_changed(t: String) -> void:
+	clan_f_desc = t
+
+
+func _clan_update_preview() -> void:
+	if clan_preview != null and is_instance_valid(clan_preview):
+		var tg: String = clan_f_tag.strip_edges().to_upper()
+		clan_preview.text = "Kimliğin:  %s%s" % [("[%s]  " % tg) if tg != "" else "", str(game.SV.get("callsign", "Gezgin"))]
+
+
+func _clan_create_go(_t = "") -> void:
+	_clan_do("create", {"name": clan_f_name.strip_edges(), "tag": clan_f_tag.strip_edges().to_upper(), "description": clan_f_desc.strip_edges()})
+
+
+func _clan_free_create(body: VBoxContainer, C) -> void:
+	var card := _panel("PanelCard")
+	body.add_child(card)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	card.add_child(v)
+	v.add_child(_mk("YENİ KLAN KUR", 16, GOLD, true))
+	v.add_child(_line())
+	v.add_child(_mk("Klan adı (3-20 karakter)", 12, DIM))
+	v.add_child(_clan_edit(clan_f_name, "Örn: DARK LEGION", 20, _clan_f_name_changed))
+	v.add_child(_mk("Klan etiketi (2-4 harf/rakam) — nickinin yanında görünür", 12, DIM))
+	v.add_child(_clan_edit(clan_f_tag, "Örn: DL", 4, _clan_f_tag_changed))
+	v.add_child(_mk("Açıklama (isteğe bağlı)", 12, DIM))
+	v.add_child(_clan_edit(clan_f_desc, "Klanını kısaca tanıt", 200, _clan_f_desc_changed, _clan_create_go))
+	clan_preview = _mk("", 14, GREEN)
+	v.add_child(clan_preview)
+	_clan_update_preview()
+	var cost: int = int(C.cost)
+	v.add_child(_wrap(("Kuruluş bedeli: %s kredi. " % str(game._n(cost)) if cost > 0 else "Klan kurmak ücretsizdir. ") + "Klanlar şirkete bağlıdır; yalnızca aynı şirketin oyuncuları katılabilir. Klandayken şirket değiştirilemez.", 12, TEXT2))
+	var b := _btn("KLANI KUR", "ButtonPrimary", _clan_create_go, Vector2(220, 38), true, 13)
+	b.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	v.add_child(b)
+
+
+func _clan_free_invites(body: VBoxContainer, C) -> void:
+	var inv: Array = C.invites
+	if inv.is_empty():
+		var note := _panel("PanelInset")
+		note.add_child(_wrap("Bekleyen klan davetin yok.", 13, DIM))
+		body.add_child(note)
+		return
+	for it in inv:
+		var row := _panel("PanelRow")
+		body.add_child(row)
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 10)
+		row.add_child(h)
+		var l := _mk("[%s]  %s     %d üye" % [str(it.get("tag", "")), str(it.get("name", "")), int(it.get("members", 0))], 15, GOLD, true)
+		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		h.add_child(l)
+		var cid: int = int(it.get("clan_id", 0))
+		h.add_child(_btn("KABUL ET", "ButtonPrimary", _clan_do.bind("accept_invite", {"clan_id": cid}), Vector2(110, 32), true, 12))
+		h.add_child(_btn("REDDET", "ButtonDanger", _clan_do.bind("decline_invite", {"clan_id": cid}), Vector2(100, 32), true, 12))
+
+
+func _clan_free_applied(body: VBoxContainer, C) -> void:
+	var ap: Array = C.applied
+	if ap.is_empty():
+		var note := _panel("PanelInset")
+		note.add_child(_wrap("Bekleyen başvurun yok. «KLAN LİSTESİ» sekmesinden bir klana başvurabilirsin.", 13, DIM))
+		body.add_child(note)
+		return
+	for it in ap:
+		var row := _panel("PanelRow")
+		body.add_child(row)
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 10)
+		row.add_child(h)
+		var l := _mk("[%s]  %s" % [str(it.get("tag", "")), str(it.get("name", ""))], 15, GOLD, true)
+		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		h.add_child(l)
+		h.add_child(_mk("Yanıt bekleniyor", 12, DIM))
+		h.add_child(_btn("GERİ ÇEK", "Button", _clan_do.bind("cancel_apply", {"clan_id": int(it.get("clan_id", 0))}), Vector2(110, 32), true, 12))
+
+
+# ------------------------------------------------------------------ klan üyesi görünümü
+func _clan_view_member(body: VBoxContainer, C) -> void:
+	var cl: Dictionary = C.clan
+	var role: int = clampi(int(C.my_role()), 0, 2)
+	var members: Array = cl.get("members", [])
+	_clan_title_row(body, "KLAN", str(CLAN_ROLE_NAMES[role]).to_upper(), [DIM, NEON_BLUE_BRIGHT, GOLD][role])
+	# --- klan kartı
+	var card := _panel("PanelCard")
+	body.add_child(card)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 6)
+	card.add_child(v)
+	v.add_child(_mk("[%s]  %s" % [str(cl.get("tag", "")), str(cl.get("name", ""))], 22, GOLD, true))
+	v.add_child(_mk("Üyeler: %d / %d     •     Çevrimiçi: %d     •     Kuruluş: %s" % [members.size(), int(cl.get("max", 50)), C.online_count(), Time.get_date_string_from_unix_time(int(cl.get("created_at", 0)))], 13, TEXT2))
+	var d: String = str(cl.get("description", ""))
+	if d != "":
+		v.add_child(_wrap(d, 13, ICE_WHITE))
+	v.add_child(_wrap("Klan sohbeti: sohbet penceresindeki KLAN sekmesi. Klan arkadaşların minimap'te yeşil nokta olarak görünür.", 12, DIM))
+	# --- sekmeler
+	var n_req: int = (cl.get("requests", []) as Array).size()
+	var tabs: Array = [["members", "ÜYELER (%d)" % members.size()]]
+	if C.can_manage():
+		tabs.append(["requests", "BAŞVURULAR (%d)" % n_req])
+	tabs.append(["settings", "AYARLAR"])
+	var ids: Array = []
+	for t in tabs:
+		ids.append(str(t[0]))
+	if clan_sub not in ids:
+		clan_sub = "members"
+	_clan_tabs(body, tabs)
+	_clan_status(body, C)
+	match clan_sub:
+		"members":
+			_clan_tab_members(body, C, members)
+		"requests":
+			_clan_tab_requests(body, C, cl)
+		"settings":
+			_clan_tab_settings(body, C, cl, members)
+
+
+func _clan_tab_members(body: VBoxContainer, C, members: Array) -> void:
+	var my_acct: int = int(C.my_acct)
+	for m in members:
+		var aid: int = int(m.get("account_id", 0))
+		var mrole: int = clampi(int(m.get("role", 0)), 0, 2)
+		var on: bool = bool(m.get("on", false))
+		var row := _panel("PanelRow")
+		body.add_child(row)
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 10)
+		row.add_child(h)
+		h.add_child(_mk("●", 16, GREEN if on else Color(0.35, 0.4, 0.46)))
+		var nm := _mk(str(m.get("callsign", "")) + ("   (sen)" if aid == my_acct else ""), 14, ICE_WHITE)
+		nm.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		h.add_child(nm)
+		h.add_child(_mk(str(CLAN_ROLE_NAMES[mrole]), 12, [TEXT2, NEON_BLUE_BRIGHT, GOLD][mrole]))
+		var st := _mk(("Harita %s" % str(m.get("map", ""))) if on else "Çevrimdışı", 12, GREEN if on else DIM)
+		st.custom_minimum_size = Vector2(110, 0)
+		st.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		h.add_child(st)
+		if aid == my_acct:
+			continue
+		var a := {"account_id": aid}
+		if C.is_leader():
+			if mrole == 0:
+				h.add_child(_btn("SUBAY YAP", "Button", _clan_do.bind("promote", a), Vector2(92, 30), true, 11))
+			elif mrole == 1:
+				h.add_child(_btn("ÜYE YAP", "Button", _clan_do.bind("demote", a), Vector2(92, 30), true, 11))
+			h.add_child(_clan_confirm_btn("LİDER YAP", "transfer:%d" % aid, "transfer", a, "ButtonGold", 92))
+			h.add_child(_clan_confirm_btn("ÇIKAR", "kick:%d" % aid, "kick", a))
+		elif C.can_manage() and mrole == 0:
+			h.add_child(_clan_confirm_btn("ÇIKAR", "kick:%d" % aid, "kick", a))
+
+
+func _clan_f_invite_changed(t: String) -> void:
+	clan_f_invite = t
+
+
+func _clan_invite_go(_t = "") -> void:
+	var nm: String = clan_f_invite.strip_edges()
+	if nm == "":
+		return
+	_clan_do("invite", {"callsign": nm})
+	clan_f_invite = ""
+	_refresh_clan()
+
+
+func _clan_tab_requests(body: VBoxContainer, C, cl: Dictionary) -> void:
+	# --- oyuncu davet et
+	var card := _panel("PanelCard")
+	body.add_child(card)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	card.add_child(v)
+	v.add_child(_mk("OYUNCU DAVET ET", 15, GOLD, true))
+	var bar := HBoxContainer.new()
+	bar.add_theme_constant_override("separation", 8)
+	v.add_child(bar)
+	bar.add_child(_clan_edit(clan_f_invite, "Oyuncu adı (aynı şirket, klansız)", 16, _clan_f_invite_changed, _clan_invite_go))
+	bar.add_child(_btn("DAVET ET", "ButtonPrimary", _clan_invite_go, Vector2(120, 34), true, 12))
+	for it in (cl.get("invited", []) as Array):
+		var ir := HBoxContainer.new()
+		ir.add_theme_constant_override("separation", 10)
+		v.add_child(ir)
+		var il := _mk("Davet bekliyor: %s" % str(it.get("callsign", "")), 12, DIM)
+		il.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ir.add_child(il)
+		ir.add_child(_btn("İPTAL", "Button", _clan_do.bind("cancel_invite", {"account_id": int(it.get("account_id", 0))}), Vector2(80, 26), true, 11))
+	# --- başvurular
+	body.add_child(_mk("GELEN BAŞVURULAR", 15, GOLD, true))
+	var reqs: Array = cl.get("requests", [])
+	if reqs.is_empty():
+		var note := _panel("PanelInset")
+		note.add_child(_wrap("Bekleyen başvuru yok.", 13, DIM))
+		body.add_child(note)
+		return
+	for r in reqs:
+		var row := _panel("PanelRow")
+		body.add_child(row)
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 10)
+		row.add_child(h)
+		var l := _mk(str(r.get("callsign", "")), 14, ICE_WHITE)
+		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		h.add_child(l)
+		h.add_child(_mk(Time.get_date_string_from_unix_time(int(r.get("created_at", 0))), 12, DIM))
+		var a := {"account_id": int(r.get("account_id", 0))}
+		h.add_child(_btn("KABUL ET", "ButtonPrimary", _clan_do.bind("accept_request", a), Vector2(110, 32), true, 12))
+		h.add_child(_btn("REDDET", "ButtonDanger", _clan_do.bind("reject_request", a), Vector2(100, 32), true, 12))
+
+
+func _clan_f_desc_edit(t: String) -> void:
+	clan_f_desc = t
+	clan_desc_set = true
+
+
+func _clan_save_desc() -> void:
+	clan_desc_set = false
+	_clan_do("update", {"description": clan_f_desc.strip_edges()})
+
+
+func _clan_tab_settings(body: VBoxContainer, C, cl: Dictionary, members: Array) -> void:
+	var card := _panel("PanelCard")
+	body.add_child(card)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	card.add_child(v)
+	v.add_child(_mk("KLAN BİLGİLERİ", 15, GOLD, true))
+	if C.is_leader():
+		if not clan_desc_set:
+			clan_f_desc = str(cl.get("description", ""))
+		v.add_child(_mk("Açıklama", 12, DIM))
+		v.add_child(_clan_edit(clan_f_desc, "Klanını kısaca tanıt", 200, _clan_f_desc_edit))
+		var sb := _btn("KAYDET", "ButtonPrimary", _clan_save_desc, Vector2(140, 34), true, 12)
+		sb.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+		v.add_child(sb)
+	else:
+		v.add_child(_wrap("Klan bilgilerini yalnızca lider değiştirebilir.", 13, DIM))
+	v.add_child(_line())
+	v.add_child(_mk("YETKİLER", 13, GOLD, true))
+	v.add_child(_wrap("Lider: her şey (rütbe verme, liderlik devri, ayarlar, klanı dağıtma).  Subay: davet, başvuru kabul/ret, üye çıkarma.  Üye: klan sohbeti ve klan arkadaşlarını minimap'te görme.", 12, TEXT2))
+	v.add_child(_line())
+	if C.is_leader() and members.size() > 1:
+		v.add_child(_wrap("Lider olarak ayrılamazsın: önce «ÜYELER» sekmesinden liderliği devret ya da klanı dağıt.", 12, Color(1.0, 0.72, 0.4)))
+	else:
+		v.add_child(_clan_confirm_btn("KLANDAN AYRIL" if not C.is_leader() else "AYRIL VE KLANI KAPAT", "leave", "leave", {}, "ButtonDanger", 190))
+	if C.is_leader():
+		v.add_child(_clan_confirm_btn("KLANI DAĞIT", "disband", "disband", {}, "ButtonDanger", 190))
+
+
+# ============================================================================
 #  AÇIK ARTIRMA EVİ  (saatlik)  -  sunucu tarafından yönetilir
 # ============================================================================
 const AUC_FILTERS := ["Tümü", "Lazer", "Hız Jeneratörü", "Kalkan Jeneratörü", "Droid"]
@@ -2378,7 +2843,26 @@ func _refresh_settings() -> void:
 
 	set_body.add_child(_mk("OYNANIŞ", 13, GOLD))
 
-	set_body.add_child(_wrap("Ses ayarları yok: bu projede ses/AudioBus kaynağı bulunmuyor.   •   Masaüstü: fare + klavye   •   Dokunmatik: ekrana dokunarak hareket/hedef seçimi", 11, DIM))
+	var mr := _row_panel(set_body)
+	var mv := VBoxContainer.new()
+	mv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mv.add_theme_constant_override("separation", 0)
+	mv.add_child(_mk("Müzik sesi", 14, ICE_WHITE))
+	mv_lbl = _mk("%d%%" % int(round(Music.get_volume() * 100.0)), 11, DIM)
+	mv.add_child(mv_lbl)
+	mr.add_child(mv)
+	var msl := HSlider.new()
+	msl.min_value = 0.0
+	msl.max_value = 1.0
+	msl.step = 0.01
+	msl.value = Music.get_volume()
+	msl.custom_minimum_size = Vector2(240, 24)
+	msl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	msl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	msl.value_changed.connect(_set_music_volume)
+	mr.add_child(msl)
+
+	set_body.add_child(_wrap("Masaüstü: fare + klavye   •   Dokunmatik: ekrana dokunarak hareket/hedef seçimi", 11, DIM))
 
 	_build_account_settings()
 
@@ -2523,6 +3007,7 @@ func _acc_pw_done(ok: bool, error: String) -> void:
 		_acc_pw_new2.text = ""
 		_acc_set_pw_msg("Şifren değiştirildi.", false)
 		game.toast("Şifren değiştirildi.")
+		game._remember_forget(str(game.login_username))   # eski sifre artik gecersiz; bir sonraki giriste "Beni hatirla" yeniden kaydeder
 	else:
 		_acc_set_pw_msg(error, true)
 
@@ -2554,6 +3039,16 @@ func _set_help(on: bool) -> void:
 func _set_zoom(v: float) -> void:
 	game.zoom = v
 	_store_setting("zoom", v)
+
+
+var mv_lbl: Label
+
+
+
+func _set_music_volume(v: float) -> void:
+	Music.set_volume(v)
+	if mv_lbl != null and is_instance_valid(mv_lbl):
+		mv_lbl.text = "%d%%" % int(round(v * 100.0))
 
 
 func _set_graphics(index: int) -> void:

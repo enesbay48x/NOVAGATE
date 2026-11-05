@@ -1,0 +1,20 @@
+SES EFEKTLERI KURULUMU (lazer + NPC)
+Bu klasordeki dosyalari Godot projenin ana klasorune (project.godot'un oldugu yer) kopyala, uzerine yaz.
+  sfx.gd            (yeni)  - ses yoneticisi: lazer/NPC sesleri, mesafe, muzik kisma (ducking)
+  sounds/           (yeni)  - laser_x1..x4.wav, laser_rsb.wav, npc.wav  (duzgun 16-bit WAV'a cevrildi)
+  music_player.gd          - muzik artik ayri "Music" kanalindan calar
+  main.gd                  - Sfx.start(), oyuncu salvosunda ses, NPC atisinda ses
+  net_game.gd              - diger oyuncularin lazer sesi + baska oyuncuya ates eden NPC sesi
+Sonra Godot editorunde projeyi AC (wav dosyalari otomatik import edilir) ve calistir.
+
+NASIL CALISIR
+  - Sen ates edince: o an secili muhimmatin sesi calar (x1/x2/x3/x4/rsb). RSB beklemedeyken X1'e dusersen X1 sesi calar.
+  - Diger oyuncular ates edince: onun muhimmatinin sesi, mesafeye gore kisilarak duyulur (cok uzaktaysa duyulmaz).
+  - NPC ates edince npc.wav calar (sana da, baska oyuncuya da ates etse duyulur, mesafeye gore).
+  - Muzik: "Music" kanalina alindi, kalici -6 dB kisik. Her efekt sesinde ayrica -7 dB kisilir, ses bitince geri gelir.
+  - SAB ve roket icin ses dosyasi verilmedi, sessiz kalir (sfx.gd icindeki SOUNDS listesine eklenebilir).
+
+AYARLAR (sfx.gd en ustunde)
+  TRIM_DB       : tek tek ses seviyesi ince ayari
+  HEAR_NEAR/FAR : baska oyuncu/NPC sesinin duyulma mesafesi
+  MUSIC_HEADROOM_DB, DUCK_DB : muzigin ne kadar kisik duracagi

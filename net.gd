@@ -4,7 +4,7 @@ extends Node
 #   Sunucu : godot --headless --path <proje> -- --server --port=7777
 #   Istemci: oyunun ana menusunde "Cok oyunculu" kutusunu isaretle, sunucu adresini yaz.
 
-const PROTO := 8   # 8: tamir (c_repair/s_repair_result), nick/sirket degistirme (c_change_*/s_account_result); 7: grup sistemi + s_npc_reward RPC; 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: sunucu otoriter guvenli bolge + kapi dogrulamasi; 4: bonus kutular
+const PROTO := 9   # 9: genel olay kanali (c_event/s_event) + auth surum kapisi; 8: tamir (c_repair/s_repair_result), nick/sirket degistirme (c_change_*/s_account_result); 7: grup sistemi + s_npc_reward RPC; 6: grup sistemi (c_g_* / s_g_*), sirket + grup sohbeti, paylasimli NPC odulu;  5: sunucu otoriter guvenli bolge + kapi dogrulamasi; 4: bonus kutular
 # ---- OTOMATIK BAGLANTI ----------------------------------------------------------
 # Yayin sunucusunun adresi (ornek: "54.x.x.x:7777" veya "oyun.alanadi.com:7777").
 # Doluysa: giris ekranindaki "Cok oyunculu" kutusu ve adres alani gizlenir, oyun giris yapinca
@@ -85,7 +85,7 @@ func login_via_tls(username: String, password: String) -> void:
 	"""
 	last_error = ""
 	var url := "https://%s:%d/login" % [AUTH_HOST, AUTH_HTTPS_PORT]
-	var body: String = JSON.stringify({"username": username, "password": password})
+	var body: String = JSON.stringify({"username": username, "password": password, "proto": PROTO})
 	var headers: PackedStringArray = ["Content-Type: application/json"]
 	auth_http_request.request(url, headers, HTTPClient.METHOD_POST, body)
 
@@ -918,3 +918,27 @@ func c_extra(idx: int) -> void:
 func s_extra(peer: int, idx: int) -> void:
 	if gm != null and online:
 		gm.on_extra(peer, idx)
+
+
+# ================================================================== GENEL OLAY KANALI
+# ONEMLI: Yeni ozellik icin YENI @rpc YAZMA. Godot RPC'leri sira numarasiyla eslestirir; listeye
+# fonksiyon eklemek eski istemcilerin baglanmasini bozar. Bunun yerine bu cifti kullan:
+#   istemci -> sunucu:  Net.send_event("tip", {"anahtar": deger})   -> net_server.gd on_event()
+#   sunucu -> istemci:  srv.send_event_to(peer, "tip", {...})        -> net_game.gd on_event()
+# Yeni ozellik = yeni "tip" satiri (match blogunda). RPC listesi ayni kaldigi surece eski istemciler girer.
+# Sunucu, istemciden gelen veriyi her zaman dogrulamali (veri guvenilmez).
+@rpc("any_peer", "call_remote", "reliable")
+func c_event(tip: String, veri: Dictionary) -> void:
+	if is_server and srv != null:
+		srv.on_event(multiplayer.get_remote_sender_id(), tip, veri)
+
+
+@rpc("authority", "call_remote", "reliable")
+func s_event(tip: String, veri: Dictionary) -> void:
+	if gm != null and online:
+		gm.on_event(tip, veri)
+
+
+func send_event(tip: String, veri: Dictionary = {}) -> void:
+	if online:
+		rpc_id(1, "c_event", tip, veri)

@@ -54,7 +54,13 @@ func _init(g = null) -> void:
 
 
 # Animasyonlari arka planda yukle (ilk kullanimda takilma olmasin).
+var _preload_q: Array = []
+
+
 func preload_anims() -> void:
+	# Uzak oyuncunun ekstrasi ilk kez gorulurken load() takilmasi gorselin GEC cikmasina yol aciyordu.
+	# Thread'siz, kare basina 1 animasyon (tick icinde) onceden yuklenir; parse hatasi riski yok.
+	_preload_q = IDS.duplicate()
 	# 4.7.x'te buyuk SpriteFrames'lerin load_threaded_* yuklemesi boot'ta periyodik olarak
 	# "Parse Error" (uid cozumleme yariemasali) uretiyor. Thread'li yuklemeyi tamamen
 	# kapatiyoruz; _get_frames ilk kullanimda load() ile zaten yukluyor.
@@ -94,6 +100,17 @@ func reset() -> void:
 		if int(st["repair"]) <= 0:
 			cd["E-FR-05"] = float(st["repair_cd"]) if float(st["repair_cd"]) > 0.0 else REPAIR_COOLDOWN
 	_clear_fx()
+
+
+# Bir gemi (oyuncu/NPC) sahneden kalkinca (olum, kapidan atlama, cikis) onu takip eden TUM efektleri hemen sil.
+func drop_fx_for(node: Node) -> void:
+	for i in range(_fx.size() - 1, -1, -1):
+		var f: Dictionary = _fx[i]
+		if f.get("follow") == node:
+			var n = f.get("node")
+			if is_instance_valid(n):
+				n.queue_free()
+			_fx.remove_at(i)
 
 
 func _clear_fx() -> void:
@@ -191,7 +208,7 @@ func use(id: String) -> bool:
 		"E-ENT-06":
 			ok = _use_enc(id)
 	# Basarili kullanimi ayni haritadaki diger oyunculara bildir (efekt onlarda da gorunsun)
-	if ok and game.net_on:
+	if ok and game.net_on and id != "E-NB-01":   # Nukleer paketi kendi icinde, hasardan once gonderildi
 		Net.send_extra(IDS.find(id))
 	return ok
 
@@ -253,6 +270,9 @@ func _use_nuke(id: String) -> bool:
 	if not _charge(id):
 		return false
 	_start_cd(id)
+	# Sunucu otoriter hasar: Nukleer penceresini acan paket, hasar bildirimlerinden ONCE gitmeli (reliable = sirali).
+	if game.net_on:
+		Net.send_extra(IDS.find(id))
 	_play(id, game.P.node, Vector3(0, 1.0, 0), 22.0, 0.0, true, 99.0, false, true)
 	for e in hits:
 		var dmg: float = float(e.mx) * NUKE_FRAC
@@ -371,6 +391,8 @@ func shield_absorb(_dmg: float) -> void:
 # ------------------------------------------------------------ her kare
 
 func tick(dt: float) -> void:
+	if not _preload_q.is_empty():
+		_anim_frames(str(_preload_q.pop_front()))
 	for id in IDS:
 		if float(cd[id]) > 0.0:
 			cd[id] = maxf(0.0, float(cd[id]) - dt)
@@ -522,8 +544,12 @@ func _update_fx(dt: float) -> void:
 		mi.visible = true
 		# takip
 		var fol = f.get("follow")
-		if is_instance_valid(fol):
-			f.last = (fol as Node3D).global_position + f.off
+		if not is_instance_valid(fol) or not (fol as Node).is_inside_tree():
+			# Takip edilen gemi yok oldu / sahneden cikti: efekt havada KALMASIN.
+			mi.queue_free()
+			_fx.remove_at(i)
+			continue
+		f.last = (fol as Node3D).global_position + f.off
 		mi.global_position = f.last
 		# solma
 		var a := 1.0

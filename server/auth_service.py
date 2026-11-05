@@ -73,6 +73,10 @@ TOKEN_HMAC_KEY_ID = hashlib.sha256(TOKEN_HMAC_KEY).hexdigest()[:16]  # anahtar k
 # ---------------------------------------------------------------------------
 HOST = "127.0.0.1"
 PORT = 8443
+# Giris icin en dusuk istemci surumu (net.gd PROTO). Yalnizca RPC listesi bozucu sekilde degisirse artir.
+# "proto" gondermeyen eski istemciler 0 sayilir ve guncelleme mesaji gorur.
+MIN_CLIENT_PROTO = 9
+UPDATE_MESSAGE = "Oyun sürümünüz eski. Lütfen oyunun güncel sürümünü indirip yükleyin."
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "novagate_auth.db")
 TOKEN_TTL_SECONDS = 30 * 60  # 30 dakika
 AUD = "novagate-game-server"  # hedef sunucu kimligi
@@ -396,8 +400,15 @@ def _start_https_login_server() -> None:
                 data = json.loads(body.decode("utf-8"))
                 username = data.get("username", "")
                 password = data.get("password", "")
-                result = authenticate_user(username, password)
-                if result is None:
+                try:
+                    client_proto = int(data.get("proto", 0))
+                except (TypeError, ValueError):
+                    client_proto = 0
+                result = authenticate_user(username, password) if client_proto >= MIN_CLIENT_PROTO else None
+                if client_proto < MIN_CLIENT_PROTO:
+                    # Eski istemci: ENet'e hic baglanmadan acik mesaj goster (istemci 'error' metnini oldugu gibi yazar).
+                    resp = {"ok": False, "error": UPDATE_MESSAGE, "update_required": True, "min_proto": MIN_CLIENT_PROTO}
+                elif result is None:
                     resp = {"ok": False, "error": "invalid_credentials"}
                 elif not result.get("ok", True):
                     resp = result  # {"ok": False, "error": "hesap_banli", "ban_reason": ..., "ban_until": ...}

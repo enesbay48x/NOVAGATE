@@ -6,7 +6,27 @@ import ssl
 import sys
 import time
 
+import os
+import re
+
 ctx = ssl._create_unverified_context()
+
+
+def _read_proto() -> int:
+    """Sunucudaki net.gd'den PROTO degerini okur (login kapisi MIN_CLIENT_PROTO ister)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in (here, "/opt/novagate", os.getcwd()):
+        try:
+            with open(os.path.join(d, "net.gd"), encoding="utf-8") as f:
+                m = re.search(r"const\s+PROTO\s*:?=\s*(\d+)", f.read())
+            if m:
+                return int(m.group(1))
+        except OSError:
+            continue
+    return 9
+
+
+PROTO = _read_proto()
 
 username = "testplayer" + str(int(time.time()))[-6:]
 print("Using username:", username)
@@ -36,12 +56,11 @@ except Exception as e:
 
 # Step 2: Login via HTTPS to get session token
 login_url = "https://127.0.0.1:8444/login"
-login_data = json.dumps({"username": username, "password": "testpass123"}).encode()
+login_data = json.dumps({"username": username, "password": "testpass123", "proto": PROTO}).encode()
 try:
     req = urllib.request.Request(login_url, data=login_data, headers={"Content-Type": "application/json"})
     resp = urllib.request.urlopen(req, context=ctx)
     body = json.loads(resp.read().decode())
-    print("Login response:", body)
     if not body.get("ok"):
         print("LOGIN FAILED:", body.get("error"))
         sys.exit(1)
@@ -69,4 +88,37 @@ try:
         sys.exit(1)
 except Exception as e:
     print("DB verify error:", e)
+    sys.exit(1)
+
+# Step 4: Klan duman testi (DB servisi uzerinden): kur -> etiket hemen gelmeli -> dagit
+def db_call(payload: dict) -> dict:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(("127.0.0.1", 54321))
+    s.sendall((json.dumps(payload) + "\n").encode())
+    buf = b""
+    while b"\n" not in buf:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    s.close()
+    return json.loads(buf.decode().strip())
+
+try:
+    suffix = str(int(time.time()))[-5:]
+    tag = "T" + suffix[-3:]
+    created = db_call({"method": "clan_op", "account_id": account_id, "op": "create",
+                       "args": {"name": "Test Klan " + suffix, "tag": tag, "description": "deploy testi"}})
+    if not created.get("ok"):
+        print("FAILED: Klan kurulamadi:", created.get("error"))
+        sys.exit(1)
+    info = db_call({"method": "clan_tag_of", "account_id": account_id})
+    if not (info.get("ok") and info.get("tag") == tag):
+        print("FAILED: Klan etiketi gelmedi:", info)
+        sys.exit(1)
+    db_call({"method": "clan_op", "account_id": account_id, "op": "disband", "args": {}})
+    print("SUCCESS: Clan verified! tag =", tag)
+except Exception as e:
+    print("Clan test error:", e)
     sys.exit(1)

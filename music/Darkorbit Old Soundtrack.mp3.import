@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://b0ligp5dlgfnt"
+path="res://.godot/imported/Darkorbit Old Soundtrack.mp3-35bcfbeed263d8daa3fb53d1e1d975ae.mp3str"
+
+[deps]
+
+source_file="res://music/Darkorbit Old Soundtrack.mp3"
+dest_files=["res://.godot/imported/Darkorbit Old Soundtrack.mp3-35bcfbeed263d8daa3fb53d1e1d975ae.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

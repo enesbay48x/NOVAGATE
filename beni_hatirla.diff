@@ -1,0 +1,138 @@
+--- /tmp/main_orig.gd	2026-11-05 12:20:41.406344671 +0000
++++ main.gd	2026-11-05 12:20:34.830344280 +0000
+@@ -1315,6 +1315,12 @@
+ var pending_name: String = ""
+ var pending_pass: String = ""
+ var plate_layer: CanvasLayer
++# ---- BENI HATIRLA ----
++# Kullanici adi + sifre bu cihazda, cihaza ozel anahtarla SIFRELI dosyada tutulur (duz metin degil).
++const REMEMBER_PATH := "user://novagate_remember.dat"
++var chk_remember: CheckBox
++var _last_login_pw: String = ""
++var _autologin_active: bool = false
+ const RankSys = preload("res://rank_system.gd")
+ var plate_rank: TextureRect   # nick solundaki rutbe rozeti
+ var plate_box: HBoxContainer
+@@ -1608,6 +1614,12 @@
+ 	le_pass2.secret = true
+ 	blk_pass2 = _lg_field_block(inner, "ŞİFRE (TEKRAR)", le_pass2, 2)
+ 	blk_pass2.visible = false
++	chk_remember = CheckBox.new()
++	chk_remember.text = "Beni hatırla"
++	chk_remember.focus_mode = Control.FOCUS_NONE
++	chk_remember.add_theme_font_size_override("font_size", 13)
++	chk_remember.add_theme_color_override("font_color", LG_MUTED)
++	inner.add_child(chk_remember)
+ 	lbl_auth_msg = _lg_label("", 12, LG_ERR)
+ 	lbl_auth_msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+ 	lbl_auth_msg.custom_minimum_size = Vector2(0, 18)
+@@ -1678,6 +1690,7 @@
+ 	var pulse := create_tween().set_loops()
+ 	pulse.tween_property(t, "modulate:a", 0.82, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+ 	pulse.tween_property(t, "modulate:a", 1.0, 2.2).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
++	_remember_autologin.call_deferred()
+ 
+ 
+ func _lg_company_card(f: int) -> PanelContainer:
+@@ -1784,6 +1797,53 @@
+ 		_on_company_chosen(company_sel)
+ 
+ 
++# ------------------------------------------------------------------ BENI HATIRLA
++func _remember_key() -> String:
++	return "ng-remember|" + OS.get_unique_id() + "|" + OS.get_user_data_dir()
++
++
++func _remember_save(nm: String, pw: String) -> void:
++	var f := FileAccess.open_encrypted_with_pass(REMEMBER_PATH, FileAccess.WRITE, _remember_key())
++	if f == null:
++		return
++	f.store_string(JSON.stringify({"u": nm, "p": pw}))
++	f.close()
++
++
++func _remember_load() -> Dictionary:
++	if not FileAccess.file_exists(REMEMBER_PATH):
++		return {}
++	var f := FileAccess.open_encrypted_with_pass(REMEMBER_PATH, FileAccess.READ, _remember_key())
++	if f == null:
++		return {}   # anahtar uymuyor / dosya bozuk -> hatirlama yok
++	var d = JSON.parse_string(f.get_as_text())
++	f.close()
++	if typeof(d) == TYPE_DICTIONARY and str(d.get("u", "")) != "" and str(d.get("p", "")) != "":
++		return d
++	return {}
++
++
++func _remember_clear() -> void:
++	if FileAccess.file_exists(REMEMBER_PATH):
++		DirAccess.remove_absolute(ProjectSettings.globalize_path(REMEMBER_PATH))
++
++
++# Menu acilinca kayitli bilgi varsa alanlari doldurup otomatik giris yapar.
++func _remember_autologin() -> void:
++	var d: Dictionary = _remember_load()
++	if d.is_empty():
++		return
++	le_user.text = str(d["u"])
++	le_pass.text = str(d["p"])
++	chk_remember.button_pressed = true
++	await get_tree().create_timer(0.6).timeout   # Net / HTTP istegi hazir olsun
++	if auth_register or not is_instance_valid(le_user):
++		return
++	_autologin_active = true
++	_auth_submit()
++
++
++
+ func _auth_toggle_mode() -> void:
+ 	_auth_set_mode(not auth_register)
+ 
+@@ -1795,6 +1855,7 @@
+ 	btn_auth_action.text = "DEVAM ET" if reg else "GİRİŞ YAP"
+ 	btn_auth_switch.text = "Zaten hesabın var mı?  GİRİŞ YAP" if reg else "Hesabın yok mu?  KAYIT OL"
+ 	blk_pass2.visible = reg
++	chk_remember.visible = not reg
+ 	le_pass2.text = ""
+ 	lbl_auth_msg.text = ""
+ 
+@@ -1863,6 +1924,7 @@
+ 	# Giris: TLS ile auth_service'ye gonder
+ 	lbl_auth_msg.text = "Sunucuya dogrulaniyor..."
+ 	login_username = nm   # giris adi (nick degisse de sabit); sifre degistirmede kullanilir
++	_last_login_pw = pw
+ 	Net.login_via_tls(nm, pw)
+ 
+ 
+@@ -1873,12 +1935,23 @@
+ 	Basariliysa ENet sunucusuna token ile baglanir.
+ 	"""
+ 	if not ok:
++		# Aglanti/sunucu sorunu degilse (yani bilgiler gecersizse) kayitli bilgiyi sil
++		if _autologin_active and not (msg.begins_with("TLS") or msg.begins_with("Sunucu hatasi")):
++			_remember_clear()
++			le_pass.text = ""
++		_autologin_active = false
+ 		lbl_auth_msg.text = msg
+ 		menu.modulate = Color(1, 1, 1, 1)
+ 		menu.show()
+ 		auth_box.visible = true
+ 		company_box.visible = false
+ 		return
++	_autologin_active = false
++	if chk_remember != null and chk_remember.button_pressed and login_username != "" and _last_login_pw != "":
++		_remember_save(login_username, _last_login_pw)
++	else:
++		_remember_clear()
++	_last_login_pw = ""
+ 	account_name = callsign
+ 	account_faction = faction
+ 	Net.session_token = token
+@@ -2050,6 +2123,7 @@
+ 			_company_back()
+ 			return
+ 		login_username = pending_name
++		_last_login_pw = reg_pass
+ 		Net.login_via_tls(pending_name, reg_pass))
+ 
+ 	req.request(url, headers, HTTPClient.METHOD_POST, reg_body)
