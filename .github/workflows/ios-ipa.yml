@@ -29,6 +29,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Clean up old artifacts (storage quota management)
+        run: |
+          set +e
+          echo "Cleaning up artifacts older than 1 day..."
+          gh api repos/${{ github.repository }}/actions/artifacts --paginate 2>/dev/null | \
+            jq -r '.artifacts[] | select(.expired_at == null and (.created_at | fromdate < (now - 86400))) | .id' | \
+            while read -r artifact_id; do
+              echo "Deleting old artifact ID: ${artifact_id}"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/${artifact_id}" 2>/dev/null || true
+            done
+          echo "Cleanup complete"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Verify environment
         run: |
           set -euo pipefail
@@ -266,11 +280,12 @@ jobs:
           echo "IPA_SIZE=${IPA_SIZE}" >> "$GITHUB_ENV"
 
       - name: Upload IPA artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: NOVAGATE-ios-ipa
           path: ${{ env.IPA_FILE }}
-          retention-days: 14
+          retention-days: 1
 
       - name: Cleanup temporary keychain
         if: always()
