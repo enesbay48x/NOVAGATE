@@ -13,7 +13,7 @@ jobs:
     env:
       GODOT_VERSION: "4.7-stable"
       GODOT_DOWNLOAD_URL: "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_macos.universal.zip"
-      IOS_TEMPLATES_URL: "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/ios_template.zip"
+      IOS_TEMPLATES_URL: "https://github.com/godotengine/godot-builds/releases/download/4.7-stable/Godot_v4.7-stable_export_templates.tpz"
       TEMPLATES_DIR: "$HOME/Library/Application Support/Godot/export_templates/4.7.stable"
       EXPORT_DIR: "export/ios"
       XCODEPROJ_PATH: "export/ios/NOVAGATE.xcodeproj"
@@ -79,7 +79,6 @@ jobs:
           fi
           cp "$IOS_ZIP" "${TEMPLATES_DIR}/ios.zip"
           echo "Installed iOS templates to ${TEMPLATES_DIR}/ios.zip"
-
       - name: Import assets (Godot headless)
         run: |
           set -euo pipefail
