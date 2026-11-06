@@ -26,9 +26,11 @@ const TABS := [
 	["skills", "Yetenek Ağacı", "equipment"],
 	["shop", "Mağaza", "shop"],
 	["auction", "Açık Artırma", "shop"],
+	["market", "Pazar", "shop"],
 	["missions", "Görevler", "quests"],
 	["clan", "Klan", "group"],
 	["galaxy", "Uzay Haritası", "spacemap"],
+	["gates", "Galaxy Gates", "spacemap"],
 	["settings", "Ayarlar", "settings"],
 	["help", "Yardım", "help"],
 ]
@@ -563,7 +565,9 @@ func build() -> void:
 	pages["profile"] = _build_profile()
 	pages["stats"] = _build_stats()
 	pages["galaxy"] = _build_galaxy()
+	pages["gates"] = _build_gates()
 	pages["auction"] = _build_auction()
+	pages["market"] = _build_market()
 	pages["clan"] = _build_clan()
 	pages["settings"] = _build_settings()
 	pages["help"] = _build_help()
@@ -666,12 +670,217 @@ func _responsive_layout() -> void:
 
 
 func _process(dt: float) -> void:
+	if _dg_in_sc != null:
+		_dg_inertia(dt)
 	if not visible or pv_pivot == null or cur_tab != "__yok__":
 		return
 	if spin_pause > 0.0:
 		spin_pause -= dt
 	else:
 		pv_pivot.rotation.y += dt * 0.7
+
+
+# ============================================================================
+#  MENU GENELI SURUKLE-KAYDIR
+#  Menunun herhangi bir yerinden (dugme, kart, bos alan, Ar-Ge agaci dahil) parmak/fare asagi-yukari surukleyince
+#  o noktadaki kaydirilabilir liste kayar. Dugme uzerinden baslayan surukleme dugmeye TIKLAMA sayilmaz.
+#  Kaydirma cubugu ve kaydirgac (slider) / yazi kutusu uzerinden baslayan surukleme etkilenmez.
+# ============================================================================
+const NV_DRAG_PX := 8.0
+const NV_FAR := Vector2(-4000.0, -4000.0)
+var _dg_sc: ScrollContainer = null      # basma noktasindaki aday kaydirma alani
+var _dg_start := Vector2.ZERO
+var _dg_drag := false
+var _dg_y0 := 0.0
+var _dg_s0 := 0.0
+var _dg_touch := -1                     # aktif dokunma parmagi (-1 = yok)
+var _dg_last_y := 0.0
+var _dg_last_t := 0.0
+var _dg_vel := 0.0                      # ekran px/sn (yukari = negatif)
+var _dg_in_sc: ScrollContainer = null   # birakinca kayan (atalet) alan
+var _dg_in_vel := 0.0
+var _dg_in_f := 0.0                     # ondalik kaydirma birikimi
+var _dg_swallow_until := 0
+
+
+func _dg_reset() -> void:
+	_dg_sc = null
+	_dg_drag = false
+
+
+func _dg_hit(c: Control, p: Vector2) -> bool:
+	if c == null or not c.is_visible_in_tree():
+		return false
+	var lp: Vector2 = c.get_global_transform_with_canvas().affine_inverse() * p
+	return Rect2(Vector2.ZERO, c.size).has_point(lp)
+
+
+# p noktasindaki en ic dikey kaydirilabilir ScrollContainer'i bulur; ustunde slider / yazi kutusu varsa "blocked" olur.
+func _dg_scan(n: Node, p: Vector2, out: Dictionary) -> void:
+	for ch in n.get_children():
+		if not (ch is CanvasItem) or not (ch as CanvasItem).visible:
+			continue
+		if ch is ScrollContainer:
+			var sc := ch as ScrollContainer
+			var vb: VScrollBar = sc.get_v_scroll_bar()
+			if sc.vertical_scroll_mode != ScrollContainer.SCROLL_MODE_DISABLED and _dg_hit(sc, p) and vb.max_value > vb.page + 1.0:
+				out["sc"] = sc
+				out["blocked"] = vb.visible and _dg_hit(vb, p)
+		elif out.has("sc") and ((ch is Range and not (ch is ProgressBar)) or ch is TextEdit or ch is LineEdit or ch is ItemList or ch is Tree):
+			if _dg_hit(ch as Control, p):
+				out["blocked"] = true
+		_dg_scan(ch, p, out)
+
+
+# Basili dugmenin tiklamasini iptal eder: ekran disinda bir fare hareketi + birakma gonderilir (dugme "disarida biraktin" sayar).
+func _dg_cancel_press() -> void:
+	var mm := InputEventMouseMotion.new()
+	mm.set_meta("nv_synth", true)
+	mm.position = NV_FAR
+	mm.global_position = NV_FAR
+	mm.button_mask = MOUSE_BUTTON_MASK_LEFT
+	Input.parse_input_event(mm)
+	var mb := InputEventMouseButton.new()
+	mb.set_meta("nv_synth", true)
+	mb.button_index = MOUSE_BUTTON_LEFT
+	mb.pressed = false
+	mb.position = NV_FAR
+	mb.global_position = NV_FAR
+	Input.parse_input_event(mb)
+
+
+func _dg_press(pos: Vector2) -> void:
+	_dg_reset()
+	_dg_in_sc = null          # kayan liste varsa dokununca durur
+	var found := {}
+	if _dg_hit(self, pos):
+		_dg_scan(self, pos, found)
+	if found.has("sc") and not bool(found.get("blocked", false)):
+		_dg_sc = found["sc"] as ScrollContainer
+		_dg_start = pos
+		_dg_last_y = pos.y
+		_dg_last_t = float(Time.get_ticks_msec()) / 1000.0
+		_dg_vel = 0.0
+
+
+# Hareket: true donerse olay bu sistem tarafindan tuketildi (surukleme basladi ya da aday kaydirma alani var).
+func _dg_move(pos: Vector2) -> bool:
+	if _dg_sc == null or not is_instance_valid(_dg_sc):
+		return false
+	if not _dg_drag:
+		var d: Vector2 = pos - _dg_start
+		if maxf(absf(d.x), absf(d.y)) < NV_DRAG_PX:
+			return true       # esik altinda: ScrollContainer'in kendi dokunmatik kaydirmasi araya girmesin
+		if absf(d.y) <= absf(d.x):
+			_dg_reset()       # yatay hareket: kaydirma degil (slider / yatay serit normal calissin)
+			return false
+		_dg_drag = true
+		_dg_y0 = pos.y
+		_dg_s0 = float(_dg_sc.scroll_vertical)
+		_dg_cancel_press()
+	var k: float = maxf(0.01, _dg_sc.get_global_transform_with_canvas().get_scale().y)   # panel olcegi (responsive)
+	_dg_sc.scroll_vertical = int(roundf(_dg_s0 - (pos.y - _dg_y0) / k))
+	# hiz tahmini (atalet icin), yumusatilmis
+	var now: float = float(Time.get_ticks_msec()) / 1000.0
+	var dt: float = now - _dg_last_t
+	if dt > 0.001:
+		var v: float = -(pos.y - _dg_last_y) / k / dt
+		_dg_vel = lerpf(_dg_vel, v, 0.5)
+		_dg_last_y = pos.y
+		_dg_last_t = now
+	return true
+
+
+# Birakma: true donerse birakma olayi tuketilmeli (hicbir dugmeye tiklama sayilmasin).
+func _dg_release() -> bool:
+	var was := _dg_drag
+	if was and _dg_sc != null and is_instance_valid(_dg_sc):
+		var since: float = float(Time.get_ticks_msec()) / 1000.0 - _dg_last_t
+		if since < 0.08 and absf(_dg_vel) > 120.0:
+			_dg_in_sc = _dg_sc
+			_dg_in_vel = clampf(_dg_vel, -4000.0, 4000.0)
+			_dg_in_f = 0.0
+		_dg_swallow_until = Time.get_ticks_msec() + 200
+	_dg_reset()
+	return was
+
+
+# Parmak kalkinca liste yavasca kayarak durur.
+func _dg_inertia(dt: float) -> void:
+	if _dg_in_sc == null or not is_instance_valid(_dg_in_sc) or not _dg_in_sc.is_visible_in_tree():
+		_dg_in_sc = null
+		return
+	_dg_in_f += _dg_in_vel * dt
+	var whole: int = int(_dg_in_f)
+	if whole != 0:
+		var before: int = _dg_in_sc.scroll_vertical
+		_dg_in_sc.scroll_vertical = before + whole
+		_dg_in_f -= float(whole)
+		if _dg_in_sc.scroll_vertical == before:
+			_dg_in_sc = null   # ucuna geldi
+			return
+	_dg_in_vel *= pow(0.04, dt)    # ~1 sn'de %96 yavaslar
+	if absf(_dg_in_vel) < 25.0:
+		_dg_in_sc = null
+
+
+func _input(ev: InputEvent) -> void:
+	if not is_visible_in_tree():
+		if _dg_sc != null or _dg_touch != -1:
+			_dg_reset()
+			_dg_touch = -1
+		_dg_in_sc = null
+		return
+	if ev.has_meta("nv_synth"):
+		return   # kendi urettigimiz iptal olaylari
+	# ---- DOKUNMATIK (telefon): dogrudan dokunma olaylari; fare taklidine bagimli degil
+	if ev is InputEventScreenTouch:
+		var st := ev as InputEventScreenTouch
+		if st.pressed and not st.canceled:
+			if _dg_touch == -1:
+				_dg_touch = st.index
+				_dg_press(st.position)
+			else:
+				_dg_reset()    # ikinci parmak: kaydirma yok
+		elif st.index == _dg_touch:
+			_dg_touch = -1
+			if _dg_release():
+				get_viewport().set_input_as_handled()
+		return
+	if ev is InputEventScreenDrag:
+		var sd := ev as InputEventScreenDrag
+		if sd.index == _dg_touch and _dg_move(sd.position):
+			get_viewport().set_input_as_handled()
+		return
+	# ---- FARE (bilgisayar). Dokunmadan uretilen sahte fare olaylari yukarida zaten ele alindi.
+	if ev is InputEventMouseButton:
+		var mb := ev as InputEventMouseButton
+		if mb.button_index != MOUSE_BUTTON_LEFT:
+			return
+		if not mb.pressed and Time.get_ticks_msec() < _dg_swallow_until:
+			get_viewport().set_input_as_handled()   # surukleme bitti: sahte birakma hicbir dugmeye tiklama olmasin
+			return
+		if _dg_touch != -1 or mb.device == InputEvent.DEVICE_ID_EMULATION:
+			return
+		if mb.pressed:
+			_dg_press(mb.position)
+		else:
+			if _dg_release():
+				get_viewport().set_input_as_handled()
+	elif ev is InputEventMouseMotion:
+		var mm := ev as InputEventMouseMotion
+		if _dg_touch != -1 or mm.device == InputEvent.DEVICE_ID_EMULATION:
+			if _dg_drag:
+				get_viewport().set_input_as_handled()
+			return
+		if _dg_sc == null or not is_instance_valid(_dg_sc):
+			return
+		if (mm.button_mask & MOUSE_BUTTON_MASK_LEFT) == 0:
+			_dg_reset()
+			return
+		if _dg_move(mm.position):
+			if _dg_drag:
+				get_viewport().set_input_as_handled()
 
 
 func _close() -> void:
@@ -717,7 +926,44 @@ func _switch(tab: String) -> void:
 		create_tween().tween_property(pg, "modulate:a", 1.0, 0.14)
 
 
+# refresh() sayfalari bastan kurar; kullanici kaydirmisken liste en uste ziplamasin diye konum korunur.
+func _dg_collect(n: Node, out: Dictionary) -> void:
+	for ch in n.get_children():
+		if ch is ScrollContainer:
+			out[ch] = (ch as ScrollContainer).scroll_vertical
+		_dg_collect(ch, out)
+
+
+func _dg_restore(saved: Dictionary) -> void:
+	for sc in saved:
+		if is_instance_valid(sc) and not (_dg_drag and sc == _dg_sc):
+			(sc as ScrollContainer).scroll_vertical = int(saved[sc])
+
+
 func refresh() -> void:
+	if game == null or game.SV.is_empty():
+		return
+	var _saved := {}
+	_dg_collect(self, _saved)
+	_refresh_inner()
+	_dg_restore(_saved)
+	_dg_restore_later(_saved)
+
+
+func _dg_restore_later(saved: Dictionary) -> void:
+	if not is_inside_tree():
+		return
+	await get_tree().process_frame
+	if not is_inside_tree():
+		return
+	_dg_restore(saved)
+	await get_tree().process_frame
+	if not is_inside_tree():
+		return
+	_dg_restore(saved)
+
+
+func _refresh_inner() -> void:
 	if game == null or game.SV.is_empty():
 		return
 	var def: Dictionary = game.ship_def()
@@ -743,6 +989,8 @@ func refresh() -> void:
 			_refresh_stats()
 		"galaxy":
 			_refresh_galaxy()
+		"gates":
+			_refresh_gates()
 		"settings":
 			_refresh_settings()
 
@@ -1551,7 +1799,57 @@ class SkillCanvas extends Control:
 			return ""
 		return "%s   %d / %d\n%s" % [str(sk.name), game.skill_rank(id), int(sk.pts), str(sk.desc)]
 
+	# ---- MOBIL KAYDIRMA: bu alan dokunusu tukettigi icin ustundeki ScrollContainer kaymiyordu.
+	# Dikey surukleme artik dogrudan ust ScrollContainer'i kaydirir; surukleme sonrasi birakis yetenek SECMEZ.
+	var _t_down := false
+	var _t_dragged := false
+	var _t_acc := Vector2.ZERO
+	var _t_f := 0.0
+
+	func _parent_scroll() -> ScrollContainer:
+		var n: Node = get_parent()
+		while n != null:
+			if n is ScrollContainer:
+				return n as ScrollContainer
+			n = n.get_parent()
+		return null
+
 	func _gui_input(ev: InputEvent) -> void:
+		# ---- dokunmatik: basma / surukleme (kaydirma) / birakma (secim)
+		if ev is InputEventScreenTouch:
+			if ev.pressed:
+				_t_down = true
+				_t_dragged = false
+				_t_acc = Vector2.ZERO
+				_t_f = 0.0
+				return
+			_t_down = false
+			if _t_dragged:
+				accept_event()   # kaydirma bitti: yetenek secilmesin
+				return
+			var id2 := _hit(ev.position)
+			if id2 != "":
+				if on_pick.is_valid():
+					on_pick.call(id2)
+				accept_event()
+			return
+		if ev is InputEventScreenDrag:
+			if not _t_down:
+				return
+			_t_acc += ev.relative
+			if not _t_dragged:
+				if absf(_t_acc.y) < 10.0 or absf(_t_acc.y) <= absf(_t_acc.x):
+					return
+				_t_dragged = true
+			var sc := _parent_scroll()
+			if sc != null:
+				_t_f -= ev.relative.y
+				var whole: int = int(_t_f)
+				if whole != 0:
+					sc.scroll_vertical = sc.scroll_vertical + whole
+					_t_f -= float(whole)
+			accept_event()
+			return
 		if ev is InputEventMouseMotion:
 			var h := _hit(ev.position)
 			if h != hover:
@@ -1560,6 +1858,10 @@ class SkillCanvas extends Control:
 				queue_redraw()
 			return
 		if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT:
+			# dokunmadan uretilen (emule) fare olayi: surukleme sirasinda/sonrasinda secim yapma
+			if not ev.pressed and ev.device == InputEvent.DEVICE_ID_EMULATION and _t_dragged:
+				accept_event()
+				return
 			var id := _hit(ev.position)
 			if id == "":
 				return
@@ -1570,12 +1872,6 @@ class SkillCanvas extends Control:
 				if on_pick.is_valid():
 					on_pick.call(id)
 			accept_event()
-		elif ev is InputEventScreenTouch and not ev.pressed:
-			var id2 := _hit(ev.position)
-			if id2 != "":
-				if on_pick.is_valid():
-					on_pick.call(id2)
-				accept_event()
 
 
 func _buy_disk(n: int) -> void:
@@ -1677,6 +1973,7 @@ func _refresh_profile() -> void:
 	var uri: int = int(sv.uri)
 	var info: Dictionary = RankSys.summary(game)
 	var me: Dictionary = info.me
+	_apply_board(me)
 	var rk: Dictionary = RankSys.display(me)
 	var fac: String = str(DOData.FACTIONS.get(int(sv.get("faction", 1)), {}).get("name", "-"))
 	var days: int = maxi(0, int((Time.get_unix_time_from_system() - float(sv.get("reg_ts", Time.get_unix_time_from_system()))) / 86400.0))
@@ -1770,10 +2067,34 @@ func _col(txt: String, w: int, fs := 13, col := ICE_WHITE, right := false) -> La
 	return l
 
 
+# Sunucu sıralaması (saatlik): şirket sırası + rütbe SUNUCUDAN gelir; yerel hesap yalnızca sunucu yokken yedek.
+func _apply_board(me: Dictionary) -> void:
+	game.request_rank_board()
+	var mb: Dictionary = game.rank_board.get("me", {})
+	if not bool(me.admin) and mb.has("idx"):
+		me["pos"] = int(mb.pos)
+		me["n"] = int(mb.n)
+		me["idx"] = int(mb.idx)
+
+
+func _clock_str(ts: float) -> String:
+	var off: int = int(Time.get_time_zone_from_system().bias) * 60
+	var d: Dictionary = Time.get_datetime_dict_from_unix_time(int(ts) + off)
+	return "%02d:%02d" % [int(d.hour), int(d.minute)]
+
+
+func _rings_str(n: int) -> String:
+	var s := ""
+	for i in 3:
+		s += "●" if i < n else "○"
+	return s
+
+
 func _refresh_stats() -> void:
 	_clear(stats_body)
 	var info: Dictionary = RankSys.summary(game)
 	var me: Dictionary = info.me
+	_apply_board(me)
 	var rk: Dictionary = RankSys.display(me)
 	var is_adm: bool = bool(me.admin)
 	var fac_name := func(f: int) -> String: return str(DOData.FACTIONS.get(f, {}).get("name", "-"))
@@ -1794,6 +2115,9 @@ func _refresh_stats() -> void:
 	v.add_child(_mk("RÜTBE", 10, DIM))
 	v.add_child(_mk(str(rk.name), 24, GOLD, true))
 	v.add_child(_mk("%s   •   %s" % [str(me.name), fac_name.call(int(me.faction))], 12, DIM))
+	if not is_adm:
+		var my_rings: int = clampi(int(game.SV.get("_sv_rings", 0)), 0, 3)
+		v.add_child(_mk("Galaxy Gate halkaları  %s  (%d/3)%s" % [_rings_str(my_rings), my_rings, "  •  ALTIN" if my_rings >= 3 else ""], 12, GOLD if my_rings >= 3 else DIM))
 	if is_adm:
 		var adm := _wrap("Admin rozeti sıralamaya girmez. Oyuncu olsaydın: %s  (şirket sırası #%d / %d)" % [str(RankSys.RANKS_TOP[int(me.idx)][0]), int(me.pos), int(me.n)], 12, NEON_ORANGE)
 		v.add_child(adm)
@@ -1844,7 +2168,7 @@ func _refresh_stats() -> void:
 	bv.add_child(ht)
 
 	# ---- Rutbe tablosu
-	stats_body.add_child(_section("RÜTBE TABLOSU  (şirketteki oyuncuların yüzdelik dilimi)"))
+	stats_body.add_child(_section("RÜTBE TABLOSU  (şirket sırasına göre: ilk 15 sabit, kalanı yüzdelik dilim)"))
 	var grid := GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 6)
@@ -1862,7 +2186,7 @@ func _refresh_stats() -> void:
 		var nm := _col(str(RankSys.RANKS_TOP[i][0]), 0, 12, GOLD if mine else ICE_WHITE)
 		nm.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		h.add_child(nm)
-		var share: String = "şirkette en fazla 1 kişi" if i == 0 else "%%%s" % String.num(float(RankSys.RANKS_TOP[i][1]), 2).replace(".", ",")
+		var share: String = ("şirkette %d kişi" % int(RankSys.RANKS_TOP[i][1])) if i < RankSys.FIXED_RANKS else "%%%s" % String.num(float(RankSys.RANKS_TOP[i][1]), 2).replace(".", ",")
 		h.add_child(_col(share, 0, 11, DIM, true))
 		grid.add_child(pc)
 
@@ -1885,7 +2209,13 @@ func _refresh_stats() -> void:
 	hd.add_child(_col("PUAN", 100, 11, DIM, true))
 	tv.add_child(hd)
 	tv.add_child(_line())
-	var top: Array = info.top
+	var top: Array = []
+	if game.rank_board.has("top"):
+		for s in (game.rank_board.top as Array):
+			top.append({"name": str(s.name), "faction": int(s.faction), "pts": float(s.pts), "idx": int(s.idx),
+				"admin": false, "me": str(s.name) == str(me.name), "rings": int(s.get("rings", 0))})
+	else:
+		top = info.top
 	if top.is_empty():
 		tv.add_child(_wrap("Henüz sıralanacak oyuncu yok.", 12, DIM))
 	for i in top.size():
@@ -1898,7 +2228,9 @@ func _refresh_stats() -> void:
 		var medal: Color = [GOLD, Color(0.82, 0.88, 0.95), Color(0.85, 0.55, 0.3)][i] if i < 3 else DIM
 		h.add_child(_col(str(i + 1), 28, 14, medal))
 		h.add_child(_rank_icon(int(er.icon), 24))
-		var en := _col(str(e.name), 0, 13, GOLD if bool(e.me) else ICE_WHITE)
+		var e_rings: int = int(e.get("rings", 0))
+		var e_name: String = str(e.name) + (("   " + _rings_str(e_rings).replace("○", "")) if e_rings > 0 else "")
+		var en := _col(e_name, 0, 13, GOLD if (bool(e.me) or e_rings >= 3) else ICE_WHITE)
 		en.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		en.clip_text = true
 		h.add_child(en)
@@ -1906,7 +2238,10 @@ func _refresh_stats() -> void:
 		h.add_child(_col(str(fac_name.call(int(e.faction))), 56, 12, DIM))
 		h.add_child(_col(RankSys.fmt_pts(float(e.pts)), 100, 13, ICE_WHITE, true))
 		tv.add_child(row)
-	stats_body.add_child(_wrap("Sıralama bu cihazdaki hesapları kapsar; çevrimiçi sunucu bağlı olmadığı için diğer oyuncular listelenemez. Admin rozetli hesaplar sıralamaya dahil edilmez.", 11, DIM))
+	var foot: String = "Sıralama sunucudaki TÜM oyuncuları kapsar (çevrimdışılar dahil) ve saatte bir güncellenir. Admin rozetli hesaplar dahil edilmez. Her şirketin puan sırasındaki 1. oyuncusu General olur."
+	if game.rank_board.has("ts") and float(game.rank_board.ts) > 0.0:
+		foot += "  Son güncelleme: %s  •  Sonraki: %s" % [_clock_str(float(game.rank_board.ts)), _clock_str(float(game.rank_board.next))]
+	stats_body.add_child(_wrap(foot, 11, DIM))
 
 
 func _save_callsign(input: LineEdit) -> void:
@@ -1940,6 +2275,8 @@ func _refresh_galaxy() -> void:
 	names.sort()
 	for map_id in names:
 		var id := str(map_id)
+		if DOData.is_gate_map(id):
+			continue   # Galaxy Gate ornekleri rota listesinde gorunmez
 		var map_data: Dictionary = game.maps[id]
 		var is_cur: bool = id == str(game.cur)
 		var pvp: bool = bool(map_data.pvp)
@@ -1947,6 +2284,239 @@ func _refresh_galaxy() -> void:
 		var b := _btn("%s%s\n%s" % [id, "  • MEVCUT" if is_cur else "", "PvP bölgesi" if pvp else "Kapılar ve görev hedefleri"], kind, _request_route.bind(id), Vector2(120, 60), not is_cur, 11)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		grid.add_child(b)
+
+
+# ============================================================================
+#  GALAXY GATES  (kisiye ozel dalga haritalari; kurallar sunucuda: net_server.gd)
+# ============================================================================
+var gates_body: HBoxContainer
+var gate_sel := "alpha"
+const GATE_PREVIEW_BG := "res://novagate_bg.jpg"
+
+
+func _open_gate_ids() -> Array:
+	# Sadece "open: true" olan kapilar listelenir (alpha, beta, gamma)
+	var ids: Array = []
+	for gid in DOData.GALAXY_GATES.keys():
+		if bool(DOData.GALAXY_GATES[gid].get("open", false)):
+			ids.append(str(gid))
+	return ids
+
+
+func _build_gates() -> Control:
+	var pg := Control.new()
+	gates_body = HBoxContainer.new()
+	gates_body.add_theme_constant_override("separation", 10)
+	pg.add_child(gates_body)
+	gates_body.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	return pg
+
+
+func _select_gate(gid: String) -> void:
+	gate_sel = gid
+	_refresh_gates()
+
+
+const GATE_SLOT_COLORS := {"alpha": Color(0.55, 1.0, 0.42), "beta": Color(1.0, 0.69, 0.23), "gamma": Color(1.0, 0.35, 0.35)}
+
+
+func _gate_have(gid: String) -> int:
+	var gi: Dictionary = (game.gg_info.get("gates", {}) as Dictionary).get(gid, {})
+	return int(gi.get("parts", 0))
+
+
+func _refresh_gates() -> void:
+	game.gate_request_info()
+	_clear(gates_body)
+	var ids := _open_gate_ids()
+	if ids.is_empty():
+		return
+	if not ids.has(gate_sel):
+		gate_sel = str(ids[0])
+	var def: Dictionary = DOData.GALAXY_GATES[gate_sel]
+	var gi: Dictionary = (game.gg_info.get("gates", {}) as Dictionary).get(gate_sel, {})
+	var req: int = int(def.get("parts", 0))
+	var have: int = int(gi.get("parts", 0))
+	var active: bool = bool(gi.get("active", false))
+	var complete: bool = req > 0 and have >= req
+
+	# ---------------- SOL: kapi listesi (parca sayisi + durum) ----------------
+	var left := VBoxContainer.new()
+	left.custom_minimum_size = Vector2(150, 0)
+	left.add_theme_constant_override("separation", 6)
+	gates_body.add_child(left)
+	left.add_child(_mk("KAPILAR", 11, DIM))
+	var grp := ButtonGroup.new()
+	for gid in ids:
+		var gdef: Dictionary = DOData.GALAXY_GATES[gid]
+		var h: int = _gate_have(str(gid))
+		var r: int = int(gdef.get("parts", 0))
+		var gact: bool = bool(((game.gg_info.get("gates", {}) as Dictionary).get(gid, {}) as Dictionary).get("active", false))
+		var state := "AKTİF" if gact else ("TAMAM" if (r > 0 and h >= r) else "%d / %d" % [h, r])
+		var gb := _btn("%s\n%s" % [str(gdef.name).to_upper(), state], "Button", _select_gate.bind(str(gid)), Vector2(0, 52), true, 12)
+		gb.toggle_mode = true
+		gb.button_group = grp
+		gb.button_pressed = (str(gid) == gate_sel)
+		left.add_child(gb)
+
+	# ---------------- ORTA: onizleme + parcalar + aktivasyon + jenerator ----------------
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	gates_body.add_child(scroll)
+	var mid := VBoxContainer.new()
+	mid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mid.add_theme_constant_override("separation", 8)
+	scroll.add_child(mid)
+	var title_card := _panel("PanelChip")
+	title_card.add_child(_mk(str(def.name).to_upper(), 18, NEON_ORANGE))
+	(title_card.get_child(0) as Label).horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	mid.add_child(title_card)
+
+	var view_card := _panel("PanelCard")
+	mid.add_child(view_card)
+	var view := Control.new()
+	view.clip_contents = true
+	view.custom_minimum_size = Vector2(0, 120)
+	view_card.add_child(view)
+	if ResourceLoader.exists(GATE_PREVIEW_BG):
+		var bg_tex := TextureRect.new()
+		bg_tex.texture = load(GATE_PREVIEW_BG)
+		bg_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		bg_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		bg_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		view.add_child(bg_tex)
+		bg_tex.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var shade := ColorRect.new()
+	shade.color = Color(0.0, 0.02, 0.06, 0.55)
+	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	view.add_child(shade)
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var center := CenterContainer.new()
+	view.add_child(center)
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var cv := VBoxContainer.new()
+	cv.add_theme_constant_override("separation", 4)
+	center.add_child(cv)
+	var big := _mk(str(def.name).to_upper(), 26, ICE_WHITE, true)
+	big.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cv.add_child(big)
+	var mul_l := _mk("Kapıdaki NPC gücü / ödül çarpanı: x%d" % int(def.get("mul", 1)), 13, GOLD)
+	mul_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cv.add_child(mul_l)
+	var cnt := _mk("%d bölüm  •  %d NPC" % [(def.waves as Array).size(), DOData.gate_total_npcs(gate_sel)], 12, TEXT2)
+	cnt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cv.add_child(cnt)
+
+	if not game.net_on:
+		var note := _panel("PanelNote")
+		note.add_child(_wrap("Galaxy Gates yalnızca çevrimiçi modda oynanabilir (parçalar, ilerleme ve ödüller sunucuda tutulur).", 12, Color(1.0, 0.72, 0.4)))
+		mid.add_child(note)
+
+	# --- Kapi parcalari: her parca yuvasi bir kare ---
+	var owned := {}
+	for s in (gi.get("slots", []) as Array):
+		owned[int(s)] = true
+	var parts_card := _panel("PanelCard")
+	mid.add_child(parts_card)
+	var pv := VBoxContainer.new()
+	pv.add_theme_constant_override("separation", 6)
+	parts_card.add_child(pv)
+	var prog_l := _mk("Kapı parçaları: %d / %d%s" % [have, req, "   —   TAMAMLANDI" if complete else ""], 14, GREEN if complete else GOLD)
+	pv.add_child(prog_l)
+	var slot_col: Color = GATE_SLOT_COLORS.get(gate_sel, GOLD)
+	var fl := _flow(3)
+	pv.add_child(fl)
+	for si in range(req):
+		var sq := ColorRect.new()
+		sq.custom_minimum_size = Vector2(15, 15)
+		sq.color = slot_col if owned.has(si) else Color(0.10, 0.18, 0.27, 0.9)
+		sq.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		fl.add_child(sq)
+	var can_act: bool = game.net_on and not active and complete
+	pv.add_child(_btn("KAPI AKTİF" if active else "KAPIYI AKTİF ET", "Button", _activate_gate.bind(gate_sel), Vector2(0, 42), can_act, 13))
+	var hint: String
+	if active:
+		hint = "Kapı kuruldu. Şirketinin X-1 haritasında kapının yanına git ve J tuşuna bas."
+	elif complete:
+		hint = "Tüm parçalar tamam. KAPIYI AKTİF ET ile kapıyı kur; ardından şirketinin X-1 haritasında kapının yanında J tuşuna bas."
+	else:
+		hint = "Kapı parçaları yalnızca sağdaki jeneratörden gelir. Tüm parçalar toplanınca kapıyı aktif edebilirsin."
+	pv.add_child(_wrap(hint, 11, DIM))
+	pv.add_child(_wrap("İlerlemen sunucuda kaydedilir: çıkış yapsan da kaldığın bölümden devam edersin; öldürdüğün NPC'ler yeniden doğmaz. Savaş halindeyken girilemez.", 11, DIM))
+
+	# ---------------- SAG: Galaxy Gate jeneratoru (Alfa, Beta, Gamma ortak) ----------------
+	var gen: Dictionary = game.gg_info.get("gen", {}) if typeof(game.gg_info.get("gen", {})) == TYPE_DICTIONARY else {}
+	var mult: int = int(gen.get("mult", 0))
+	var armed: bool = bool(gen.get("armed", false)) and mult >= 2
+	var uri: int = int(game.SV.get("uri", 0))
+	var cost: int = DOData.GATE_GEN_COST_URI
+	var busy: bool = game.gg_is_busy() or game.gg_batch_total > 0
+	var right := _panel("PanelCard")
+	right.custom_minimum_size = Vector2(290, 0)
+	gates_body.add_child(right)
+	var rscroll := ScrollContainer.new()
+	rscroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	rscroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	right.add_child(rscroll)
+	var gv := VBoxContainer.new()
+	gv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	gv.add_theme_constant_override("separation", 6)
+	rscroll.add_child(gv)
+	gv.add_child(_mk("GALAXY GATE JENERATÖRÜ", 15, NEON_ORANGE))
+	gv.add_child(_wrap("Alfa, Beta ve Gamma kapıları aynı jeneratörü paylaşır. Her çevirmede çıkan parça rastgele bir kapının rastgele bir parçasıdır.", 11, DIM))
+	gv.add_child(_mk("Uridium: %s" % game._n(uri), 13, ICE_WHITE))
+	gv.add_child(_wrap("Her basım %d Uridium." % cost, 11, DIM))
+	# 1 / 5 / 10 basim
+	var brow := HBoxContainer.new()
+	brow.add_theme_constant_override("separation", 6)
+	gv.add_child(brow)
+	for n in [1, 5, 10]:
+		var total: int = cost * n
+		var can: bool = game.net_on and uri >= total and not busy
+		var sb := _btn("%d BASIM\n%s" % [n, game._n(total)], "Button", _spin_generator.bind(n), Vector2(0, 46), can, 11)
+		sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		brow.add_child(sb)
+	if game.gg_batch_total > 0:
+		gv.add_child(_wrap("Toplu basım sürüyor: %d / %d" % [game.gg_batch_log.size(), game.gg_batch_total], 12, GOLD))
+	if game.gg_last_spin != "":
+		gv.add_child(_wrap("Son çevirme: " + game.gg_last_spin, 12, game.gg_last_spin_col))
+	gv.add_child(_line())
+	# Carpan: x2 ... x6
+	var mrow := HBoxContainer.new()
+	mrow.add_theme_constant_override("separation", 6)
+	gv.add_child(mrow)
+	mrow.add_child(_mk("ÇARPAN", 12, DIM))
+	for m in range(2, DOData.GATE_MULT_MAX + 1):
+		var chip := _panel("PanelChip")
+		var on: bool = (m == mult)
+		chip.add_child(_mk("x%d" % m, 13, (GREEN if armed else GOLD) if on else Color(0.35, 0.45, 0.55)))
+		mrow.add_child(chip)
+	var mult_txt: String
+	if mult < 2:
+		mult_txt = "ÇARPAN YOK"
+	elif armed:
+		mult_txt = "x%d SIRADAKİ ÇEVİRMEDE KULLANILACAK  (İPTAL)" % mult
+	else:
+		mult_txt = "x%d ÇARPANI KULLAN" % mult
+	gv.add_child(_btn(mult_txt, "Button", _toggle_generator_mult.bind(not armed), Vector2(0, 36), game.net_on and mult >= 2, 12))
+	gv.add_child(_wrap("Zaten sahip olduğun bir parça tekrar çıkarsa çarpana dönüşür: x2, x3 … x6. Çarpanı istediğin zaman kullan; bir sonraki çevirmenin ödülünü katlar ve harcanır. Parça ödülü katlanırsa kapıya o kadar eksik parça eklenir, fazlası cephane olur. x6 doluyken tekrar parça gelirse x6 otomatik kullanılır.", 11, DIM))
+	var chances: Array = []
+	for t in DOData.GATE_GEN_TABLE:
+		chances.append("%s %%%d" % [str(t[2]), int(t[1])])
+	gv.add_child(_wrap("Ödül ihtimalleri: " + "  •  ".join(chances), 11, DIM))
+
+
+func _activate_gate(gid: String) -> void:
+	game.gate_activate(gid)
+
+
+func _spin_generator(count: int = 1) -> void:
+	game.gate_pulse(count)
+
+
+func _toggle_generator_mult(arm: bool) -> void:
+	game.gate_arm(arm)
 
 
 func _request_route(map_id: String) -> void:
@@ -3072,6 +3642,109 @@ func _save_now() -> void:
 # ============================================================================
 #  YARDIM
 # ============================================================================
+# ============================================================================
+#  PAZAR  (VIP uyelik + baslangic paketleri)
+#  Gercek para ile satin alma Google Play yayininda acilacak. SIMDI satin alma YOK: yalnizca vitrin.
+#  Bu sayfa oyuncuya hicbir sey vermez, sunucuya hicbir istek gondermez.
+# ============================================================================
+const MARKET_CLOSED_TXT := "ŞU AN KAPALI"
+const MARKET_VIP_PERKS := [
+	["+%15 Şeref", "Kazandığın şeref puanı %15 artar."],
+	["+%15 TP", "Kazandığın TP %15 artar."],
+	["+%15 NPC ödülleri", "NPC öldürünce aldığın ödüller %15 artar."],
+	["Ücretsiz tamir", "Gemi tamiri için ödeme yapmazsın."],
+]
+const MARKET_STARTER_URI := [1000000, 500000]   # iki baslangic paketi: Uridium miktari
+
+
+func _market_ship_name(id: String) -> String:
+	for sh in DOData.SHIPS:
+		if str(sh.id) == id:
+			return str(sh.name)
+	return id.capitalize()
+
+
+func _market_card(title: String, sub: String, accent: Color, rows: Array) -> PanelContainer:
+	# rows: [[baslik, aciklama], ...]; en altta kapali fiyat satiri
+	var card := _panel("PanelCard")
+	card.custom_minimum_size = Vector2(300, 0)
+	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 6)
+	card.add_child(v)
+	v.add_child(_mk(title, 16, accent, true))
+	if sub != "":
+		v.add_child(_wrap(sub, 12, DIM))
+	v.add_child(_line())
+	for r in rows:
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", 8)
+		v.add_child(h)
+		h.add_child(_mk("•", 13, accent))
+		var t := VBoxContainer.new()
+		t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		t.add_theme_constant_override("separation", 0)
+		h.add_child(t)
+		t.add_child(_wrap(str(r[0]), 13, ICE_WHITE))
+		if (r as Array).size() > 1 and str(r[1]) != "":
+			t.add_child(_wrap(str(r[1]), 11, DIM))
+	v.add_child(_line())
+	var pr := HBoxContainer.new()
+	pr.add_theme_constant_override("separation", 8)
+	v.add_child(pr)
+	pr.add_child(_mk("FİYAT", 11, DIM))
+	var pv := _mk(MARKET_CLOSED_TXT, 14, RED, true)
+	pv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pv.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	pr.add_child(pv)
+	# Satin alma kapali: dugme pasif, baglanti yok.
+	v.add_child(_btn(MARKET_CLOSED_TXT, "Button", Callable(), Vector2(0, 38), false, 13))
+	return card
+
+
+func _build_market() -> Control:
+	var r := _make_scroll_page(10)
+	var body: VBoxContainer = r[1]
+	_page_head(body, "PAZAR", "VIP üyelik ve paketler")
+
+	# --- VIP
+	body.add_child(_section("VIP ÜYELİK"))
+	var vip_rows: Array = []
+	for pk in MARKET_VIP_PERKS:
+		vip_rows.append([pk[0], pk[1]])
+	var vf := _flow(10)
+	body.add_child(vf)
+	vf.add_child(_market_card("VIP  •  1 AYLIK", "30 gün boyunca VIP ayrıcalıkları.", GOLD, vip_rows))
+	var note := _panel("PanelInset")
+	note.custom_minimum_size = Vector2(300, 0)
+	note.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var nv := VBoxContainer.new()
+	nv.add_theme_constant_override("separation", 6)
+	note.add_child(nv)
+	nv.add_child(_mk("BİLGİ", 12, NEON_ORANGE))
+	nv.add_child(_wrap("VIP üyelik, oyun Google Play'de yayınlandığında gerçek parayla satın alınabilecek. Şu an satın alma kapalıdır.", 12, TEXT2))
+	vf.add_child(note)
+
+	# --- Baslangic paketleri
+	body.add_child(_section("BAŞLANGIÇ PAKETLERİ"))
+	var sf := _flow(10)
+	body.add_child(sf)
+	var lf3: String = str(DOData.LASERS.get("lf3", {}).get("name", "LF-3"))
+	var sg: String = str(DOData.GENS.get("sg3n-b02", {}).get("name", "SG3N-B02"))
+	var g7: String = str(DOData.GENS.get("g3n-7900", {}).get("name", "G3N-7900"))
+	for uri in MARKET_STARTER_URI:
+		var rows: Array = [
+			[game._n(float(uri)) + " Uridium", ""],
+			[_market_ship_name("goliath") + " gemisi", ""],
+			["10 × %s lazer" % lf3, ""],
+			["10 × %s kalkan jeneratörü" % sg, ""],
+			["10 × %s hız jeneratörü" % g7, ""],
+		]
+		var ttl: String = "BAŞLANGIÇ  •  %s URİDİUM" % ("1M" if int(uri) >= 1000000 else "%dK" % (int(uri) / 1000))
+		sf.add_child(_market_card(ttl, "Yeni pilotlar için hazır set.", NEON_BLUE_BRIGHT, rows))
+	return r[0]
+
+
 func _build_help() -> Control:
 	var r := _make_scroll_page(8)
 	var body: VBoxContainer = r[1]

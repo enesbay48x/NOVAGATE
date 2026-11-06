@@ -225,6 +225,9 @@ func add_npc(info: Array) -> void:
 	e["net_yaw"] = float(info[4])
 	e.hp = float(info[5])
 	e.sh = float(info[6])
+	if info.size() > 7 and float(info[7]) > 1.0:
+		e.mx = float(e.mx) * float(info[7])     # Galaxy Gate guc carpani: cubuklar tam dolu gorunsun
+		e.msh = float(e.msh) * float(info[7])
 	var n3: Node3D = e.node
 	n3.rotation.y = float(info[4])
 	npcs[uid] = e
@@ -284,11 +287,28 @@ func _drop_entry(e) -> void:
 		e.node.queue_free()
 
 
+# Kalabalik savasta (ornegin Galaxy Gate'te 50 NPC ayni anda ates eder) her atis icin lazer + carpma efekti + ses + yazi
+# uretmek oyunu dondurur. Pencere basina en fazla NPC_VIS_MAX atisin GORSELI cizilir; fazlasinin HASARI yine uygulanir.
+const NPC_VIS_WINDOW_MS := 500
+const NPC_VIS_MAX := 8
+var _npc_vis_t0: int = 0
+var _npc_vis_n: int = 0
+
+
 func on_npc_fire(uid: int, target_peer: int, dmg: float) -> void:
 	var e = npcs.get(uid)
 	if e == null or g.P == null or not g.running:
 		return
 	var gen: int = g.map_gen
+	var now_ms: int = Time.get_ticks_msec()
+	if now_ms - _npc_vis_t0 >= NPC_VIS_WINDOW_MS:
+		_npc_vis_t0 = now_ms
+		_npc_vis_n = 0
+	_npc_vis_n += 1
+	if _npc_vis_n > NPC_VIS_MAX:
+		if target_peer == net.my_id:
+			g._npc_shot_lite(dmg, gen)   # gorselsiz: yalnizca hasar (iska + hasar), efekt/ses/yazi yok
+		return
 	# Sunucudan gelen her s_npc_fire = TEK atis: tek lazer gorseli, hasar yalnizca hedef oyuncuda ve yalnizca bir kez.
 	if target_peer == net.my_id:
 		g._npc_bolt(e, 0, dmg, gen)
@@ -323,7 +343,9 @@ func add_player(info: Array) -> void:
 		if info.size() > 13:
 			g.SV._sv_admin = int(info[13])
 		if info.size() > 14:
-			g.SV._sv_rank = int(info[14])
+			# 14. eleman = rutbe + 100 x halka (sunucu paketler): rutbe = v % 100, halka = v / 100
+			g.SV._sv_rank = int(info[14]) % 100
+			g.SV._sv_rings = clampi(int(int(info[14]) / 100), 0, 3)
 		if info.size() > 16:
 			g.SV.owned = (info[16] as Array).duplicate()
 		g._refresh_plate_rank()
@@ -332,7 +354,9 @@ func add_player(info: Array) -> void:
 	var nm: String = str(info[1])
 	var fac: int = int(info[2])
 	var is_adm: bool = info.size() > 13 and int(info[13]) == 1
-	var rank: int = int(info[14]) if info.size() > 14 and int(info[14]) > 0 else 0
+	var rank_raw: int = int(info[14]) if info.size() > 14 and int(info[14]) > 0 else 0
+	var rank: int = rank_raw % 100
+	var rings: int = clampi(int(rank_raw / 100), 0, 3)
 	var pos := Vector3(float(info[4]), 0.0, float(info[5]))
 	var enemy: bool = fac != int(g.SV.get("faction", 1))
 	var node: Node3D = g.make_ship(str(info[3]), 6.0, g.ship_faction_tint(fac))
@@ -346,7 +370,7 @@ func add_player(info: Array) -> void:
 	nt.outline_size = 7
 	nt.outline_modulate = Color(0, 0, 0, 0.9)
 	node.add_child(nt)
-	var plate = g.make_remote_plate(nm, fac, col, is_adm, rank)
+	var plate = g.make_remote_plate(nm, fac, col, is_adm, rank, rings)
 	if plate != null:
 		nt.visible = false
 	var d: Dictionary = {"name": nm, "model": str(info[3]), "sz": 6.0, "hp": float(info[8]), "sh": float(info[10]),
@@ -397,6 +421,7 @@ func on_player_snap(arr: Array) -> void:
 		ent.mx = maxf(float(it[5]), 1.0)
 		ent.sh = float(it[6])
 		ent.msh = maxf(float(it[7]), 1.0)
+		ent["safe"] = it.size() > 9 and int(it[9]) > 0   # sunucu: bu oyuncu GERCEK korumada (guvenli bolge / gecis korumasi)
 
 
 # ------------------------------------------------------------------ droidler
@@ -546,8 +571,8 @@ func hit_enemy(e, dmg: float, mode: int = 0) -> void:
 		return
 	if e.has("uid"):
 		net.send_hit_npc(int(e.uid), dmg, mode)
-	elif bool(e.get("player", false)) and mode == 0:
-		net.send_hit_player(int(e.peer), dmg)
+	elif bool(e.get("player", false)):
+		net.send_hit_player(int(e.peer), dmg, mode)   # mode 1 = SAB: oyuncunun kalkanini da emer
 	e.hp = maxf(float(e.hp), 1.0)
 
 
@@ -637,6 +662,38 @@ func on_hurt(attacker: int, dmg: float) -> void:
 	g.hurt(dmg)
 
 
+# SAB bana vurdu: sunucu kalkanimdan "amount" emdi. Govdeye hasar yok.
+func on_drain(attacker: int, amount: float) -> void:
+	if g.P == null or not g.running or g.extras.untargetable() or amount <= 0.0:
+		return
+	if g.extras.shield_active():
+		g.extras.shield_absorb(amount)
+		return
+	last_attacker = attacker
+	last_attacker_t = g.clock
+	g.last_hit = g.clock
+	g.repairing = false
+	var a: float = minf(float(g.P.sh), amount)
+	g.P.sh = float(g.P.sh) - a
+	if a > 0.0:
+		g.popup_txt("-" + g._n(a), g.P.node.position, Color(0.5, 0.82, 1.0))
+		g.impact(g.P.node.position, Color(0.45, 0.8, 1.0), false, 0.8)
+
+
+# Sunucu: hedef oyuncu guvenli bolgede, saldiri reddedildi. Ates kesilir, uyari gosterilir.
+func on_safe_target(victim: int) -> void:
+	var sp = players.get(victim)
+	var nm: String = "Oyuncu"
+	if sp != null:
+		sp["safe"] = true
+		nm = str(sp.get("name", "Oyuncu"))
+		if g.target != null and is_same(g.target, sp):
+			g._set_fire(false)
+	if g.clock - float(g.get("last_safe_tgt_t")) > 1.5:
+		g.last_safe_tgt_t = g.clock
+		g.toast("%s güvenli bölgede!" % nm)
+
+
 func report_death() -> void:
 	var killer: int = last_attacker if g.clock - last_attacker_t < 12.0 else 0
 	last_attacker = 0
@@ -716,5 +773,7 @@ func on_event(tip: String, veri: Dictionary) -> void:
 		"clan_state", "clan_list", "clan_result", "clan_tags", "clan_chat":
 			if clan != null:
 				clan.on_event(tip, veri)
+		"gg_go", "gg_state", "gg_done", "gg_fail", "gg_info", "gg_pulse_result", "gg_activated", "gg_return", "gg_gates", "gg_next", "gg_ring", "rank_top":
+			g.on_gate_event(tip, veri)
 		_:
 			pass  # bilinmeyen tip: yok say

@@ -10,6 +10,7 @@ const IDS := ["E-NB-01", "E-WS-02", "E-EMP-03", "E-FR-05", "E-ENT-06"]
 
 # ---- Ayarlar ----
 const NUKE_FRAC := 0.15          # Nukleer: dusmanin MAKSIMUM govde canin %15'i (kalkani yok sayar)
+const NUKE_FRAC_GATE := 0.5      # Galaxy Gate icinde: NPC'lerin maksimum govde canin %50'si (sunucudaki SV_NUKE_FRAC_GATE ile ayni)
 const NUKE_RADIUS := 700.0       # Nukleer: "yakin" = lazer menzili (DarkOrbit birimi)
 const SHIELD_TIME := 3.0         # 3 Saniyelik Koruma suresi
 const EMA_TIME := 3.0            # EMA: dusmanlar seni hedefleyemez (sn)
@@ -18,6 +19,10 @@ const REPAIR_USES := 10          # 10'lu Tamir: kullanim hakki; haklar bitince R
 const REPAIR_COOLDOWN := 120.0
 const REPAIR_FX_TIME := 4.0      # tamir drone animasyonunun suresi
 const ENC_RATE := 0.10           # ENC: lazerle verilen govde hasarinin %10'u kendi HP'ne
+# Koruma / ENC efektleri geminin USTUNDE (kameraya dogru) cizilir, seffaf ve az parlak.
+const FRONT_BACK := -8.0         # eksi = kameraya dogru it (gemi govdesinin ONUNDE); arti = gemi arkasi
+const SHIELD_BRIGHT := 0.38      # 3 Saniyelik Koruma parlakligi (0..1, additif)
+const ENC_BRIGHT := 0.32         # ENC parlakligi (0..1, additif)
 const ENC_TIME := 300.0          # ENC: etki suresi (sn) - bekleme, etki BITINCE baslar
 
 # "price" = her kullanimda dusen Uridium, "cd" = bekleme (sn)
@@ -222,13 +227,13 @@ func play_remote(idx: int, node: Node3D) -> void:
 		"E-NB-01":
 			_play(id, node, Vector3(0, 1.0, 0), 22.0, 0.0, true, 99.0, false, false)
 		"E-WS-02":
-			_play(id, node, Vector3(0, 1.0, 0), 11.0, 0.0, true, SHIELD_TIME, true, false, 0.4, 0.15)
+			_play(id, node, Vector3(0, 1.0, 0), 11.0, 0.0, true, SHIELD_TIME, true, false, 0.4, 0.15, SHIELD_BRIGHT, FRONT_BACK)
 		"E-EMP-03":
 			_play(id, node, Vector3(0, 1.0, 0), 30.0, 0.0, true, 99.0, false, false)
 		"E-FR-05":
 			_play(id, node, Vector3(0, 1.0, 0), 19.2, 0.0, false, REPAIR_FX_TIME, true, false, 0.5, 0.2)
 		"E-ENT-06":
-			_play(id, node, Vector3(0, 1.0, 0), 10.0, 0.0, true, ENC_TIME, true, false, 1.0, 0.2)
+			_play(id, node, Vector3(0, 1.0, 0), 10.0, 0.0, true, ENC_TIME, true, false, 1.0, 0.2, ENC_BRIGHT, FRONT_BACK)
 
 
 func _start_cd(id: String) -> void:
@@ -275,14 +280,14 @@ func _use_nuke(id: String) -> bool:
 		Net.send_extra(IDS.find(id))
 	_play(id, game.P.node, Vector3(0, 1.0, 0), 22.0, 0.0, true, 99.0, false, true)
 	for e in hits:
-		var dmg: float = float(e.mx) * NUKE_FRAC
+		var dmg: float = float(e.mx) * (NUKE_FRAC_GATE if DOData.is_gate_map(game.cur) else NUKE_FRAC)
 		e.hp -= dmg
 		e.aggro = true
 		e["last_hit_t"] = game.clock
 		if game.net_on:
 			Net.gm.hit_enemy(e, dmg)
 		var dist: float = (e.node.position - po).length()
-		_play(id, e.node, Vector3(0, 1.0, 0), 13.0, dist / 70.0, true, 99.0, false, false)
+		_play(id, e.node, Vector3(0, 1.0, 0), 13.0, dist / 70.0, true, 99.0, false, false, 0.0, 0.0, 1.0, float(e.get("d", {}).get("sz", 6.0)) * 0.9 + 3.0)
 		game.popup_txt("-" + game._n(dmg), e.node.position, Color(1.0, 0.6, 0.15))
 	game.toast("Nükleer patladı! %d düşman etkilendi.  (-%d Uridium)" % [hits.size(), _paid(id)])
 	game.save_game()
@@ -294,7 +299,7 @@ func _use_shield(id: String) -> bool:
 		return false
 	_start_cd(id)
 	shield_t = SHIELD_TIME
-	_play(id, game.P.node, Vector3(0, 1.0, 0), 11.0, 0.0, true, SHIELD_TIME, true, true, 0.4, 0.15)
+	_play(id, game.P.node, Vector3(0, 1.0, 0), 11.0, 0.0, true, SHIELD_TIME, true, true, 0.4, 0.15, SHIELD_BRIGHT, FRONT_BACK)
 	game.popup_txt("KORUMA", game.P.node.position, Color(0.4, 0.85, 1.0))
 	game.save_game()
 	return true
@@ -350,7 +355,7 @@ func _use_enc(id: String) -> bool:
 	if not _charge(id):
 		return false
 	enc_t = ENC_TIME   # bekleme etki BITINCE baslar (tick)
-	_play(id, game.P.node, Vector3(0, 1.0, 0), 10.0, 0.0, true, ENC_TIME, true, true, 1.0, 0.2)
+	_play(id, game.P.node, Vector3(0, 1.0, 0), 10.0, 0.0, true, ENC_TIME, true, true, 1.0, 0.2, ENC_BRIGHT, FRONT_BACK)
 	game.popup_txt("ENC", game.P.node.position, Color(1.0, 0.4, 0.35))
 	game.toast("ENC aktif: lazer gövde hasarının %%%d'u canına geçer (%d sn).  (-%d Uridium)" % [int(ENC_RATE * 100.0), int(ENC_TIME), _paid(id)])
 	game.save_game()
@@ -377,7 +382,7 @@ func hit_fx() -> void:
 	for f in _fx:
 		if str(f.id) == "E-WS-02" and bool(f.owned):
 			return
-	_play("E-WS-02", game.P.node, Vector3(0, 1.0, 0), 11.0, 0.0, true, SHIELD_TIME, true, true, 0.4, 0.15, 0.25)   # hasar efekti: parlaklik dusuruldu (gemi gorunsun)
+	_play("E-WS-02", game.P.node, Vector3(0, 1.0, 0), 11.0, 0.0, true, SHIELD_TIME, true, true, 0.4, 0.15, 0.25, FRONT_BACK)   # hasar efekti: gemi USTUNDE, seffaf
 
 
 # main.gd hurt(): koruma acikken gelen hasar
@@ -446,8 +451,8 @@ func _make_mat(additive: bool) -> StandardMaterial3D:
 	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD if additive else BaseMaterial3D.BLEND_MODE_MIX
 	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
-	m.no_depth_test = true
-	m.render_priority = 20
+	m.no_depth_test = false          # derinlik testi ACIK: efekt, "back" degerine gore gemi onunde/arkasinda cizilir
+	m.render_priority = -1           # diger seffaf nesnelerin (bar, yazi, mermi) arkasinda kalsin
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
 	m.albedo_color = Color(1, 1, 1, 1)
 	return m
@@ -457,7 +462,7 @@ func _make_mat(additive: bool) -> StandardMaterial3D:
 # delay: baslamadan once bekleme, add: additif karisim, life: azami sure (loop'lu animasyonlar),
 # loop: animasyon bitince basa sar, owned: oyuncuya ait (reset'te silinir), fade_out/fade_in: sn
 func _play(id: String, follow: Node3D, off: Vector3, size: float, delay: float, add: bool,
-		life: float, loop: bool, owned: bool, fade_out := 0.0, fade_in := 0.0, bright := 1.0) -> void:
+		life: float, loop: bool, owned: bool, fade_out := 0.0, fade_in := 0.0, bright := 1.0, back := 5.0) -> void:
 	if game == null or follow == null:
 		return
 	var sf := _anim_frames(id)
@@ -486,8 +491,27 @@ func _play(id: String, follow: Node3D, off: Vector3, size: float, delay: float, 
 	mi.visible = delay <= 0.0
 	game.add_child(mi)
 	mi.global_position = follow.global_position + off
+	mi.visible = false
 	_fx.append({"id": id, "node": mi, "mat": mat, "sf": sf, "follow": follow, "off": off, "t": -delay,
-		"loop": loop, "life": life, "owned": owned, "fo": fade_out, "fi": fade_in, "br": bright, "last": mi.global_position, "idx": -1})
+		"loop": loop, "life": life, "owned": owned, "fo": fade_out, "fi": fade_in, "br": bright, "back": back, "last": mi.global_position, "idx": -1})
+
+
+# Efekt merkezini kamera isini boyunca gemiden "back" kadar UZAGA iter: ekrandaki konumu ayni kalir,
+# back > 0: derinlikte gemi govdesinin ARKASINA gecer (gemi efektin onunde). back < 0: kameraya dogru, gemi USTUNDE gorunur.
+# Perspektif buyumesi olcekle telafi edilir (gorunen boyut degismez).
+func _behind(pos: Vector3, back: float, mi: MeshInstance3D) -> Vector3:
+	var cam: Camera3D = game.cam if game != null else null
+	if cam == null or not is_instance_valid(cam):
+		return pos + Vector3(0, -back * 0.7, 0)
+	var to: Vector3 = pos - cam.global_position
+	var dist: float = to.length()
+	if dist < 0.5:
+		return pos
+	back = maxf(back, -dist * 0.6)   # kameraya dogru itme: kameranin icine girmesin
+	var np: Vector3 = pos + to / dist * back
+	if mi != null:
+		mi.scale = Vector3.ONE * ((dist + back) / dist)
+	return np
 
 
 func _set_frame(f: Dictionary, idx: int) -> void:
@@ -550,7 +574,7 @@ func _update_fx(dt: float) -> void:
 			_fx.remove_at(i)
 			continue
 		f.last = (fol as Node3D).global_position + f.off
-		mi.global_position = f.last
+		mi.global_position = _behind(f.last, float(f.get("back", 5.0)), mi)
 		# solma
 		var a := 1.0
 		if float(f.fi) > 0.0:

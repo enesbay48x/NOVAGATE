@@ -374,9 +374,9 @@ func send_hit_npc(uid: int, dmg: float, mode: int = 0) -> void:
 		rpc_id(1, "c_hit_npc", uid, dmg, mode)
 
 
-func send_hit_player(peer: int, dmg: float) -> void:
+func send_hit_player(peer: int, dmg: float, mode: int = 0) -> void:
 	if online:
-		rpc_id(1, "c_hit_player", peer, dmg)
+		rpc_id(1, "c_hit_player", peer, dmg, mode)   # mode 1 = SAB (yalnizca kalkan emer)
 
 
 func send_fire(kind: int, ref: int, nb: int, ammo: String) -> void:
@@ -513,9 +513,9 @@ func c_hit_npc(uid: int, dmg: float, mode: int) -> void:
 
 
 @rpc("any_peer", "call_remote", "reliable")
-func c_hit_player(peer: int, dmg: float) -> void:
+func c_hit_player(peer: int, dmg: float, mode: int) -> void:
 	if is_server and srv != null:
-		srv.on_hit_player(multiplayer.get_remote_sender_id(), peer, dmg)
+		srv.on_hit_player(multiplayer.get_remote_sender_id(), peer, dmg, mode)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -762,6 +762,20 @@ func s_fire(shooter: int, kind: int, ref: int, nb: int, ammo: String) -> void:
 func s_hurt(attacker: int, dmg: float) -> void:
 	if gm != null and online:
 		gm.on_hurt(attacker, dmg)
+
+
+# SAB: sunucu kurbanin kalkanindan "amount" kadar emildigini bildirir (govdeye hasar YOK).
+@rpc("authority", "call_remote", "reliable")
+func s_drain(attacker: int, amount: float) -> void:
+	if gm != null and online:
+		gm.on_drain(attacker, amount)
+
+
+# Saldirilan oyuncu guvenli bolgede: saldiri reddedildi, istemci "Oyuncu guvenli bolgede" der.
+@rpc("authority", "call_remote", "reliable")
+func s_safe_target(victim: int) -> void:
+	if gm != null and online:
+		gm.on_safe_target(victim)
 
 
 @rpc("authority", "call_remote", "reliable")

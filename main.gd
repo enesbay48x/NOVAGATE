@@ -203,6 +203,7 @@ var sb_slot_n: StyleBoxFlat
 var sb_slot_sel: StyleBoxFlat
 var slot_sel_cache := ""
 var last_nammo := -10.0
+
 var fire_cache := false
 var drone_nodes: Array = []
 var drone_sig := ""
@@ -219,6 +220,7 @@ var space_rect: ColorRect
 var space_material: ShaderMaterial
 var cfg_cool := 0.0
 var last_nolaser := -10.0
+var last_safe_tgt_t := -10.0   # "Oyuncu guvenli bolgede" uyarisi icin zaman damgasi (spam engeli)
 var rocket_cd := 0.0
 var rsb_cd := 0.0           # RSB-75 yeniden kullanim beklemesi (sn)
 var rsb_prev := ""          # RSB'den onceki muhimmat: RSB atildiktan sonra otomatik buna donulur
@@ -1184,6 +1186,62 @@ func _build_ui() -> void:
 	_build_main_menu(ui)
 	for n in hud_nodes:
 		n.visible = false
+	_play_intro_video()   # oyun ilk acildiginda giris videosu (bir kez)
+
+
+# ---------------- GIRIS VIDEOSU ----------------
+# Oyun ilk acildiginda res://giris.ogv tam ekran oynar. Bitince ya da tiklama /
+# dokunma / bosluk / enter / esc ile gecilince giris ekrani gorunur.
+# Godot sadece Ogg Theora (.ogv) video destekler; mp4 calismaz.
+const INTRO_VIDEO := "res://giris.ogv"
+const INTRO_RATIO := 1074.0 / 480.0   # videonun en/boy orani
+static var _intro_played := false
+
+
+func _play_intro_video() -> void:
+	if _intro_played or DisplayServer.get_name() == "headless":
+		return
+	_intro_played = true
+	if not ResourceLoader.exists(INTRO_VIDEO):
+		return
+	var stream = load(INTRO_VIDEO)
+	if stream == null:
+		return
+	var layer := CanvasLayer.new()
+	layer.layer = 100   # her seyin ustunde
+	add_child(layer)
+	var root := ColorRect.new()
+	root.color = Color.BLACK
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.focus_mode = Control.FOCUS_ALL
+	layer.add_child(root)
+	var box := AspectRatioContainer.new()
+	box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	box.ratio = INTRO_RATIO
+	box.stretch_mode = AspectRatioContainer.STRETCH_FIT
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(box)
+	var vp := VideoStreamPlayer.new()
+	vp.stream = stream
+	vp.expand = true
+	vp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(vp)
+	var state := {"done": false}
+	var finish := func() -> void:
+		if state["done"]:
+			return
+		state["done"] = true
+		vp.stop()
+		var tw := root.create_tween()
+		tw.tween_property(root, "modulate:a", 0.0, 0.4)
+		tw.tween_callback(layer.queue_free)
+	vp.finished.connect(finish)
+	root.gui_input.connect(func(ev: InputEvent) -> void:
+		if ev.is_pressed() and (ev is InputEventMouseButton or ev is InputEventScreenTouch or (ev is InputEventKey and not ev.is_echo())):
+			finish.call())
+	root.grab_focus()
+	vp.play()
 
 
 func _build_dohud() -> void:
@@ -1331,7 +1389,10 @@ var acc_list: VBoxContainer
 var _last_login_pw: String = ""
 var _autologin_active: bool = false   # kayitli hesaba tiklanarak giris deneniyor (gecersizse kayit silinir)
 const RankSys = preload("res://rank_system.gd")
+const RankRings = preload("res://rank_rings.gd")   # rutbe rozetinin ustundeki Galaxy Gate halkalari
 var plate_rank: TextureRect   # nick solundaki rutbe rozeti
+var rank_board: Dictionary = {}       # sunucudan: {top, me, ts, next, total, rings} (istatistik sayfasi)
+var rank_board_req_t := -100.0        # son istek (hiz siniri)
 var plate_box: HBoxContainer
 var plate_name: Label
 var plate_logo: TextureRect
@@ -2284,7 +2345,7 @@ func _build_plate() -> void:
 
 
 # Diger oyunculara ait 2D isim plakasi: [sirket logosu] + isim. (Kendi plakanla ayni mantik; logo_sm yoksa logo_<sirket> kullanilir.)
-func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false, rank: int = 0) -> Control:
+func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false, rank: int = 0, rings: int = 0) -> Control:
 	if plate_layer == null or not is_instance_valid(plate_layer):
 		return null
 	var box := HBoxContainer.new()
@@ -2322,6 +2383,7 @@ func make_remote_plate(nm: String, fac: int, col: Color, is_admin: bool = false,
 		ar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		ar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ar.texture = _tex(RankSys.ICON_PATH % rank)
+		_apply_rank_rings(ar, rings)
 		box.add_child(ar)
 	# Isim (ortada)
 	box.add_child(lb)
@@ -2423,6 +2485,31 @@ func _refresh_plate_rank() -> void:
 		var rk: Dictionary = RankSys.display(RankSys.summary(self).me)
 		plate_rank.texture = _tex(RankSys.ICON_PATH % int(rk.icon))
 	plate_rank.visible = plate_rank.texture != null
+	_apply_rank_rings(plate_rank, 0 if bool(SV.get("is_admin", 0)) else int(SV.get("_sv_rings", 0)))
+
+
+# Rutbe rozetinin ustune Galaxy Gate halkalarini cizer (0 = halka yok; 3 = altin).
+func _apply_rank_rings(icon: TextureRect, rings: int) -> void:
+	if icon == null or not is_instance_valid(icon):
+		return
+	var rr = icon.get_node_or_null("Rings")
+	if rings <= 0:
+		if rr != null:
+			rr.queue_free()
+		return
+	if rr == null:
+		rr = RankRings.new()
+		rr.name = "Rings"
+		icon.add_child(rr)
+	rr.set_rings(rings)
+
+
+# Istatistik sayfasi: sunucudan siralama + en iyi 10 iste (en fazla 30 sn'de bir; olay gelince sayfa kendini yeniler).
+func request_rank_board() -> void:
+	if not net_on or clock < rank_board_req_t + 30.0:
+		return
+	rank_board_req_t = clock
+	Net.send_event("rank_top", {})
 
 
 func _update_plate(show_world: bool) -> void:
@@ -3971,12 +4058,700 @@ func continue_game() -> void:
 	_start_run(false)
 
 
+# ---------- GALAXY GATES (istemci) ----------
+# Kurallar ve ilerleme SUNUCUDA tutulur (net_server.gd). Istemci: giris istegi, kapi haritasini kaydetme, HUD ve odul bildirimi.
+var gg_state: Dictionary = {}          # son "gg_state" paketi (kapida degilken bos)
+var gg_state_recv := 0.0               # paketin geldigi an (geri sayim icin)
+var gg_lbl: Label = null
+var gg_ret_map := ""                   # kapidan once bulunulan harita (kayit icin)
+var gg_ret_pos := Vector3.ZERO
+var gg_info: Dictionary = {}           # sunucudan: {gates:{gid:{parts,active,required}}, progress:{...}}
+var gg_info_req_t := -100.0            # son bilgi istegi (hiz siniri)
+var gg_sites: Array = []               # bulunulan haritadaki kapi noktalari [{gate, pos, node}]
+var gg_hint: Label = null              # kapinin yaninda gorunen ipucu
+var gg_choice_box: PanelContainer = null   # bolum sonu secim penceresi
+const GATE_SITE_COLORS := {"alpha": Color("#8CFF6A"), "beta": Color("#FFB03A"), "gamma": Color("#FF5A5A")}
+
+
+func gate_enter(gid: String) -> void:
+	if not net_on:
+		toast("Galaxy Gates yalnızca çevrimiçi modda oynanır.")
+		return
+	if DOData.is_gate_map(cur):
+		toast("Zaten bir kapının içindesin.")
+		return
+	if gg_cine_t >= 0.0:
+		return   # atlama sinematigi suruyor
+	Net.send_event("gg_enter", {"gate": gid})
+
+
+func gate_request_info() -> void:
+	if not net_on or clock < gg_info_req_t + 1.5:
+		return
+	gg_info_req_t = clock
+	Net.send_event("gg_info", {})
+
+
+func gate_activate(gid: String) -> void:
+	if not net_on:
+		toast("Galaxy Gates yalnızca çevrimiçi modda oynanır.")
+		return
+	Net.send_event("gg_activate", {"gate": gid})
+
+
+# Oyuncu, bulundugu haritadaki bir kapi noktasinin yaninda mi? (sunucu menzili 1.0, burada 0.9: gecikme payi)
+func _gate_site_near() -> Dictionary:
+	if P == null or not is_instance_valid(P.node):
+		return {}
+	for gs in gg_sites:
+		if P.node.position.distance_to(gs.pos) < DOData.GATE_ENTER_RANGE * DOData.S * 0.9:
+			return gs
+	return {}
+
+
+# Galaxy Gate noktasi sunucuya gore AKTIF mi? (gg_info: gates -> gid -> active)
+func _gate_site_active(gid: String) -> bool:
+	var gi: Dictionary = (gg_info.get("gates", {}) as Dictionary).get(gid, {})
+	return bool(gi.get("active", false))
+
+
+# Aktif edilmemis (ya da tamamlanip sifirlanmis) Galaxy Gate dunyada GORUNMEZ; tekrar aktif edilince gorunur.
+# Yalnizca gorunumu etkiler; giris / J / sunucu dogrulamasi degismez.
+func _refresh_gate_site_visibility() -> void:
+	for gs in gg_sites:
+		var nd = gs.get("node")
+		if nd != null and is_instance_valid(nd):
+			(nd as Node3D).visible = _gate_site_active(str(gs.gate))
+
+
+func _on_gate_choice(next: bool) -> void:
+	Net.send_event("gg_choice", {"next": next})
+	if gg_choice_box != null and is_instance_valid(gg_choice_box):
+		gg_choice_box.visible = false
+
+
+func _build_gate_choice_box() -> void:
+	var pc := PanelContainer.new()
+	var v := VBoxContainer.new()
+	v.name = "v"
+	v.add_theme_constant_override("separation", 8)
+	pc.add_child(v)
+	var t := Label.new()
+	t.name = "t"
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	t.add_theme_font_size_override("font_size", 18)
+	v.add_child(t)
+	var sub := Label.new()
+	sub.text = "İlerlemen kaydedildi."
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	v.add_child(sub)
+	var b1 := Button.new()
+	b1.text = "SONRAKİ BÖLÜME GEÇ"
+	b1.custom_minimum_size = Vector2(280, 40)
+	b1.pressed.connect(_on_gate_choice.bind(true))
+	v.add_child(b1)
+	var b2 := Button.new()
+	b2.text = "ANA HARİTAYA DÖN"
+	b2.custom_minimum_size = Vector2(280, 40)
+	b2.pressed.connect(_on_gate_choice.bind(false))
+	v.add_child(b2)
+	pc.visible = false
+	dohud.add_child(pc)
+	gg_choice_box = pc
+
+
+func _update_gate_choice_box() -> void:
+	var show: bool = running and DOData.is_gate_map(cur) and str(gg_state.get("st", "")) == "choice"
+	if not show:
+		if gg_choice_box != null and is_instance_valid(gg_choice_box):
+			gg_choice_box.visible = false
+		return
+	if gg_choice_box == null or not is_instance_valid(gg_choice_box):
+		_build_gate_choice_box()
+	(gg_choice_box.get_node("v/t") as Label).text = "BÖLÜM %d/%d TAMAMLANDI" % [int(gg_state.get("wave", 0)), int(gg_state.get("waves", 10))]
+	gg_choice_box.visible = true
+	gg_choice_box.reset_size()
+	gg_choice_box.position = (get_viewport().get_visible_rect().size - gg_choice_box.size) / 2.0
+
+
+func _update_gate_site_hint() -> void:
+	var near: Dictionary = {}
+	if running and not gg_sites.is_empty() and not DOData.is_gate_map(cur):
+		near = _gate_site_near()
+		if not near.is_empty() and gg_info.is_empty():
+			gate_request_info()
+		if not near.is_empty() and not _gate_site_active(str(near.gate)):
+			near = {}   # aktif olmayan kapi gorunmez: ipucu da yok
+	if near.is_empty():
+		if gg_hint != null and is_instance_valid(gg_hint):
+			gg_hint.visible = false
+		return
+	if gg_info.is_empty():
+		gate_request_info()
+	if gg_hint == null or not is_instance_valid(gg_hint):
+		gg_hint = _make_safe_label()
+	gg_hint.visible = true
+	var gid := str(near.gate)
+	var gdef: Dictionary = DOData.GALAXY_GATES.get(gid, {})
+	var gi: Dictionary = (gg_info.get("gates", {}) as Dictionary).get(gid, {})
+	var txt := ""
+	var col := Color(1.0, 0.82, 0.35)
+	if bool(gi.get("active", false)):
+		txt = "%s — aktif. Girmek için J tuşuna bas." % str(gdef.get("name", "Kapı"))
+		col = Color(0.55, 0.95, 0.72)
+	else:
+		txt = "%s — parçalar %d/%d. Galaxy Gates menüsündeki jeneratörle parça topla, tamamlanınca kapıyı aktif et." % [str(gdef.get("name", "Kapı")), int(gi.get("parts", 0)), int(gdef.get("parts", 0))]
+	_style_safe_label(gg_hint, txt, col, 150.0, get_viewport().get_visible_rect().size)
+
+
+func on_gate_event(tip: String, veri: Dictionary) -> void:
+	match tip:
+		"rank_top":
+			rank_board = veri
+			if base_menu != null and is_instance_valid(base_menu) and base_menu.visible:
+				base_menu.refresh()
+		"gg_ring":
+			toast(str(veri.get("text", "★ Yeni halka kazandın!")))
+		"gg_info":
+			gg_info = veri
+			_refresh_gate_site_visibility()
+			if base_menu != null and base_menu.visible:
+				base_menu.refresh()
+		"gg_activated":
+			var an := str(DOData.GALAXY_GATES.get(str(veri.get("gate", "")), {}).get("name", "Kapı"))
+			toast("★ %s aktif edildi! Şirketinin X-1 haritasında kapının yanında J tuşuna bas." % an)
+		"gg_return":
+			var rm := str(veri.get("map", ""))
+			if rm != "" and maps.has(rm):
+				if gg_cine_gate != "":
+					_gg_screen_flash(GG_CINE_COL.get(gg_cine_gate, Color(0.6, 0.9, 1.0)))
+				do_jump_to(rm)
+		"gg_go":
+			var key := str(veri.get("key", ""))
+			if key == "" or not DOData.is_gate_map(key):
+				return
+			gg_ret_map = str(veri.get("ret", cur))
+			gg_ret_pos = P.node.position if P != null else Vector3.ZERO
+			maps[key] = DOData.gate_map(str(veri.get("gate", "")), gg_ret_map, key)
+			gg_state = {}
+			var gsite := {}
+			for gs in gg_sites:
+				if str(gs.gate) == str(veri.get("gate", "")):
+					gsite = gs
+					break
+			if not gsite.is_empty() and gg_cine_t < 0.0 and P != null and is_instance_valid(P.node):
+				_gg_cine_start(str(veri.get("gate", "")), key, gsite)   # kapi seni yutar, sonra harita degisir
+			else:
+				do_jump_to(key)
+		"gg_state":
+			var prev_st := str(gg_state.get("st", ""))
+			var prev_g := int(gg_state.get("grp", 0))
+			gg_state = veri
+			gg_state_recv = clock
+			var st := str(veri.get("st", ""))
+			if st == "intro" and prev_st != "intro":
+				var nm := str(DOData.NPCS.get(str(veri.get("npc", "")), {}).get("name", ""))
+				toast("KAT %d/%d: %s" % [int(veri.get("wave", 0)) + 1, int(veri.get("waves", 10)), nm])
+			elif st == "fight" and (prev_st != "fight" or int(veri.get("grp", 0)) != prev_g):
+				toast("Dalga %d/%d geliyor!" % [int(veri.get("grp", 0)), int(veri.get("grps", 4))])
+			elif st == "open" and prev_st != "open":
+				toast("KAT %d TAMAMLANDI! Solda X-1 çıkışı, sağda sonraki kat kapısı açıldı." % int(veri.get("wave", 0)))
+		"gg_gates":
+			_gg_open_gates(veri)
+		"gg_next":
+			_gg_next_floor()
+		"gg_done":
+			_gate_done(veri)
+		"gg_fail":
+			toast(str(veri.get("text", "Kapı işlemi başarısız.")))
+		"gg_pulse_result":
+			_gg_pulse_result(veri)
+
+
+# ------------------------------------------------------------------ KAT BITINCE MERKEZDE ACILAN KAPILAR
+# Kapi icinde dalgalar bitmeden kapi GORUNMEZ; sunucu "gg_gates" gonderince merkezde X-1 cikisi (ve son kat degilse sonraki kat kapisi) cikar.
+func _gg_close_gates() -> void:
+	for i in range(portals.size() - 1, -1, -1):
+		if bool(portals[i].get("gg_exit", false)):
+			var nd = portals[i].get("node")
+			if nd != null and is_instance_valid(nd):
+				nd.queue_free()
+			portals.remove_at(i)
+
+
+func _gg_open_gates(veri: Dictionary) -> void:
+	if not DOData.is_gate_map(cur) or world == null:
+		return
+	_gg_close_gates()
+	var gid := DOData.gate_id_of_map(cur)
+	var ret := str(veri.get("ret", ""))
+	var specs: Array = [{"to": ret, "x": float(veri.get("rx", 0.0)), "y": float(veri.get("ry", 0.0)),
+		"col": Color("#36D5FF"), "style": "", "label": "KAPI: %s" % ret.to_upper()}]
+	if bool(veri.get("next", false)):
+		specs.append({"to": "@next", "x": float(veri.get("nx", 0.0)), "y": float(veri.get("ny", 0.0)),
+			"col": GATE_SITE_COLORS.get(gid, Color("#36D5FF")), "style": gid, "label": "SONRAKİ KAT"})
+	for sp in specs:
+		var g: Node3D = JumpGate.new().setup(sp.col, str(sp.style))
+		g.position = w2g(float(sp.x), float(sp.y))
+		world.add_child(g)
+		g.add_child(label_pro(str(sp.label), Vector3(0, 9, 0), Color(0.78, 0.93, 1.0), 30))
+		if g.has_method("burst"):
+			g.burst(1.0)
+		portals.append({"node": g, "to": str(sp.to), "pos": g.position, "gg_exit": true})
+
+
+# Sonraki kat kapisina girildi: kapilar kapanir, gemi haritanin ortasinda yeniden belirir.
+func _gg_next_floor() -> void:
+	jump_wait_until = -1.0
+	jump_t = -1.0
+	jump_to = null
+	_gg_close_gates()
+	if P == null or not is_instance_valid(P.node) or not maps.has(cur):
+		return
+	var tm = maps[cur]
+	var ctr := w2g(float(tm.w) / 2.0, float(tm.h) / 2.0)
+	P.node.position = Vector3(ctr.x, P.node.position.y, ctr.z)
+	dest = null
+	target = null
+	_jump_arrive_fx(cur)
+
+
+func _gate_done(veri: Dictionary) -> void:
+	var before_level: int = DOData.level_of(float(SV.xp))
+	var st: Dictionary = veri.get("state", {})
+	_apply_server_economy(st)
+	var ammo: Dictionary = veri.get("ammo", {}) if typeof(veri.get("ammo", {})) == TYPE_DICTIONARY else {}
+	var items: Dictionary = veri.get("items", {}) if typeof(veri.get("items", {})) == TYPE_DICTIONARY else {}
+	if not SV.has("ammo") or typeof(SV.ammo) != TYPE_DICTIONARY:
+		SV.ammo = {}
+	for aid in ammo.keys():
+		SV.ammo[str(aid)] = int(SV.ammo.get(str(aid), 0)) + int(ammo[aid])
+	if not SV.has("inv") or typeof(SV.inv) != TYPE_DICTIONARY:
+		SV.inv = {}
+	for iid in items.keys():
+		SV.inv[str(iid)] = int(SV.inv.get(str(iid), 0)) + int(items[iid])
+	if DOData.level_of(float(SV.xp)) > before_level:
+		toast("Seviye %d!" % DOData.level_of(float(SV.xp)))
+	var gname := str(DOData.GALAXY_GATES.get(str(veri.get("gate", "")), {}).get("name", "Kapı"))
+	toast("★ %s TAMAMLANDI! ★" % gname.to_upper())
+	var done_gid := str(veri.get("gate", ""))
+	var done_gates: Dictionary = gg_info.get("gates", {}) as Dictionary
+	if done_gates.has(done_gid) and typeof(done_gates[done_gid]) == TYPE_DICTIONARY:
+		(done_gates[done_gid] as Dictionary)["active"] = false   # tekrar aktif edilene kadar gorunmez
+	_refresh_gate_site_visibility()
+	toast("+%s Uridium   +%s UCB-100   +%s XP   +%s Şeref" % [_n(int(veri.get("uri", 0))), _n(int(ammo.get("x4", 0))), _n(int(veri.get("xp", 0))), _n(int(veri.get("hon", 0)))])
+	toast("+%d Xenomit   +%d Tamir Kuponu   +%d Log Disk" % [int(items.get("xenomit", 0)), int(items.get("repair_coupon", 0)), int(veri.get("logdisks", 0))])
+	if P != null:
+		popup_txt("KAPI TAMAMLANDI", P.node.position + Vector3(0.0, 1.5, 0.0), Color(1.0, 0.88, 0.4))
+
+
+# ------------------------------------------------------------------ GALAXY GATE ATLAMA SINEMATIGI
+# Sunucu "gg_go" ile girisi onaylayinca kapi sarj olur, enerji halkalari sikilasir, ekran kapinin rengiyle kararir
+# ve titrer, gemi spiral cizerek kapiya yutulur; sonra harita degisir (do_jump_to). Varista renkli perde sonerek acilir.
+const GG_CINE_TOTAL := 2.4
+const GG_CINE_COL := {"alpha": Color(0.45, 1.0, 0.3), "beta": Color(1.0, 0.55, 0.12), "gamma": Color(1.0, 0.1, 0.12)}
+const GG_CINE_TEXT := {
+	"alpha": "☣ ALFA KAPISI seni yutuyor…",
+	"beta": "☠ BETA KAPISI'nın gözü seni gördü…",
+	"gamma": "☠ GAMMA KAPISI kanlı ağzını açıyor…",
+}
+const GG_FADE_SHADER := "
+shader_type canvas_item;
+uniform vec4 tint : source_color = vec4(1.0, 0.1, 0.1, 1.0);
+uniform float amount = 0.0;
+uniform float fade = 0.0;
+void fragment() {
+	vec2 p = UV * 2.0 - 1.0;
+	float r = length(p);
+	float pulse = 0.8 + 0.2 * sin(TIME * 14.0);
+	float vig = smoothstep(0.25, 1.3, r) * amount * pulse;
+	float a = clamp(vig * 0.9 + fade, 0.0, 1.0);
+	vec3 c = mix(tint.rgb, tint.rgb * 0.08, clamp(fade, 0.0, 1.0));
+	COLOR = vec4(c, a);
+}
+"
+var gg_cine_t := -1.0              # <0: sinematik yok
+var gg_cine_key := ""
+var gg_cine_gate := ""
+var gg_cine_site: Dictionary = {}
+var gg_cine_from := Vector3.ZERO
+var gg_cine_ring_cd := 0.0
+var gg_cine_rect: ColorRect = null
+var gg_cine_mat: ShaderMaterial = null
+var gg_cine_fade := 0.0            # varista sonen tam ekran renk perdesi
+var gg_shake := 0.0                # kamera sarsinti genligi
+
+
+func _gg_cine_ensure_rect() -> void:
+	if gg_cine_rect != null and is_instance_valid(gg_cine_rect):
+		ui.move_child(gg_cine_rect, -1)
+		return
+	var sh := Shader.new()
+	sh.code = GG_FADE_SHADER
+	gg_cine_mat = ShaderMaterial.new()
+	gg_cine_mat.shader = sh
+	gg_cine_rect = ColorRect.new()
+	gg_cine_rect.material = gg_cine_mat
+	gg_cine_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	gg_cine_rect.visible = false
+	ui.add_child(gg_cine_rect)
+	gg_cine_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+
+func _gg_screen_flash(col: Color) -> void:
+	_gg_cine_ensure_rect()
+	gg_cine_mat.set_shader_parameter("tint", col)
+	gg_cine_mat.set_shader_parameter("amount", 1.0)
+	gg_cine_mat.set_shader_parameter("fade", 1.0)
+	gg_cine_fade = 1.0
+	gg_cine_rect.visible = true
+
+
+func _gg_cine_start(gate: String, key: String, site: Dictionary) -> void:
+	gg_cine_t = 0.0
+	gg_cine_key = key
+	gg_cine_gate = gate
+	gg_cine_site = site
+	gg_cine_ring_cd = 0.0
+	jump_wait_until = clock + 6.0
+	if P != null and is_instance_valid(P.node):
+		gg_cine_from = P.node.position
+	var gn = site.get("node")
+	if gn != null and is_instance_valid(gn) and gn.has_method("burst"):
+		gn.burst(0.8)
+	toast(str(GG_CINE_TEXT.get(gate, "Kapı seni içine çekiyor…")))
+	_gg_cine_ensure_rect()
+	gg_cine_mat.set_shader_parameter("tint", GG_CINE_COL.get(gate, Color(0.6, 0.9, 1.0)))
+	gg_cine_mat.set_shader_parameter("amount", 0.0)
+	gg_cine_mat.set_shader_parameter("fade", 0.0)
+	gg_cine_fade = 0.0
+	gg_cine_rect.visible = true
+
+
+func _gg_cine_update(dt: float) -> void:
+	if gg_cine_t < 0.0:
+		# varis sonrasi: perde sonerek acilir, sarsinti diner
+		if gg_cine_fade > 0.0:
+			gg_cine_fade = maxf(0.0, gg_cine_fade - dt * 1.4)
+			if gg_cine_mat != null:
+				gg_cine_mat.set_shader_parameter("fade", gg_cine_fade)
+				gg_cine_mat.set_shader_parameter("amount", gg_cine_fade)
+			if gg_cine_fade <= 0.0 and gg_cine_rect != null and is_instance_valid(gg_cine_rect):
+				gg_cine_rect.visible = false
+		gg_shake = maxf(0.0, gg_shake - dt * 3.0)
+		return
+	if P == null or not is_instance_valid(P.node):
+		gg_cine_t = -1.0
+		return
+	gg_cine_t += dt
+	var k: float = clampf(gg_cine_t / GG_CINE_TOTAL, 0.0, 1.0)
+	var col: Color = GG_CINE_COL.get(gg_cine_gate, Color(0.6, 0.9, 1.0))
+	var gn = gg_cine_site.get("node")
+	var gp: Vector3 = gg_cine_site.get("pos", P.node.position)
+	if gn != null and is_instance_valid(gn) and gn.has_method("set_charge"):
+		gn.set_charge(minf(1.0, k * 1.5))
+	# enerji halkalari ve kivilcimlar giderek sikilasir
+	gg_cine_ring_cd -= dt
+	if gg_cine_ring_cd <= 0.0:
+		gg_cine_ring_cd = lerpf(0.30, 0.08, k)
+		_fx_ring(Vector3(gp.x, 0.25, gp.z), col, 22.0, 3.0, 0.6, 0.5 + 0.4 * k)
+		if k > 0.35:
+			spark_burst(Vector3(gp.x, 0.8, gp.z), col, 6, 10.0 + 10.0 * k)
+	# gemi 0.25'ten sonra spiral cizerek kapinin merkezine cekilir ve kuculur
+	var pn: Node3D = P.node
+	dest = null
+	holding = false
+	spd_cur = 0.0
+	var u: float = clampf((k - 0.25) / 0.75, 0.0, 1.0)
+	if u <= 0.0:
+		gg_cine_from = pn.position
+	else:
+		var off: Vector3 = gg_cine_from - gp
+		off.y = 0.0
+		var e: float = u * u * (3.0 - 2.0 * u)
+		var np: Vector3 = gp + Basis(Vector3.UP, e * 9.0) * (off * (1.0 - e))
+		pn.position = Vector3(np.x, pn.position.y, np.z)
+		pn.scale = Vector3.ONE * lerpf(1.0, 0.08, e * e)
+	# kamera sarsintisi + kapi renginde titreyen kenar karartma
+	gg_shake = 0.15 + 0.9 * k * k
+	if gg_cine_rect != null and is_instance_valid(gg_cine_rect):
+		gg_cine_rect.visible = true
+		gg_cine_mat.set_shader_parameter("amount", clampf(k * 1.3, 0.0, 1.0))
+		gg_cine_mat.set_shader_parameter("fade", clampf((k - 0.82) / 0.18, 0.0, 1.0))
+	if gg_cine_t >= GG_CINE_TOTAL:
+		var key := gg_cine_key
+		gg_cine_t = -1.0
+		gg_cine_fade = 1.0
+		if gn != null and is_instance_valid(gn) and gn.has_method("burst"):
+			gn.burst(1.0)
+		pn.scale = Vector3.ONE
+		do_jump_to(key)
+
+
+# ------------------------------------------------------------------ GALAXY GATE JENERATORU (Galaxy Gates menusunde)
+# Sunucu otoriter: server_db.py gate_generator_pulse(). Bu taraf yalnizca istek yollar ve sonucu gosterir.
+const GG_COST_URI := 100
+const GG_BUSY_MS := 4000
+var gg_spin_busy := false
+var gg_spin_ms := 0                # son istegin zamani (Time.get_ticks_msec; oyun saati durunca da calisir)
+var gg_last_spin := ""             # menude gosterilen son basim sonucu
+var gg_last_spin_col := Color(0.8, 0.95, 1.0)
+var gg_batch_total := 0            # toplu basimda (5 / 10) istenen toplam; 0 = toplu basim yok
+var gg_batch_left := 0             # toplu basimda henuz yollanmamis basim sayisi
+var gg_batch_log: Array = []       # toplu basimda her basimin ozeti
+
+
+func _gg_menu_refresh() -> void:
+	if base_menu != null and base_menu.visible:
+		base_menu.refresh()
+
+
+# Cevap gelmezse (ag / eski sunucu) kilit 4 sn sonra kendiliginden acilir; buton sonsuza kadar pasif kalmaz.
+func gg_is_busy() -> bool:
+	if gg_spin_busy and Time.get_ticks_msec() > gg_spin_ms + GG_BUSY_MS:
+		gg_spin_busy = false
+	return gg_spin_busy
+
+
+func gate_pulse(count: int = 1) -> void:
+	if not net_on:
+		toast("Galaxy Gates yalnızca çevrimiçi modda oynanır.")
+		return
+	count = clampi(count, 1, 10)
+	if gg_is_busy() or gg_batch_total > 0:
+		return
+	if int(SV.get("uri", 0)) < GG_COST_URI * count:
+		toast("Yetersiz Uridium! (%s gerekli)" % _n(GG_COST_URI * count))
+		return
+	gg_batch_total = count if count > 1 else 0
+	gg_batch_left = 0
+	gg_batch_log = []
+	_gg_send_pulse(count)   # toplu basim TEK istekle gider; sunucu hepsini beklemeden art arda isler
+	_gg_menu_refresh()
+
+
+func _gg_send_pulse(count: int = 1) -> void:
+	gg_spin_busy = true
+	gg_spin_ms = Time.get_ticks_msec()
+	var stamp := gg_spin_ms
+	var tx_id := "%d_%d" % [int(Time.get_unix_time_from_system() * 1000.0), randi_range(1000, 9999)]
+	Net.send_event("gg_pulse", {"tx_id": tx_id, "count": count})
+	get_tree().create_timer(GG_BUSY_MS / 1000.0 + 0.2).timeout.connect(_gg_busy_timeout.bind(stamp))
+
+
+func _gg_busy_timeout(stamp: int) -> void:
+	if not (gg_spin_busy and gg_spin_ms == stamp):
+		return   # cevap geldi, bu zamanlayici gecersiz
+	gg_spin_busy = false
+	var txt := "Sunucudan yanıt gelmedi. Sunucuda güncel net_server.gd / server_db.py yüklü mü?"
+	if gg_batch_total > 0:
+		_gg_batch_finish(txt)
+	else:
+		gg_last_spin = txt
+		gg_last_spin_col = Color(1.0, 0.6, 0.45)
+		_gg_menu_refresh()
+	toast(txt)
+
+
+func _gg_batch_summary() -> String:
+	var counts := {}
+	var order: Array = []
+	for line in gg_batch_log:
+		var k := str(line)
+		if not counts.has(k):
+			counts[k] = 0
+			order.append(k)
+		counts[k] = int(counts[k]) + 1
+	var lines: Array = []
+	for k in order:
+		lines.append(("%s  (%d kez)" % [k, int(counts[k])]) if int(counts[k]) > 1 else str(k))
+	return "\n".join(lines)
+
+
+func _gg_batch_finish(note: String = "") -> void:
+	gg_spin_busy = false
+	var done := gg_batch_log.size()
+	var total := gg_batch_total
+	var summ := _gg_batch_summary()
+	gg_batch_total = 0
+	gg_batch_left = 0
+	gg_batch_log = []
+	if done > 0:
+		gg_last_spin = "%d / %d basım sonucu:\n%s" % [done, total, summ]
+		if note != "":
+			gg_last_spin += "\n" + note
+		toast("◆ %d basım tamamlandı" % done)
+	else:
+		gg_last_spin = note
+	gg_last_spin_col = Color(1.0, 0.6, 0.45) if note != "" else Color(1.0, 0.85, 0.4)
+	gate_request_info_now()
+	_gg_menu_refresh()
+
+
+func gate_arm(armed: bool) -> void:
+	if not net_on:
+		return
+	Net.send_event("gg_arm", {"armed": armed})
+
+
+func _gg_item_name(id: String) -> String:
+	match id:
+		"xenomit": return "Xenomit"
+		"nano_hull": return "Nano Hull"
+		"repair_coupon": return "Tamir Kuponu"
+		"logdisk": return "Log Disk"
+	return id
+
+
+func _gg_ammo_name(id: String) -> String:
+	for a in DOData.AMMO:
+		if str(a.id) == id:
+			return str(a.name)
+	return id
+
+
+func _gg_add_ammo(id: String, qty: int) -> void:
+	if qty <= 0:
+		return
+	if not SV.has("ammo") or typeof(SV.ammo) != TYPE_DICTIONARY:
+		SV.ammo = {}
+	SV.ammo[id] = int(SV.ammo.get(id, 0)) + qty
+
+
+func _gg_add_item(id: String, qty: int) -> void:
+	if qty <= 0:
+		return
+	if not SV.has("inv") or typeof(SV.inv) != TYPE_DICTIONARY:
+		SV.inv = {}
+	SV.inv[id] = int(SV.inv.get(id, 0)) + qty
+
+
+func _gg_pulse_result(veri: Dictionary) -> void:
+	if gg_batch_total <= 0:
+		gg_spin_busy = false   # toplu basimda kilit son sonuc gelince (_gg_batch_finish) acilir
+	if veri.has("new_uri") and int(veri.get("new_uri", -1)) >= 0:
+		SV.uri = int(veri.new_uri)
+	if not bool(veri.get("ok", false)):
+		var err := str(veri.get("error", ""))
+		var txt := "Jeneratör hatası: %s" % err
+		if err == "yetersiz_uridium":
+			txt = "Yetersiz Uridium! (%d gerekli)" % GG_COST_URI
+		elif err == "cok_hizli":
+			txt = "Çok hızlı, bir saniye sonra tekrar dene."
+		if gg_batch_total > 0:
+			_gg_batch_finish(txt)
+			toast(txt)
+			return
+		gg_last_spin = txt
+		gg_last_spin_col = Color(1.0, 0.6, 0.45)
+		toast(txt)
+		_gg_menu_refresh()
+		return
+	var rtype := str(veri.get("reward_type", ""))
+	var qty := int(veri.get("reward_amount", 0))
+	var detail: Dictionary = veri.get("reward_detail", {}) if typeof(veri.get("reward_detail", {})) == TYPE_DICTIONARY else {}
+	var mult_used := int(veri.get("mult_used", 0))
+	var gen: Dictionary = veri.get("gen", {}) if typeof(veri.get("gen", {})) == TYPE_DICTIONARY else {}
+	var msg := ""
+	var col := Color(0.8, 0.95, 1.0)
+	match rtype:
+		"ammo":
+			var aid := str(detail.get("ammo_id", "x1"))
+			_gg_add_ammo(aid, qty)
+			msg = "%s × %s" % [_gg_ammo_name(aid), _n(qty)]
+		"xenomit", "nano_hull", "repair_coupon":
+			_gg_add_item(rtype, qty)
+			msg = "%d × %s" % [qty, _gg_item_name(rtype)]
+		"logdisk":
+			var got := int(veri.get("logdisk_granted", 0))
+			msg = ("%d × Log Disk" % got) if got > 0 else "Log Disk (Ar-Ge sınırına ulaştın)"
+		"part":
+			var pi: Dictionary = detail.get("part", {}) if typeof(detail.get("part", {})) == TYPE_DICTIONARY else {}
+			var gname := str(DOData.GALAXY_GATES.get(str(pi.get("gate", "")), {}).get("name", "Kapı"))
+			var granted := int(pi.get("granted", 0))
+			col = Color(1.0, 0.85, 0.4)
+			if bool(veri.get("duplicate", false)) and not bool(veri.get("auto_used", false)):
+				msg = "%s: tekrarlanan parça → çarpan x%d" % [gname, int(gen.get("mult", 0))]
+			else:
+				msg = "%s: +%d parça" % [gname, granted]
+				if int(pi.get("surplus", 0)) > 0:
+					var sid := str(pi.get("surplus_ammo_id", "x4"))
+					var sq := int(pi.get("surplus_ammo", 0))
+					_gg_add_ammo(sid, sq)
+					msg += "  (fazla %d parça → %s × %s)" % [int(pi.surplus), _gg_ammo_name(sid), _n(sq)]
+		_:
+			msg = "?"
+	if bool(veri.get("auto_used", false)):
+		msg += "  [x%d çarpan otomatik kullanıldı]" % mult_used
+	elif mult_used > 1:
+		msg += "  [x%d çarpan]" % mult_used
+	if gg_batch_total > 0:
+		# toplu basim: tek tek toast yok; ozet en sonda gosterilir
+		gg_batch_log.append(msg)
+		if gg_batch_log.size() >= gg_batch_total:
+			_gg_batch_finish()
+		return
+	gg_last_spin = msg
+	gg_last_spin_col = col
+	toast("◆ " + msg)
+	gate_request_info_now()
+	_gg_menu_refresh()
+
+
+func gate_request_info_now() -> void:
+	gg_info_req_t = -100.0
+	gate_request_info()
+
+
+func _update_gate_hud() -> void:
+	_update_gate_site_hint()
+	_update_gate_choice_box()
+	var active: bool = running and DOData.is_gate_map(cur) and not gg_state.is_empty()
+	if gg_lbl == null or not is_instance_valid(gg_lbl):
+		if not active:
+			return
+		gg_lbl = _make_safe_label()
+	gg_lbl.visible = active
+	if not active:
+		return
+	var s: Dictionary = gg_state
+	var gname := str(DOData.GALAXY_GATES.get(str(s.get("gate", "")), {}).get("name", "Kapı"))
+	var nm := str(DOData.NPCS.get(str(s.get("npc", "")), {}).get("name", ""))
+	var left := int(ceil(maxf(0.0, float(s.get("t", 0.0)) - (clock - gg_state_recv))))
+	var st := str(s.get("st", ""))
+	var head := "%s  —  Kat %d/%d: %s" % [gname, mini(int(s.get("wave", 0)) + 1, int(s.get("waves", 10))), int(s.get("waves", 10)), nm]
+	var txt := ""
+	var col := Color(1.0, 0.82, 0.35)
+	match st:
+		"intro":
+			txt = "%s\nHazırlan! İlk dalga %d sn içinde geliyor." % [head, left]
+		"open":
+			txt = "%s\nKat %d/%d tamamlandı. Solda X-1 çıkışı, sağda sonraki kat kapısı." % [gname, int(s.get("wave", 0)), int(s.get("waves", 10))]
+			col = Color(0.55, 0.95, 0.72)
+		"reward":
+			txt = "%s\nÖdüller hesabına yazılıyor..." % gname
+		"done":
+			txt = "%s TAMAMLANDI ★\nÖdüller hesabına eklendi. X-1 kapısına girerek ayrılabilirsin." % gname
+			col = Color(0.55, 0.95, 0.72)
+		_:
+			if int(s.get("grp", 0)) < int(s.get("grps", 4)):
+				txt = "%s\nDalga %d/%d   •   Sıradaki dalga %d sn   •   Kalan: %d" % [head, int(s.get("grp", 0)), int(s.get("grps", 4)), left, int(s.get("alive", 0))]
+			else:
+				txt = "%s\nSon dalga geldi!   •   Kalan: %d" % [head, int(s.get("alive", 0))]
+	_style_safe_label(gg_lbl, txt, col, 118.0, get_viewport().get_visible_rect().size)
+
+
 func save_game() -> void:
 	if SV.is_empty() or P == null:
 		return
-	SV.map = cur
-	SV.px = P.node.position.x
-	SV.pz = P.node.position.z
+	if DOData.is_gate_map(cur):
+		SV.map = gg_ret_map   # kapidayken kayit: girdigin haritadaki konum
+		SV.px = gg_ret_pos.x
+		SV.pz = gg_ret_pos.z
+	else:
+		SV.map = cur
+		SV.px = P.node.position.x
+		SV.pz = P.node.position.z
 	_sync_loadout()
 	if save_path == "":
 		return
@@ -4061,6 +4836,10 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 	extras.reset()
 	_make_player()
 	_build_plate()
+	if not maps.has(str(SV.map)):
+		SV.map = str(DOData.FACTIONS[int(SV.faction)].home)
+		SV.px = 0.0
+		SV.pz = 0.0
 	var m = maps[SV.map]
 	var arrive := w2g(m.w / 2.0, m.h / 2.0)
 	if m.base != null:
@@ -4091,6 +4870,9 @@ func _start_run(is_new: bool, skip_connect: bool = false) -> void:
 
 
 func load_map(name: String, arrive: Vector3) -> void:
+	if DOData.is_gate_map(cur) and cur != name:
+		maps.erase(cur)   # kapi ornegi gecici: haritadan cikinca istemci kaydi da silinir
+		gg_state = {}
 	cam_focus_ready = false
 	map_gen += 1
 	cur = name
@@ -4126,6 +4908,7 @@ func load_map(name: String, arrive: Vector3) -> void:
 	fire = false
 	spd_cur = 0.0
 	jump_t = -1.0
+	gg_cine_t = -1.0
 	jump_wait_until = -1.0
 	prot_kind = 0
 	net_prot = 0     # yeni haritada koruma durumunu sunucu yeniden hesaplar (s_prot)
@@ -4155,17 +4938,33 @@ func load_map(name: String, arrive: Vector3) -> void:
 		var hq_color: Color = CMS_FACTION_COLORS.get(int(m.faction), Color("#8658A8"))
 		var hq_lbl := label_pro("%s ÜSSÜ" % DOData.FACTIONS[m.faction].name, base_pos + Vector3(0, 14, 0), hq_color.lightened(0.55), 36)
 		world.add_child(hq_lbl)
+	var gg_portal_style := str(m.get("gate", ""))   # Galaxy Gate ornegindeyse donus kapisi da kapinin korkunc gorunumunu alir
 	for p in m.portals:
 		var g: Node3D
 		if p.get("wormhole", false):
 			g = Node3D.new()   # Solucan deligi gorunmezdir
 		else:
-			g = JumpGate.new().setup(Color("#36D5FF"))   # kod ile cizilen, animasyonlu NOVAGATE kapisi (jumpgate.gd)
+			g = JumpGate.new().setup(GATE_SITE_COLORS.get(gg_portal_style, Color("#36D5FF")), gg_portal_style)   # kod ile cizilen, animasyonlu NOVAGATE kapisi (jumpgate.gd)
 		g.position = w2g(p.x, p.y)
 		world.add_child(g)
 		if not p.get("wormhole", false):
 			g.add_child(label_pro("KAPI: %s" % str(p.to).to_upper(), Vector3(0, 9, 0), Color(0.78, 0.93, 1.0), 30))
 		portals.append({"node": g, "to": p.to, "pos": g.position})
+	# Galaxy Gate kapilari: yalnizca oyuncunun KENDI sirketinin X-1 haritasinda (data.gd "gates")
+	gg_sites.clear()
+	if m.get("gates") != null and int(m.get("faction", 0)) == int(SV.get("faction", 0)):
+		for gs in m.gates:
+			var gcol: Color = GATE_SITE_COLORS.get(str(gs.gate), Color("#36D5FF"))
+			var gnode: Node3D = JumpGate.new().setup(gcol, str(gs.gate))   # her kapinin kendine ozel korkunc gorunumu
+			gnode.scale = Vector3.ONE * 1.25
+			gnode.position = w2g(float(gs.x), float(gs.y))
+			world.add_child(gnode)
+			var gnm := str(DOData.GALAXY_GATES.get(str(gs.gate), {}).get("name", "Kapı"))
+			gnode.add_child(label_pro(gnm.to_upper(), Vector3(0, 9, 0), gcol.lightened(0.4), 30))
+			gg_sites.append({"gate": str(gs.gate), "pos": gnode.position, "node": gnode})
+		_refresh_gate_site_visibility()   # aktif olmayan kapilar gizli baslar
+		if net_on:
+			gate_request_info()
 	# NPC dogumu: yapilandirilmis "zones" (dogus bolgeleri/koordinatlari) tercih edilir.
 	if not net_on:
 		_spawn_map_npcs(m)   # cok oyunculuda NPC'leri sunucu dogurur
@@ -4510,10 +5309,16 @@ func _spot_free(pos: Vector3, m: Dictionary, used: Array) -> bool:
 func _zone_spot(m: Dictionary, z: Dictionary, used: Array) -> Vector3:
 	if z.has("fixed"):
 		var fp: Vector3 = w2g(float(z["fixed"][0]), float(z["fixed"][1]))
+		var bd: Array = z.get("bounds", [])
 		for gi in 24:
 			if _spot_free(fp, m, used):
 				return fp
-			fp += Vector3(randf_range(-1600.0, 1600.0), 0.0, randf_range(-1600.0, 1600.0)) * DOData.S
+			if bd.size() == 4:
+				# Sektor sinirlari varsa (Cubikon): yeni nokta YALNIZCA sektorun icinden secilir, disina tasmaz.
+				var mg: float = float(DOData.CUBIKON.get("sector_margin", 600.0))
+				fp = w2g(randf_range(float(bd[0]) + mg, float(bd[2]) - mg), randf_range(float(bd[1]) + mg, float(bd[3]) - mg))
+			else:
+				fp += Vector3(randf_range(-1600.0, 1600.0), 0.0, randf_range(-1600.0, 1600.0)) * DOData.S
 		return fp
 	var fa: Array = z.get("area", [1500.0, 1500.0, float(m.w) - 1500.0, float(m.h) - 1500.0])
 	for gi in 48:
@@ -4693,7 +5498,7 @@ func _update_guard(e: Dictionary, en: Node3D, dvec: Vector3, L: float, dt: float
 		en.position.x = hpos.x + gcl.x
 		en.position.z = hpos.z + gcl.z
 	# Ates yalnizca oyuncu Cubikonun menzilindeyken; sayac sadece menzildeyken isler (esgudum olmasin).
-	var engaged: bool = pflat.length() <= float(C.engage_range) * DOData.S and L <= float(C.guard_range) * DOData.S
+	var engaged: bool = pflat.length() <= float(C.engage_range) * DOData.S and L <= minf(float(C.guard_range), DOData.NPC_LASER_RANGE) * DOData.S
 	if engaged and not extras.untargetable():
 		face(en, d_to_player_dir(en, tnode), dt)
 		var cd_prev: float = e.cd
@@ -4744,6 +5549,32 @@ const PROTEGIT_MODELS := ["protegit"]
 const PROTEGIT_MAX_SIZE := 1.5   # Protegit azami gorsel boyutu (Cubikon = 20)
 
 
+var _cubikon_model_cache: String = ""
+
+
+# res://models/ altinda Cubikon'a ait .glb dosyasini bulur (ad kalibi: cubikon / cubicon / kucubium...).
+# Sonuc onbellege alinir; bulunamazsa ASLA Kristallon'a dusmez.
+func _find_cubikon_model() -> String:
+	if _cubikon_model_cache != "":
+		return _cubikon_model_cache
+	for nm in CUBIKON_MODELS:
+		if ResourceLoader.exists("res://models/%s.glb" % nm):
+			_cubikon_model_cache = nm
+			return nm
+	var da := DirAccess.open("res://models")
+	if da != null:
+		for f in da.get_files():
+			var fn: String = str(f).replace(".import", "").replace(".remap", "")
+			if not fn.to_lower().ends_with(".glb"):
+				continue
+			var low: String = fn.to_lower()
+			if low.contains("cubikon") or low.contains("cubicon") or low.contains("kucubium") or low.contains("kucurbium"):
+				_cubikon_model_cache = fn.get_basename()
+				return _cubikon_model_cache
+	push_warning("Cubikon modeli bulunamadi: res://models/cubikon.glb ekle. Kristallon gorseli KULLANILMAZ; gecici asteroid modeli kullaniliyor.")
+	return "asset-mmo-asteroid"
+
+
 func _npc_model(id: String, fallback: String) -> String:
 	if id == "protegit":
 		for nm in PROTEGIT_MODELS:
@@ -4751,10 +5582,7 @@ func _npc_model(id: String, fallback: String) -> String:
 				return nm
 		return fallback   # protegit.glb yoksa data.gd'deki yedek model
 	if id == "cubikon":
-		for nm in CUBIKON_MODELS:
-			if ResourceLoader.exists("res://models/%s.glb" % nm):
-				return nm
-		push_warning("Cubikon modeli bulunamadi (res://models/ icinde cubikon.glb ekle); yedek model kullaniliyor.")
+		return _find_cubikon_model()   # data.gd'deki "model" alanina (kristallon) hicbir kosulda bakilmaz
 	return fallback
 
 
@@ -4924,6 +5752,19 @@ func target_ok(e) -> bool:
 	return float(e.get("ema_until", 0.0)) <= clock
 
 
+# Hedef, sunucunun GERCEK korumada gosterdigi (guvenli bolge / kapi) bir oyuncu mu?
+func target_protected(e) -> bool:
+	return net_on and e != null and bool(e.get("player", false)) and bool(e.get("safe", false))
+
+
+# Korumadaki oyuncuya ates etme: atis kesilir, kisa uyari gosterilir. register_attack() CAGRILMAZ (kendi korumam kalkmaz).
+func refuse_protected(e) -> void:
+	_set_fire(false)
+	if clock - last_safe_tgt_t > 1.5:
+		last_safe_tgt_t = clock
+		toast("%s güvenli bölgede!" % str(e.get("name", "Oyuncu")))
+
+
 func _pick_enemy(hit: Vector3):
 	var best = null
 	var bd := 1e9
@@ -4937,6 +5778,16 @@ func _pick_enemy(hit: Vector3):
 			bd = d
 			best = e
 	return best
+
+
+# Grup icin secili ayni sirket oyuncusu (halka cizilir); yoksa/haritadan ciktiysa null.
+func _sel_friend_ent():
+	if dohud == null or int(dohud.grp_sel) == 0 or not net_on or Net.gm == null:
+		return null
+	var ent = Net.gm.players.get(int(dohud.grp_sel))
+	if ent == null or not is_instance_valid(ent.node) or not bool(ent.get("friendly", false)):
+		return null
+	return ent
 
 
 func _left_press(pos: Vector2, dbl: bool) -> void:
@@ -5085,6 +5936,10 @@ func fire_rocket(silent: bool = false) -> void:
 		if not silent:
 			toast("Önce bir düşman hedefle.")
 		return
+	if target_protected(target):
+		if not silent:
+			refuse_protected(target)
+		return
 	if int(SV.get("rockets", 0)) <= 0:
 		rocket_auto = false
 		toast("R-310 roketin kalmadı; Mağaza > Cephane'den al.")
@@ -5138,6 +5993,10 @@ func _select_next() -> void:
 func _try_jump() -> void:
 	if jump_t >= 0.0 or clock < jump_wait_until:
 		return
+	var gsite: Dictionary = _gate_site_near()
+	if not gsite.is_empty() and not DOData.is_gate_map(cur):
+		gate_enter(str(gsite.gate))   # Galaxy Gate: sunucu parca/aktiflik/menzili dogrular
+		return
 	for p in portals:
 		if P.node.position.distance_to(p.pos) < DOData.PORTAL_RANGE * DOData.S:
 			if not net_on:
@@ -5150,7 +6009,7 @@ func _try_jump() -> void:
 			jump_arrive_t = -1.0
 			if is_instance_valid(p.node) and p.node.has_method("burst"):
 				p.node.burst(0.35)   # kapi uyanir
-			toast("Atlama basladi: " + ("Solucan deligi" if str(p.to) == "random" else str(p.to)))
+			toast("Atlama basladi: " + ("Solucan deligi" if str(p.to) == "random" else ("Sonraki kat" if str(p.to) == "@next" else str(p.to))))
 			return
 
 
@@ -5261,6 +6120,8 @@ func do_jump_to(dest_name: String) -> void:
 			break
 	if not found and tm.base != null:
 		arrive = w2g(tm.base.x, tm.base.y) + Vector3(10, 0, 10)
+	if DOData.is_gate_map(cur) and dest_name == gg_ret_map and gg_ret_pos != Vector3.ZERO:
+		arrive = gg_ret_pos   # Galaxy Gate'ten donus: girdigin kapi noktasinda belir
 	load_map(dest_name, arrive)
 	_jump_arrive_fx(from_name)
 	if not net_on:
@@ -5331,6 +6192,7 @@ func _style_safe_label(l: Label, txt: String, col: Color, y: float, vs: Vector2)
 func _update_safe_labels(dt: float) -> void:
 	if dohud == null:
 		return
+	_update_gate_hud()
 	if lbl_safe == null or not is_instance_valid(lbl_safe):
 		lbl_safe = _make_safe_label()
 		lbl_safe_warn = _make_safe_label()
@@ -5520,6 +6382,9 @@ func _bolt_hit(b: Dictionary) -> void:
 		_sab_hit(b, pos, col, vol)
 		return
 	var e = b.tgt
+	if target_protected(e):
+		impact(b.last, b.col, false, 0.5)   # hedef bu arada guvenli bolgeye girdi: hasar / emilim yok
+		return
 	if e == null:
 		# dusman mermisi bize ulasti
 		if randf() < skill_bonus("evasion"):   # Evasive Maneuvers: isabet azalir
@@ -5643,14 +6508,14 @@ func _volley_text(vol: Dictionary) -> void:
 func _sab_hit(b: Dictionary, pos: Vector3, col: Color, vol: Dictionary) -> void:
 	var e = b.tgt
 	var alive: bool = e != null and e.hp > 0.0 and is_instance_valid(e.node)
-	if not alive:
+	if not alive or target_protected(e):   # korumadaki oyuncudan kalkan emilmez
 		vol.left -= 1
 		if vol.left <= 0:
 			_volley_text(vol)
 		return
 	var ab := 0.0
-	if e.sh > 1.0 and not bool(e.get("player", false)):
-		# hedefin kalkani var: kalkani em, bize ekle (maksimumu asma)
+	if e.sh > 1.0:
+		# hedefin kalkani var (NPC VE oyuncu: sunucu oyuncuda da kalkani emer, s_drain ile kurbana bildirir): kalkani em, bize ekle (maksimumu asma)
 		ab = minf(e.sh, float(b.dmg))
 		e.sh -= ab
 		P.sh = minf(max_sh(), P.sh + ab)
@@ -5800,7 +6665,7 @@ func popup_txt(text: String, pos: Vector3, col: Color) -> void:
 	pops.append({"node": l, "t": 0.0})
 
 
-func hurt(dmg: float, pierce_shield := false) -> void:
+func hurt(dmg: float, pierce_shield := false, quiet := false) -> void:
 	if wrecked:
 		return   # enkaz (tamir bekleyen) gemi tekrar patlamaz
 	if extras != null and extras.shield_active():
@@ -5815,7 +6680,8 @@ func hurt(dmg: float, pierce_shield := false) -> void:
 	var a := 0.0 if pierce_shield else minf(P.sh, dmg * absorb())
 	P.sh -= a
 	P.hp -= dmg - a
-	popup_txt("-" + _n(dmg), P.node.position, Color(1.0, 0.4, 0.3) if a < dmg * 0.5 else Color(0.5, 0.8, 1.0))
+	if not quiet:
+		popup_txt("-" + _n(dmg), P.node.position, Color(1.0, 0.4, 0.3) if a < dmg * 0.5 else Color(0.5, 0.8, 1.0))
 	if P.hp <= 0.0:
 		_die()
 
@@ -6114,7 +6980,13 @@ func _hp_origins(unit: Node3D, dir: Vector3) -> Array:
 
 
 func player_volley(po: Vector3) -> void:
-	var las: Array = cfg().las
+	var las: Array = (cfg().las as Array).duplicate()
+	var drone_only := las.is_empty()
+	if las.is_empty():
+		# Gemide lazer yoksa ama droidlere lazer takiliysa onlar atesler (droid lazeri gemiye etki eder).
+		for did in drone_items(cfg()):
+			if DOData.LASERS.has(did):
+				las.append(did)
 	var n: int = las.size()
 	if n == 0:
 		if clock - last_nolaser > 4.0:
@@ -6147,8 +7019,9 @@ func player_volley(po: Vector3) -> void:
 	Sfx.play(id)   # bu salvoda hangi muhimmat (x1/x2/x3/x4/rsb) atiliyorsa onun sesi
 	register_attack()   # guvenli bolgeden ates acmak korumayi derhal kaldirir (hedef NPC de olsa oyuncu da olsa)
 	var total := 0.0
-	for l in las:
-		total += float(DOData.LASERS[l].dmg)
+	if not drone_only:
+		for l in las:
+			total += float(DOData.LASERS[l].dmg)
 	total += drone_laser_dmg()
 	total *= float(_ammo_mult(id)) * dmg_mult()
 	total *= randf_range(0.88, 1.12)  # her salvoda hafif hasar değişimi (sabit vuruş yok)
@@ -6281,6 +7154,15 @@ func _spawn_player_bolt(j: int, kind: String, ammo_id: String, dmg: float, vol: 
 		_fx_sphere(from_p, acol.lerp(Color(1, 1, 1), 0.45), 0.28, 1.15, 0.11, 0.9)
 
 
+# Gorsel butcesi asildiginda NPC atisi: lazer/efekt/ses/yazi olmadan ayni hasar kurallari (iska dahil).
+func _npc_shot_lite(dmg: float, gen: int) -> void:
+	if gen != map_gen or P == null or not running or in_safe or extras.untargetable():
+		return
+	if randf() < skill_bonus("evasion"):
+		return
+	hurt(dmg, false, true)
+
+
 func _npc_bolt(e: Dictionary, j: int, dmg: float, gen: int) -> void:
 	if gen != map_gen or P == null or not running or in_safe or extras.untargetable():
 		return
@@ -6308,6 +7190,7 @@ func _process(dt: float) -> void:
 	dt = minf(dt, 0.05)
 	clock += dt
 	if running:
+		_gg_cine_update(dt)
 		_update_jump_fx(dt)
 		_update_game(dt)
 	else:
@@ -6412,7 +7295,10 @@ func _update_camera(dt: float, po: Vector3, max_spd: float, range_u: float) -> v
 	var pitch: float = deg_to_rad(CAM_PITCH_DEG)
 	var dist: float = CAM_DIST * zoom_cur * cam_auto
 	var offset := Vector3(0.0, sin(pitch), cos(pitch)) * dist
-	cam.look_at_from_position(cam_focus + offset, cam_focus, Vector3.UP)
+	var shake_v := Vector3.ZERO
+	if gg_shake > 0.001:
+		shake_v = Vector3(randf_range(-1.0, 1.0), randf_range(-0.5, 0.5), randf_range(-1.0, 1.0)) * gg_shake   # Galaxy Gate atlama sarsintisi
+	cam.look_at_from_position(cam_focus + offset + shake_v, cam_focus + shake_v, Vector3.UP)
 	# 5) Dinamik FOV: yakinken dar, uzakken genis
 	var fov_t: float = lerpf(CAM_FOV_NEAR, CAM_FOV_FAR, inverse_lerp(0.6, 1.8, zoom_cur))
 	cam_fov_cur = lerpf(cam_fov_cur, fov_t, 1.0 - exp(-6.0 * dt))
@@ -6517,6 +7403,8 @@ func _update_game(dt: float) -> void:
 	po = pn.position
 
 	# Oyuncu atisi: yalnizca zamanlayici belirler (PLAYER_FIRE_INTERVAL). Ucustaki onceki mermi atisi geciktirmez.
+	if target != null and fire and target_protected(target):
+		refuse_protected(target)   # kapida / guvenli bolgede duran oyuncuya vurulmaz
 	if target != null and fire and P.cd <= 0.0 and tdist <= range_u:
 		P.cd = DOData.rearm_cd(p_cd_prev, P.cd, dt, DOData.PLAYER_FIRE_INTERVAL)
 		player_volley(po)
@@ -6567,12 +7455,13 @@ func _update_game(dt: float) -> void:
 			continue
 		if not in_safe and not extras.untargetable() and ((e.d.aggr and L < aggro_u) or (e.aggro and L < aggro_u * 3.0)):
 			e.aggro = true
-			if L > range_u * 0.6:
+			var npc_range_u: float = DOData.NPC_LASER_RANGE * DOData.S   # NPC menzili oyuncunun %80'i
+			if L > npc_range_u * 0.6:
 				en.position += d.normalized() * spd * dt
 			face(en, d, dt)
 			var n_cd_prev: float = e.cd
 			e.cd -= dt
-			if L < range_u and e.cd <= 0.0:
+			if L < npc_range_u and e.cd <= 0.0:
 				e.cd = DOData.rearm_cd(n_cd_prev, e.cd, dt, DOData.NPC_FIRE_INTERVAL)
 				# TEK atis olayi: tek lazer gorseli + tek hasar (hasar mermi hedefe ulasinca bir kez uygulanir)
 				_npc_bolt(e, 0, DOData.npc_shot_damage(e.d), map_gen)
@@ -6760,12 +7649,22 @@ func _update_game(dt: float) -> void:
 	_update_drones(dt)
 
 	# Hedef halkasi: hedef NPC'nin tam merkezinde, tum NPC'lerde ayni sabit boyutta.
+	var sf = _sel_friend_ent()
 	if target != null and target.hp > 0.0 and is_instance_valid(target.node):
 		var tgp: Vector3 = (target.node as Node3D).global_position
 		target_ring.visible = true
 		target_ring.global_position = Vector3(tgp.x, -0.3, tgp.z)
 		target_ring.scale = RING_SCALE
 		ring_mat.albedo_color = Color(1.0, 0.22, 0.12, 0.85) if fire else Color(1.0, 0.55, 0.18, 0.7)
+		if dohud != null and int(dohud.grp_sel) != 0:
+			dohud.grp_sel = 0   # dusman hedefi secilince dost secimi birakilir
+	elif sf != null:
+		# Secili ayni sirket oyuncusu: ayni halka, yesil (hedef degil, ates edilemez)
+		var fp: Vector3 = (sf.node as Node3D).global_position
+		target_ring.visible = true
+		target_ring.global_position = Vector3(fp.x, -0.3, fp.z)
+		target_ring.scale = RING_SCALE
+		ring_mat.albedo_color = Color(0.25, 1.0, 0.45, 0.8)
 	else:
 		target_ring.visible = false
 	# Hedef noktası dairesi kaldırıldı (DarkOrbit'te yok).

@@ -31,6 +31,7 @@ var net: Node
 var srv                          # NetServer (players sozlugu icin)
 var d: Dictionary = {}
 var _chk: float = 0.0
+var _fresh: Dictionary = {}     # oyuncu anahtari -> bu oturumda sunucu envanterine yazilip istemciye yollanan posta idleri
 var _rng := RandomNumberGenerator.new()
 
 
@@ -248,7 +249,63 @@ func _push_mail(key: String) -> void:
 	var box: Array = (d["mail"] as Dictionary).get(key, [])
 	if box.is_empty():
 		return
-	net.rpc_id(peer, "s_auc_mail", box.duplicate(true))
+	var acct: int = 0
+	if srv.players.has(peer):
+		acct = int(srv.players[peer].get("account_id", 0))
+	var fresh: Array = _fresh.get(key, [])
+	var keep: Array = []
+	var out: Array = []
+	var changed := false
+	for m in box:
+		if str(m.get("kind", "")) != "item":
+			keep.append(m)
+			out.append(m)
+			continue
+		var mid: int = int(m.get("id", 0))
+		if bool(m.get("granted", false)):
+			if fresh.has(mid):
+				keep.append(m)      # bu oturumda yazildi, istemci ack edene kadar tekrar gonder
+				out.append(m)
+			else:
+				changed = true      # onceki oturumda sunucuya yazilmis: giriste zaten yuklendi, postayi at
+			continue
+		if acct <= 0:
+			keep.append(m)
+			continue
+		# ESKI HATA: urun sadece istemcide yerel kayda yaziliyordu. Simdi once SUNUCU envanterine yaz.
+		var r: Dictionary = srv.db_send("auction_grant_item", {
+			"account_id": acct,
+			"item_id": str(m.get("item", "")),
+			"quantity": int(m.get("qty", 1)),
+			"tx_id": "auc:%s:%d" % [key, mid],
+		})
+		if bool(r.get("ok", false)):
+			m["granted"] = true
+			changed = true
+			fresh.append(mid)
+			keep.append(m)
+			out.append(m)
+			# sunucunun bellekteki kopyasini da guncelle
+			var p: Dictionary = srv.players[peer]
+			if p.get("_sv_inventory", null) is Dictionary:
+				var iv: Dictionary = p["_sv_inventory"]
+				iv[str(m.get("item", ""))] = int(iv.get(str(m.get("item", "")), 0)) + int(m.get("qty", 1))
+		else:
+			keep.append(m)          # posta kaybolmaz, sonra tekrar denenir
+			var err: String = str(r.get("error", ""))
+			print("[ACIK ARTIRMA] teslim edilemedi: %s -> %s (%s)" % [key, str(m.get("item", "")), err])
+			if err == "drone_cap":
+				_notify(key, "Açık artırma ödülün hazır ama droid sınırı dolu. Yer açınca otomatik teslim edilir.")
+	_fresh[key] = fresh
+	if changed:
+		if keep.is_empty():
+			(d["mail"] as Dictionary).erase(key)
+		else:
+			(d["mail"] as Dictionary)[key] = keep
+		_save()
+	if out.is_empty():
+		return
+	net.rpc_id(peer, "s_auc_mail", out.duplicate(true))
 
 
 func on_ack(peer: int, ids: Array) -> void:
@@ -290,6 +347,7 @@ func _mark_op(key: String, op: int) -> void:
 
 # ------------------------------------------------------------------ istemci istekleri
 func on_player_ready(peer: int) -> void:
+	_fresh.erase(_key(peer))   # yeni oturum: istemci envanteri zaten sunucudan yuklendi
 	_send_state(peer)
 	_push_mail(_key(peer))
 

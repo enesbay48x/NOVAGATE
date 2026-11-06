@@ -7,6 +7,10 @@ const S := 0.04              # 1 DarkOrbit birimi = 0.04 Godot birimi (harita 21
 const SPEEDMULT := 2.0       # gemi hizi carpani (gercek hiz cok yavas hissettirir; 1.0 yaparsan orijinal)
 const LASER_BASE := 60.0     # ~ lazer basina hasar
 const LASER_RANGE := 700.0   # ~ lazer menzili (DO birimi)
+const NPC_LASER_RANGE_FRAC := 0.8                      # NPC lazer menzili = oyuncu lazer menzilinin %80'i (ornek: oyuncu 100 -> NPC 80)
+const NPC_LASER_RANGE := LASER_RANGE * NPC_LASER_RANGE_FRAC   # TUM NPC'ler (oyun + Galaxy Gate) bu menzilden ates eder
+const GATE_NPC_LASER_RANGE_FRAC := 0.75                # Galaxy Gate NPC'leri: oyuncu lazer menzilinin %75'i
+const GATE_NPC_LASER_RANGE := LASER_RANGE * GATE_NPC_LASER_RANGE_FRAC
 const AGGRO_RANGE := 800.0   # ~ saldirgan NPC algilama mesafesi
 const SAFE_RADIUS := 1500.0  # ~ ust guvenli bolge yaricapi
 const PORTAL_RANGE := 350.0
@@ -121,7 +125,7 @@ const NPCS := {
 	"uber_kristallon": {"name": "Uber Kristallon", "model": "kristallon", "sz": 18.0, "hp": 2400000, "sh": 1800000, "spd": 240, "dmg": 9000, "aggr": false, "xp": 307200, "hon": 1536, "cr": 2457600, "uri": 768, "resp": 90.0},
 	"pilot": {"name": "Rakip Pilot", "model": "goliath", "sz": 7.0, "hp": 256000, "sh": 100000, "spd": 300, "dmg": 3000, "aggr": true, "xp": 51200, "hon": 512, "cr": 0, "uri": 512, "resp": 30.0},
 	"streuner_boss": {"name": "StreuneR", "model": "streuner", "sz": 10.0, "hp": 30000, "sh": 20000, "spd": 200, "dmg": 350, "dmg_max": 500, "aggr": true, "xp": 3200, "hon": 64, "cr": 6400, "uri": 8, "resp": 20.0},
-	"cubikon": {"name": "Cubikon", "model": "kristallon", "sz": 20.0, "hp": 1600000, "sh": 1200000, "spd": 100, "dmg": 0, "aggr": false, "xp": 512000, "hon": 4096, "cr": 1638400, "uri": 1024, "resp": 75.0},
+	"cubikon": {"name": "Cubikon", "model": "cubikon", "sz": 20.0, "hp": 1600000, "sh": 1200000, "spd": 100, "dmg": 0, "aggr": false, "xp": 512000, "hon": 4096, "cr": 1638400, "uri": 1024, "resp": 75.0},
 	"protegit": {"name": "Protegit", "model": "protegit", "sz": 1.5, "hp": 50000, "sh": 40000, "spd": 320, "dmg": 1125, "dmg_max": 1500, "aggr": true, "xp": 6400, "hon": 64, "cr": 12800, "uri": 16, "resp": 3.0},
 }
 
@@ -151,13 +155,134 @@ const CUBIKON := {
 	"fire_lock": 0.0,                        # ayni Cubikonun Protegitleri arasi asgari atis boslugu (sn). 0 = kapali: aksi halde 0.90 sn garanti edilemez.
 	"clean_after": 15.0,                     # Cubikon olumunden sonra Protegit temizlik suresi (sn)
 	"resp": 75.0,                            # Cubikon geri donus suresi (sn)
-	"cells": [[75, 39], [134, 39], [75, 79], [134, 79]],
-	"cell_scale": 140.0,
+	"cells": [[75, 39], [134, 39], [75, 79], [134, 79]],   # ESKI (artik kullanilmiyor)
+	"cell_scale": 140.0,                                    # ESKI (artik kullanilmiyor)
+	# Cubikon'lar minimap izgara sektorlerinde dogar ve BU SEKTORLERIN DISINA CIKMAZ (harita: 8 sutun 1-8 x 6 satir A-F).
+	# Yeri degistirmek icin sadece bu listeyi duzenle.
+	"sectors": ["B3", "E3", "B6", "E6"],
+	"sector_margin": 600.0,                  # sektor kenarindan bu kadar (DO birimi) iceride kalir
 }
 
 # Harita yapisi: 2010 DarkOrbit uyumlu harita yapisi.
 const STD_MAP_W := 20800.0   # 208 x 133 birim
 const STD_MAP_H := 13300.0
+
+# ---------------------------------------------------------------------------------------------
+# GALAXY GATES (Galaksi Kapilari): oyuncuya OZEL (instance) dalga haritalari. Sunucu otoriterdir.
+# Her bolum ("waves" girdisi) tek NPC turudur ve "groups" dizisindeki kadar grup halinde dogar.
+# Bir grup tamamen temizlenince siradaki grup cikar; son bolum bitince "reward" verilir.
+# Yeni kapi eklemek icin sadece bu tabloya girdi eklemek yeterlidir (open: true yapin).
+# ---------------------------------------------------------------------------------------------
+const GATE_MAP_PREFIX := "gg-"
+const GATE_WAVES := [
+	{"npc": "streuner",   "groups": [10, 10, 10, 10]},   # 40
+	{"npc": "lordakia",   "groups": [10, 10, 10, 10]},   # 40
+	{"npc": "mordon",     "groups": [10, 10, 10, 10]},   # 40
+	{"npc": "saimon",     "groups": [20, 20, 20, 20]},   # 80
+	{"npc": "devolarium", "groups": [5, 5, 5, 5]},       # 20
+	{"npc": "kristallin", "groups": [15, 15, 15, 15]},   # 60
+	{"npc": "sibelon",    "groups": [5, 5, 5, 5]},       # 20
+	{"npc": "sibelonit",  "groups": [20, 20, 20, 20]},   # 80
+	{"npc": "kristallon", "groups": [4, 4, 4, 4]},       # 16
+	{"npc": "protegit",   "groups": [5, 10, 10, 5]},     # 30
+]
+# "mul": NPC gucu (can, kalkan, hasar) VE odul carpani: alpha x1, beta x2, gamma x3 (DarkOrbit degerleri).
+# "parts": kapiyi kurmak icin gereken parca sayisi (DarkOrbit: alpha 34, beta 48, gamma 82).
+# Oduller: uri = Uridium, ammo.x4 = UCB-100, xp = TP (tecrube puani), hon = seref. Alpha/Gamma uridium-UCB-seref degerleri
+# DarkOrbit kaynaklarindan; Beta ve Gamma'nin xp/xenomit/log disk/tamir degerleri carpana gore orantilanmistir.
+const GALAXY_GATES := {
+	"alpha": {
+		"name": "Alfa Kapısı", "open": true, "mul": 1, "parts": 34, "waves": GATE_WAVES,
+		"reward": {"uri": 20000, "ammo": {"x4": 20000}, "xp": 4000000, "hon": 100000,
+			"items": {"xenomit": 200, "repair_coupon": 2}, "logdisks": 2},
+	},
+	"beta": {
+		"name": "Beta Kapısı", "open": true, "mul": 2, "parts": 48, "waves": GATE_WAVES,
+		"reward": {"uri": 40000, "ammo": {"x4": 40000}, "xp": 8000000, "hon": 200000,
+			"items": {"xenomit": 400, "repair_coupon": 4}, "logdisks": 4},
+	},
+	"gamma": {
+		"name": "Gamma Kapısı", "open": true, "mul": 3, "parts": 82, "waves": GATE_WAVES,
+		"reward": {"uri": 60000, "ammo": {"x4": 60000}, "xp": 12000000, "hon": 300000,
+			"items": {"xenomit": 600, "repair_coupon": 6}, "logdisks": 6},
+	},
+	"delta": {"name": "Delta Kapısı", "open": false},
+}
+
+# ---- Kapi parcasi / aktivasyon kurallari (sunucu uygular) ----
+# Parcalar YALNIZCA Galaxy Gates menusundeki ortak jeneratorden gelir (NPC oldurerek parca dusmez).
+# Kurallarin tamami sunucuda (server/server_db.py gate_generator_pulse); asagidaki degerler menude GOSTERIM icindir
+# ve server_db.py'deki GATE_GEN_* sabitleriyle ayni tutulmalidir.
+const GATE_GEN_COST_URI := 100                         # jenerator basimi (Uridium)
+const GATE_GEN_TABLE := [                              # odul ihtimalleri (%), toplam 100
+	["ammo", 67, "Cephane"], ["part", 13, "Kapı parçası"], ["xenomit", 12, "Xenomit"],
+	["nano_hull", 4, "Nano Hull"], ["repair_coupon", 3, "Tamir Kuponu"], ["logdisk", 1, "Log Disk"],
+]
+const GATE_MULT_MAX := 6                               # saklanabilen carpan: x2 ... x6 (tekrarlanan parcadan)
+const GATE_ORDER := ["alpha", "beta", "gamma"]         # menu sirasi
+const GATE_REBUILD_AFTER_COMPLETE := true              # kapi tamamlaninca parcalar sifirlanir, tekrar kurulmali
+const GATE_SITE_DX := 4200.0                           # kapi noktalari: us konumundan haritanin icine dogru uzaklik
+const GATE_SITE_DY0 := 1500.0
+const GATE_SITE_DYSTEP := 2400.0
+const GATE_ENTER_RANGE := 700.0                        # kapiya girmek icin azami uzaklik (DO birimi)
+
+
+static func is_gate_map(map_name: String) -> bool:
+	return map_name.begins_with(GATE_MAP_PREFIX)
+
+
+static func gate_id_of_map(map_name: String) -> String:
+	# "gg-alpha-123" -> "alpha"
+	var parts: PackedStringArray = map_name.split("-")
+	return parts[1] if parts.size() >= 3 else ""
+
+
+static func gate_total_npcs(gid: String) -> int:
+	var n := 0
+	for w in GALAXY_GATES.get(gid, {}).get("waves", []):
+		for g in w.groups:
+			n += int(g)
+	return n
+
+
+# Belirtilen bolum/gruptan ONCE oldurulmus (tamamlanmis) toplam NPC sayisi (kayitli ilerlemeden devam icin).
+static func gate_killed_before(gid: String, wave: int, grp: int) -> int:
+	var waves: Array = GALAXY_GATES.get(gid, {}).get("waves", [])
+	var n := 0
+	for wi in mini(wave, waves.size()):
+		for g in (waves[wi].groups as Array):
+			n += int(g)
+	if wave < waves.size():
+		var gs: Array = waves[wave].groups
+		for gi in mini(grp, gs.size()):
+			n += int(gs[gi])
+	return n
+
+
+# Sirketin X-1 haritasindaki kapi noktalari (harita koordinatlari, son yerlesimden sonra hesaplanir).
+static func _attach_gate_sites(mm: Dictionary) -> void:
+	if mm.get("base") == null:
+		return
+	var b: Dictionary = mm.base
+	var sx: float = 1.0 if float(b.x) < float(mm.w) / 2.0 else -1.0
+	var sy: float = 1.0 if float(b.y) < float(mm.h) / 2.0 else -1.0
+	var sites: Array = []
+	var i := 0
+	for gid in GATE_ORDER:
+		sites.append({"gate": gid, "x": float(b.x) + sx * GATE_SITE_DX, "y": float(b.y) + sy * (GATE_SITE_DY0 + GATE_SITE_DYSTEP * float(i))})
+		i += 1
+	mm["gates"] = sites
+
+
+# Kapi haritasi: istemci ve sunucu AYNI sozlugu uretir. ret_map: kapidan cikinca donulecek harita.
+static func gate_map(gid: String, ret_map: String, key: String) -> Dictionary:
+	var g: Dictionary = GALAXY_GATES.get(gid, {})
+	return {
+		"name": str(g.get("name", "Kapı")), "w": STD_MAP_W, "h": STD_MAP_H,
+		"npcs": [], "zones": [],
+		"portals": [],   # kapi icinde sabit kapi YOK: dalgalar bitince sunucu merkezde cikis kapilarini acar (gg_gates)
+		"faction": 0, "base": null, "pvp": false, "gate": gid, "key": key,
+	}
 const BIG_MAP_W := 41800.0   # 418 x 268 birim (4-4, 4-5)
 const BIG_MAP_H := 26800.0
 
@@ -436,6 +561,8 @@ static func make_maps() -> Dictionary:
 	for k in m:
 		_attach_zones(m[k])
 		_attach_rules(m[k], str(k))
+	for f in [1, 2, 3]:
+		_attach_gate_sites(m["%d-1" % f])   # Galaxy Gate kapilari: her sirketin KENDI X-1 haritasinda
 
 	return m
 
@@ -523,6 +650,16 @@ const NPC_MULT_EXCLUDE := ["cubikon"]   # carpandan muaf NPC'ler (ornek: ["cubik
 # - Cubikon "fixed" (sabit) hucrlerden dogar; digerleri "area" bolgelerinden, harita sinirlari,
 #   portal ve us konumlarina gore denetlenerek dogar.
 # - Bolgeler dort ceyrege dagitilir; boylece ayni tur NPC'ler ust uste binmez.
+# Minimap izgara sektoru (orn. "B3": satir B, sutun 3) -> harita icindeki dikdortgen [x0, y0, x1, y1] (DO birimi).
+# Izgara minimap.gd ile ayni: 8 sutun (1-8) x 6 satir (A-F), harita boyutuna oranli.
+static func sector_rect(sec: String, mw: float, mh: float) -> Array:
+	var row: int = clampi(sec.unicode_at(0) - 65, 0, 5)
+	var col: int = clampi(int(sec.substr(1)) - 1, 0, 7)
+	var cw: float = mw / 8.0
+	var ch: float = mh / 6.0
+	return [float(col) * cw, float(row) * ch, float(col + 1) * cw, float(row + 1) * ch]
+
+
 static func _attach_zones(m: Dictionary) -> void:
 	var ratio: float = float(m.w) / 21000.0
 	var ratio_h: float = float(m.h) / 13100.0
@@ -546,12 +683,14 @@ static func _attach_zones(m: Dictionary) -> void:
 		if not NPC_MULT_EXCLUDE.has(npc):
 			n *= NPC_MULT   # NPC sayisi carpani (Cubikon haric)
 		if npc == "cubikon":
-			# Cubikon: dort sabit hucreden dogar (2010 X-6 referans hucreleri).
-			for c in CUBIKON.cells:
+			# Cubikon: minimap izgarasindaki sabit sektorlerin ortasinda dogar, sektor disina cikmaz.
+			for sec in CUBIKON.sectors:
+				var rc: Array = sector_rect(str(sec), float(m.w), float(m.h))
 				zones.append({
 					"npc": npc,
 					"n": 1,
-					"fixed": [float(c[0]) * float(CUBIKON.cell_scale), float(c[1]) * float(CUBIKON.cell_scale)],
+					"fixed": [(float(rc[0]) + float(rc[2])) * 0.5, (float(rc[1]) + float(rc[3])) * 0.5],
+					"bounds": rc,
 					"boss": true,
 				})
 			continue

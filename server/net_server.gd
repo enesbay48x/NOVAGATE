@@ -1400,10 +1400,16 @@ func _zone_spot(w: Dictionary, z: Dictionary, used: Array) -> Vector3:
 	var m: Dictionary = w.m
 	if z.has("fixed"):
 		var fp: Vector3 = w2g(float(z["fixed"][0]), float(z["fixed"][1]))
+		var bd: Array = z.get("bounds", [])
 		for gi in 24:
 			if _spot_free(w, fp, used):
 				return fp
-			fp += Vector3(randf_range(-1600.0, 1600.0), 0.0, randf_range(-1600.0, 1600.0)) * DOData.S
+			if bd.size() == 4:
+				# Sektor sinirlari varsa (Cubikon): yeni nokta YALNIZCA sektorun icinden secilir, disina tasmaz.
+				var mg: float = float(DOData.CUBIKON.get("sector_margin", 600.0))
+				fp = w2g(randf_range(float(bd[0]) + mg, float(bd[2]) - mg), randf_range(float(bd[1]) + mg, float(bd[3]) - mg))
+			else:
+				fp += Vector3(randf_range(-1600.0, 1600.0), 0.0, randf_range(-1600.0, 1600.0)) * DOData.S
 		return fp
 	var fa: Array = z.get("area", [1500.0, 1500.0, float(m.w) - 1500.0, float(m.h) - 1500.0])
 	for gi in 48:

@@ -11,12 +11,15 @@ const DOData = preload("res://data.gd")
 
 const ICON_PATH := "res://assets/ranks/rank_%d.png"
 const ADMIN_ICON := 21
-const GENERAL_MIN_POP := 20   # "General" için şirkette en az bu kadar oyuncu olmalı (1 kişilik şirkette General anlamsız)
+const BOARD_SECONDS := 3600   # Sunucu sıralaması + "En iyi 10" saatte bir güncellenir
 const TOP_COUNT := 10
 
-# En yüksekten en düşüğe: [ad, o rütbeye düşen oyuncu payı (%)]. General: şirket başına en fazla 1 kişi.
+# En yüksekten en düşüğe: [ad, kontenjan / yüzde].
+# İlk 4 rütbe (General..Albay) SABİT KİŞİ SAYISIYLA verilir (şirket başına): ikinci değer kişi sayısıdır.
+# Diğer rütbelerde ikinci değer, o rütbeye düşen oyuncu payıdır (%).
+const FIXED_RANKS := 4                      # sabit kontenjanlı rütbe sayısı
 const RANKS_TOP := [
-	["General", 0.0], ["Tümgeneral", 0.01], ["Kurmay Albay", 0.10], ["Albay", 0.50], ["Acemi Albay", 1.00],
+	["General", 1], ["Tümgeneral", 2], ["Kurmay Albay", 4], ["Albay", 8], ["Acemi Albay", 1.00],
 	["Kurmay Binbaşı", 1.50], ["Binbaşı", 2.00], ["Acemi Binbaşı", 2.50],
 	["Uzman Yüzbaşı", 3.00], ["Yüzbaşı", 3.50], ["Acemi Yüzbaşı", 4.00],
 	["Üsteğmen", 4.50], ["Teğmen", 5.00], ["Asteğmen", 6.00],
@@ -42,12 +45,18 @@ static func icon_id(idx: int) -> int:
 
 
 # pos: şirket içi sıra (1 = en iyi), n: şirketteki oyuncu sayısı
+# Sıralamada önde olan yüksek rütbeyi alır: 1 = General, 2-3 = Tümgeneral, 4-7 = Kurmay Albay, 8-15 = Albay.
+# Küçük şirkette de aynı sıralama geçerlidir (ör. 5 kişilik şirkette: General, 2 Tümgeneral, 2 Kurmay Albay).
+# 16. sıradan sonrası: kalan rütbeler yüzdelik dilime göre verilir (en yüksek Acemi Albay).
 static func rank_index(pos: int, n: int) -> int:
-	if pos <= 1 and n >= GENERAL_MIN_POP:
-		return 0
+	var upto := 0
+	for i in FIXED_RANKS:
+		upto += int(RANKS_TOP[i][1])
+		if pos <= upto:
+			return i
 	var pct: float = float(pos) / float(maxi(n, 1)) * 100.0
 	var cum := 0.0
-	for i in range(1, RANKS_TOP.size()):
+	for i in range(FIXED_RANKS, RANKS_TOP.size()):
 		cum += float(RANKS_TOP[i][1])
 		if pct <= cum + 0.000001:
 			return i
@@ -81,6 +90,8 @@ static func fmt_pts(v: float) -> String:
 
 
 static func _quests_done(sv: Dictionary) -> int:
+	if sv.has("quests_done"):   # sunucu veritabanı satırı: görev sayısı hazır gelir
+		return int(sv.get("quests_done", 0))
 	var qd = sv.get("quests", {})
 	var n := 0
 	if typeof(qd) == TYPE_DICTIONARY:
@@ -187,3 +198,33 @@ static func summary(game) -> Dictionary:
 		me_entry["n"] = same
 		me_entry["idx"] = rank_index(above + 1, same)
 	return {"me": me_entry, "top": players.slice(0, TOP_COUNT), "total": players.size()}
+
+
+# Sunucu sıralaması: TÜM hesaplar (çevrimdışı olanlar dahil) şirket içinde puana göre sıralanır.
+# entries: [{acct:int, name:String, faction:int, pts:float, admin:bool, rings:int}]
+# Dönen: {by_acct:{acct:{pos,n,idx,icon,pts,faction}}, top:[<=10 {name,faction,pts,idx,icon,rings}], total:int}
+# Aynı puanda küçük hesap numarası önce gelir (sıralama her çalıştırmada aynı kalır).
+static func build_board(entries: Array) -> Dictionary:
+	var players: Array = entries.filter(func(x): return not bool(x.admin))
+	players.sort_custom(func(a, b):
+		if float(a.pts) != float(b.pts):
+			return float(a.pts) > float(b.pts)
+		return int(a.acct) < int(b.acct))
+	var counts := {}
+	for e in players:
+		var f: int = int(e.faction)
+		counts[f] = int(counts.get(f, 0)) + 1
+		e["pos"] = int(counts[f])
+	var by_acct := {}
+	for e in players:
+		var n: int = int(counts[int(e.faction)])
+		var idx: int = rank_index(int(e.pos), n)
+		by_acct[int(e.acct)] = {"pos": int(e.pos), "n": n, "idx": idx, "icon": icon_id(idx),
+			"pts": float(e.pts), "faction": int(e.faction)}
+	var top: Array = []
+	for i in mini(TOP_COUNT, players.size()):
+		var e: Dictionary = players[i]
+		var info: Dictionary = by_acct[int(e.acct)]
+		top.append({"name": str(e.name), "faction": int(e.faction), "pts": float(e.pts),
+			"idx": int(info.idx), "icon": int(info.icon), "rings": int(e.get("rings", 0))})
+	return {"by_acct": by_acct, "top": top, "total": players.size()}
