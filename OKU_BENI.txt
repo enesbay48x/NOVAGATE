@@ -1,12 +1,107 @@
-ACIK ARTIRMA DUZELTMESI - KURULUM
+DarkOrbit3D - HUD v3 ENTEGRASYON PAKETI (mevcut projenize gore uyarlandi)
 
-Bu zip'i proje klasorunun ustune cikar (ayni isimli dosyalarin uzerine yaz):
+KURULUM
+  1) Projenizin yedegini alin (en azindan main.gd, hud_do.gd, minimap.gd).
+  2) Bu zipin icindekileri proje klasorune (project.godot'un oldugu yer) AYNI YOLLARLA kopyalayin, uzerine yazin:
+       main.gd        (sizin guncel main.gd'niz + sadece 2 satir degisiklik)
+       hud_do.gd      (HUD v3)
+       minimap.gd     (HUD v3)
+       assets/hud/frame, bar, slot   (15 yeni gorsel)
+  3) Godot'u acin: yeni PNG'ler otomatik import edilir. Calistirin.
 
-  auction.gd              -> proje koku (Godot sunucusu da kullaniyor)
-  auction_client.gd       -> proje koku
-  server_db.py            -> proje koku
-  server/server_db.py     -> server/ klasoru (sunucuda hangisi calisiyorsa o)
+NEDEN ZIP'TEKI main.gd'YI KULLANMADIK
+  HUD guncelleme zip'indeki main.gd eski bir surumdu. Uzerine yazilsaydi sizin kamera ayarlariniz, 3D can barlari,
+  glow/isik duzeltmeleri, lazer sprite'lari, droid ekipmani, kutu toplama gibi sonradan yaptiginiz seyler kaybolurdu.
+  Bu yuzden main.gd sizin dosyanizdir; sadece HUD ile ilgili 2 satir degisti.
 
-Sonra: Python sunucusunu (server_db) ve Godot sunucusunu yeniden baslat.
+main.gd'DE DEGISEN 2 SATIR
+  1) satir ~950  : "fire_btn = dohud.fire_btn" kaldirildi. v3 HUD'da ATES dugmesi yok (Ctrl / Bosluk / hedefe tekrar tik).
+                   Satir kalsaydi oyun acilista "Invalid access to property fire_btn" hatasi verirdi.
+  2) satir ~2993 : bildirim (toast) yazilari 110 -> 176 piksele indirildi; yeni Hedef penceresi ust ortada oldugu icin cakisiyordu.
 
-CUBIKON 3D: Bu zip'te yok. cubikon.glb dosyasini models/ klasorune koy.
+hud_do.gd'DE v3'E GORE TEK DEGISIKLIK
+  Gemi/fraksiyon logosu yolu ".png" uzantisi olmadigi icin hic yuklenmiyordu (eski HUD'da da boyleydi); uzanti eklendi.
+
+DOKUNULMAYANLAR
+  Kamera (CAM_*, _update_camera, zoom, FOV), ortam/glow/isiklar, 3D oyuncu/NPC barlari, lazer sprite'lari,
+  droid ekipmani, control_panel.gd, data.gd, main.tscn, project.godot.
+
+v3 HUD'DA NELER VAR
+  Sol ust 11 dugme (log, kullanici, gemi, kapidan atla [J], arkadaslar, minimap, galaksi haritasi, gorevler, konfig [C],
+  sohbet, gorev takibi), sag ust 3 dugme (tam ekran, yardim, kontrol paneli), gercek DarkOrbit pencere cercevesi ve barlari,
+  alttaki 3 sirali cephane/esya cubugu + gizle/goster oklari. Pencereler suruklenebilir, x ile kapanir.
+
+NOT
+  Bu paket Godot calistirilmadan, statik olarak dogrulandi (butun gorsel yollari, main.gd<->HUD API uyumu, soz dizimi).
+  Ilk acilista konsolda hata gorurseniz mesaji gonderin, duzeltelim.
+
+----------------------------------------------------------------
+v3.1 - SURUKLE-BIRAK HIZLI SLOT (sadece hud_do.gd degisti)
+  Ust sira  : ortadaki kategori dugmesine tikla -> o kategorinin ogeleri ust sirada gorunur.
+              Lazerler (x1..rsb), Roketler (R-310), Droid dizilimleri (satin aldigin formasyonlar).
+  Alt sira  : ust siradaki bir ogeyi FAREYLE SURUKLEYIP alt siradaki bir slota birak.
+              Alt slota tiklayinca o oge kullanilir (cephane secilir / roket atilir / droid dizilimi degisir).
+              Alt sirada slotlar arasi surukleyerek yer degistirebilirsin. Sag tik = slotu bosalt.
+  Kayit     : alt sira save dosyasina "quickbar" olarak yazilir, oyunu acinca ayni kalir.
+  Varsayilan: alt sirada ilk slot R-310 roketi (eskisi gibi).
+  main.gd'ye dokunulmadi. 1-6 ve R kisayollari aynen calisir.
+
+v3.2 - UST SIRA SADECE ATAMA YERI
+  Ust siraya tiklamak artik hicbir sey yapmaz; sadece surukleyip alt siraya atmak icin.
+  Kullanim ALT sira: tiklayinca ya da 1,2,3...9,0 tuslariyla (alt slot 1..10). R tusu roket icin aynen duruyor.
+  main.gd'de degisen: KEY_1..KEY_6 satirlari kaldirildi, yerine KEY_1..KEY_0 -> dohud.quick_key(n).
+
+v3.3 - ORTA SIRA SADELESTIRILDI
+  Kalan dugmeler: Lazerler (cephane), Roketler, Ozel esyalar, Droid dizilimleri, Market.
+  Kaldirilanlar: roket firlaticilar, mayinlar, CPU'lar, teknoloji esyalari, gemi yetenekleri.
+
+v3.4 - DROID DIZILIMLERI: GERCEK SEKILLER + HUD'DA RESIM
+  YENI DOSYA: drone_forms.gd  (main.gd ile ayni klasore koy). Sekiller burada, her biri kisa bir nokta listesi.
+  Hud'da dizilim hucreleri artik isim degil, dizilimin kucuk resmini gosterir (isim sadece fare uzerine gelince).
+  main.gd: form_offsets_for() eklendi, droid yerlestirme artik bunu kullanir.
+  Standart dizilim oyunun kendi (data.gd) dizilimini kullanmaya devam eder.
+  Sekiller: Guvenlik(kubbe), Mizrak, Yildiz, Kiskac, Kalp, Yengec, Baraj.
+
+v3.5 - "Guve" dizilimi Kaplumbaga (kubbe) degil MOTH (guve) idi; duzeltildi. Hud'daki dizilim resimleri buyutuldu.
+  NOT: Sekiller gercek oyun gorselleriyle dogrulanmadi. Dogru koordinatlar icin her dizilimin gercek ekran goruntusu gerekli.
+
+v3.6 - DROID DIZILIMLERI GERCEK IKONLARDAN OLCULDU
+  Marketteki gercek F-01..F-12 ikonlarindan (ekran goruntusu) her droidin yeri piksel piksel olculup drone_forms.gd'ye yazildi:
+  Kaplumbaga, Ok, Mizrak, Yildiz, Kiskac, Cift Ok, Elmas, Sevron, Guve(Moth), Yengec, Kalp, Baraj. Standart halka oyunun kendisi.
+  HUD'daki dizilim resimleri de ayni koordinatlardan cizilir (gemi + droid noktalari ortalanmis).
+
+v3.7 - 3D DROID MODELLERI (flax / iris)
+  models/drone_flax_6.glb ve models/drone_iris_6.glb dosyalarini projenin res://models/ klasorune kopyala
+  (Godot'ta bir kez ice aktarilmalari icin editoru ac). main.gd: _make_drone artik bu modelleri kullanir.
+  Model bulunamazsa eski procedural droid cizilir. Boyut: DRONE_MODEL_SIZE sabiti (main.gd).
+
+v3.8 - 3D droidler artik DONMEZ, gemiyle ayni yone bakar (yalnizca hafif yukari-asagi suzulur).
+  Renk: parlak mavi isik kaldirildi, duz celik gri metal govde. Boyut 1.3.
+
+v3.9 - 3D droid yonu 180 derece cevrildi (burun gemiyle ayni yone). Renk: parlak gumus (flax serin, iris sicak ton), dusuk metalik + hafif kendi isigi.
+
+v3.10 - DROIDLER HAREKETLI: gemiyi dunya uzayinda yumusakca takip eder, gemi donunce/hizlanince dizilim
+  gecikmeli sallanir, acilip kapanir. Ayar sabitleri main.gd'de: DRONE_FOLLOW, DRONE_TURN, DRONE_MAX_LAG.
+
+v3.11 - GEMI DONUNCE DROIDLER GEMIYE DOGRU TOPLANIR, SONRA ACILIR
+  Donus hizina gore dizilim kuculur (kapanma hizli), donus bitince yavasca tekrar acilir.
+  Sabitler: DRONE_COLLAPSE, DRONE_RATE_REF, DRONE_CLOSE, DRONE_REOPEN (main.gd).
+
+v3.12 - Toplanma yumusatildi: olu bolge (kucuk donuslerde kapanmaz), en fazla %40 kapanir, donus hizi filtrelenir.
+  Sabitler: DRONE_COLLAPSE=0.4, DRONE_RATE_DEAD=1.2, DRONE_RATE_REF=4.0, DRONE_CLOSE=4.0, DRONE_REOPEN=2.5
+
+v3.13 - STANDART DIZILIM: gercek DarkOrbit (10 droid) = yanlarda iki ucgen (3+3) + arkada elmas (4). Halka kaldirildi.
+  drone_forms.gd icinde STD_DIAMOND_FRONT=true yaparsan elmas gemi onune gecer (oyunda yanlis yone gelirse).
+  Droid takip gecikmesi azaltildi (DRONE_FOLLOW=10, DRONE_MAX_LAG=0.7).
+  Iris rengi gercek referanstan: koyu kursun gri govde + kirmizi vurgu.
+
+v3.14 - Dizilim butonlari (ust ve alt sira) artik gercek oyun ikonlarini kullanir: res://assets/hud/items/drone_formation_*.png
+  (itemsControlMenu klasorundeki dosyalar o klasorde olmali). Ikon bulunmazsa eski nokta cizimi yedek.
+  Droid 3D modeli buyutuldu: DRONE_MODEL_SIZE 1.3 -> 2.1.
+
+v3.15 - LAZERLER
+  Oyuncu: her salvo 4 lazer, 0.09 sn arayla SIRALI atilir (sol-dis, sag-dis, sol-ic, sag-ic silahlardan). Toplam hasar ayni, 4'e bolunur.
+  SAB cephanesi: lazerler DUSMANDAN gemiye dogru gelir, ulasinca dusmanin kalkani emilip gemiye eklenir.
+  Dusmanlar: saniyede 1 salvo, 3 lazer sirali (toplam hasar ayni).
+  Her atista namlu parlamasi; sprite'lar assets/lasers/skillLaser*.png (lasers.zip) kullanilir.
+  Sabitler main.gd: VOLLEY_BOLTS, VOLLEY_GAP, VOLLEY_LAT.

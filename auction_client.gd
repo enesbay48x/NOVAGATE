@@ -189,7 +189,7 @@ func on_mail(arr: Array) -> void:
 			g.SV.cr = int(g.SV.cr) + int(m.get("cr", 0))
 			g.SV.uri = int(g.SV.uri) + int(m.get("uri", 0))
 		elif kind == "item":
-			ok = _deliver(str(m.get("item", "")), int(m.get("qty", 1)), bool(m.get("granted", false)))
+			ok = _deliver(str(m.get("item", "")), int(m.get("qty", 1)))
 			if ok:
 				g.toast(str(m.get("txt", "Açık artırma ödülü teslim edildi.")))
 		if ok:
@@ -217,16 +217,11 @@ func _was_done(done: Array, id: int) -> bool:
 
 
 # Esyayi envantere ekler. Eklenemezse false doner (posta sunucuda bekler, kaybolmaz).
-func _deliver(item: String, qty: int, granted: bool = false) -> bool:
+func _deliver(item: String, qty: int) -> bool:
 	if g.item_def(item).is_empty() or qty <= 0:
 		g.toast("Açık artırma ödülü tanınmadı (%s); atlandı." % item)
-		push_warning("Açık artırma ürünü tanınmadı: %s" % item)
 		return true
-	# Sunucu urunu zaten kendi envanterine yazdi (granted): burada yalnizca yerel gorunumu esitle.
-	# Sunucu yazmadiysa (eski posta) yerel envantere EKLEME: sunucu envanteri belirleyici, ekipmana giremez.
-	if not granted:
-		return false
 	if DOData.DRONES.has(item) and g.drones_owned() + qty > DOData.MAX_DRONES:
-		return true   # sunucu kapasiteyi zaten dogruladi; yerel sayac sapmasin diye atla (giriste esitlenir)
+		return false
 	g.inv_dict(item)[item] = g.inv_count(item) + qty
 	return true

@@ -174,18 +174,6 @@ func _draw() -> void:
 		else:
 			draw_arc(c, 4.5, 0.0, TAU, 16, Color(0.3, 0.95, 1.0), 1.6)
 
-	# Galaxy Gate kapilari: yalnizca AKTIF edilmis olanlar gorunur (aktif edilene kadar mini haritada yok)
-	var n_gg := 0
-	for gs in game.gg_sites:
-		if not game._gate_site_active(str(gs.gate)):
-			continue
-		n_gg += 1
-		var gc := _g2m(gs.pos)
-		var gcol: Color = game.GATE_SITE_COLORS.get(str(gs.gate), Color(0.3, 0.95, 1.0))
-		if gate_tex != null:
-			draw_texture(gate_tex, gc - gate_tex.get_size() * 0.5)
-		draw_arc(gc, 7.0, 0.0, TAU, 20, gcol, 1.6)
-
 	# Gorus menzili siniri: yalnizca bu daire icindeki dusmanlar gorunur (zoom'dan etkilenmez)
 	var vis_do: float = MapBg.vision_do()
 	# (menzil dairesi artik cizilmez; gorus menzili gorunmez, yalnizca menzildeki dusmanlar gosterilir)
@@ -260,7 +248,7 @@ func _draw() -> void:
 	draw_rect(Rect2(PAD, fy - 8.0, 6, 6), Color(1.0, 0.3, 0.3))
 	draw_string(font, Vector2(PAD + 10.0, fy), "Dusman %d" % n_en, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.93, 1.0))
 	draw_rect(Rect2(sz.x * 0.5 + 4.0, fy - 8.0, 6, 6), Color(0.3, 0.95, 1.0))
-	draw_string(font, Vector2(sz.x * 0.5 + 14.0, fy), "Kapi %d" % (game.portals.size() + n_gg), HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.93, 1.0))
+	draw_string(font, Vector2(sz.x * 0.5 + 14.0, fy), "Kapi %d" % game.portals.size(), HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.85, 0.93, 1.0))
 	if n_clan > 0:
 		draw_circle(Vector2(sz.x - 44.0, fy - 5.0), 3.2, Color(0.15, 1.0, 0.3))
 		draw_string(font, Vector2(sz.x - 38.0, fy), "Klan %d" % n_clan, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.6, 1.0, 0.7))

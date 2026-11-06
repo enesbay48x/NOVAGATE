@@ -1494,13 +1494,10 @@ func toggle_group() -> void:
 		_refresh_group(true)
 
 
-# Ayni sirketten bir oyuncuya tiklandi: NPC'ler gibi etrafinda daire ile SECILIR (hedef OLMAZ, ates edilemez).
-# Grup penceresi KENDILIGINDEN ACILMAZ; oyuncu Grup butonuyla acar, secili oyuncu orada "GRUBA DAVET ET" ile davet edilir.
+# Ayni sirketten bir oyuncuya tiklandi: grup penceresinde gorunur, gruba davet edilebilir (hedef OLMAZ, ates edilemez).
 func select_friend(peer: int) -> void:
 	grp_sel = peer
-	if game.target != null:   # onceki dusman hedefi birakilir (tek halka: secili dost gorunsun)
-		game.fire = false
-		game.target = null
+	group_win.show()
 	_refresh_group(true)
 
 

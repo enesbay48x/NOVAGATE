@@ -6,8 +6,7 @@ extends Control
 #   Sol joystick : SABIT DEGIL. Sol tarafta parmagini nereye koyarsan joystick orada acilir (elinin altinda).
 #   Sag joystick : NISAN. Basili tutup surukledikce geminin onunde yari saydam bir nisan konisi acilir.
 #                  Koniye dusman girince turkuaz -> kirmizi olur. Parmagi BIRAKINCA hedef kilitlenir ve ates baslar.
-#                  Joystick'e kisa dokunus = en yakin hedefe oto ates, tekrar dokunus = ates durur (hedef/daire kalir).
-#                  Surukleyip konide dusman varken birakmak = elle hedef secimi. Ayri "fire" butonu YOK.
+#                  ATES butonu yok. Ates sadece nisan joystick'i birakilinca baslar (acikken joystick'e kisa dokunus = ates durur).
 #   Butonlar     : X1 X2 X3 X4 SAB RSB, Roket, 5 Ozel esya, ATLA, DIZILIM, MENU (=Oyun Merkezi), HUD DUZENI, CHAT (yazisiz ikonlar)
 #                  Hepsi "HUD DUZENLE" modunda surukleyip istedigin yere tasinir, boyutlari ayarlanir.
 #   Minimap      : sag ustte yuvarlak radar. Dokununca ekranin ortasinda buyuk harita acilir;
@@ -35,8 +34,8 @@ const AIM_HALF_DEG := 24.0     # nisan konisinin yari acisi
 const AIM_RANGE_MUL := 1.8     # nisan konisinin boyu = lazer menzili x bu (uzaktaki hedefe gemi yaklasip ates eder)
 const CONE_STEPS := 14         # koni yayinin parca sayisi
 const CONE_BANDS := 7          # koni icindeki menzil seritleri
-const FLOAT_X := 0.30          # ekranin sol bu kadari: hareket joystick'i parmagin altinda acilir (eskiden 0.45)
-const FLOAT_Y := 0.45          # ve ekranin ust bu kadari haric: yalniz sol-alt bolge (eskiden 0.22)
+const FLOAT_X := 0.45          # ekranin sol bu kadari: hareket joystick'i parmagin altinda acilir
+const FLOAT_Y := 0.22          # ve ekranin ust bu kadari haric
 const LAYOUT_VER := 2          # varsayilan yerlesim surumu (degisince eski kayitli konumlar silinir)
 const LASERS := ["x1", "x2", "x3", "x4", "sab", "rsb"]
 const LASER_LBL := ["X1", "X2", "X3", "X4", "SAB", "RSB"]
@@ -857,8 +856,6 @@ func _default_center(id: String, sr: Rect2) -> Vector2:
 		"stick_aim":
 			return aim_c
 		# sag joystick'in etrafinda yay: roket - atla - dizilim
-		"fire":
-			return aim_c + _polar(315.0, 184.0)
 		"rkt":
 			return aim_c + _polar(180.0, 184.0)
 		"jump":
@@ -975,7 +972,7 @@ func _name_of(id: String) -> String:
 		"rkt":
 			return "Roket"
 		"fire":
-			return "Oto hedef"
+			return "Ates"
 		"minimap":
 			return "Minimap"
 		"jump":
@@ -1207,15 +1204,17 @@ func _release(id: int, gpos: Vector2) -> bool:
 			_aim_show = false
 			_aim_target = null
 			queue_redraw()
-			# Hedef joystigi:
-			#  * CEKMEDEN kisa dokunus -> en yakin hedefe oto ates; tekrar dokunus -> ates durur (hedef/daire KALIR);
-			#    hedef kilitli + ates kapaliyken dokunus -> ayni hedefe ates yeniden baslar.
-			#  * Surukleyip konide dusman varken birakma -> ELLE hedef secimi.
 			if s.max_dev < AIM_MIN:
-				if not edit_mode:
-					_auto_attack_toggle()
+				# Kisa dokunus: ates aciksa DURUR; kapaliysa en yakin NPC / dusman sirkete ates baslar.
+				if game.fire:
+					game._set_fire(false)
+				else:
+					_fire_nearest()
 			elif shot != null and is_instance_valid(shot.node):
 				_aim_fire(shot)
+			elif not game.fire:
+				# Joystick itildi ama konide kimse yoktu: yine de en yakin hedefe ates et
+				_fire_nearest()
 		elif s.role == "move" and tap and bool(d.get("float", false)):
 			_world_tap(d["gpos"])   # sol alanda kisa dokunus: oradaki kutu / NPC'ye dokunmus olabilir
 	elif c.kind == "txt":
@@ -1281,8 +1280,6 @@ func _btn_action(id: String) -> void:
 			if game == null or hud == null:
 				return
 			hud._use_item({"k": "las", "id": id})
-		"fire":
-			_auto_attack_toggle()
 		"rkt":
 			game.toggle_rocket_auto()
 		"cfg":
@@ -1378,29 +1375,6 @@ func _world_tap(gpos: Vector2) -> void:
 			game.collect_t = 0.0
 		game.dest = game._clamp_map(cb.node.position)
 		game.holding = false
-
-
-# Hedef joystigi kisa dokunus: ates aciksa DURDUR (hedef kalir); hedef kilitli+ates kapaliysa yeniden baslat; hedef yoksa en yakin NPC'ye kilitlen ve ates et.
-func _auto_attack_toggle() -> void:
-	var cur = game.target
-	if cur != null and not _target_valid(cur):
-		game.fire = false
-		game.target = null
-		cur = null
-	if game.fire:
-		_stop_attack()   # ates durur, hedef KALIR
-		return
-	if cur != null:
-		# Hedef kilitli ama ates kapali: ayni hedefe ates yeniden baslar
-		game._cancel_collect()
-		_haptic(30)
-		game._set_fire(true)
-		return
-	var t = _find_nearest_enemy()
-	if t == null:
-		game.toast("Yakinda hedef yok.")
-		return
-	_lock_and_fire(t)
 
 
 # ATES: hedef yoksa en yakin dusmani sec ve ates ac; hedef varsa ates ac/kapat. (Artik buton yok; kullanilmiyor.)
@@ -1538,7 +1512,7 @@ func _find_in_cone(po: Vector3, wd: Vector2):
 	var best = null
 	var best_score := 1e9
 	for e in game.enemies:
-		if not _target_valid(e):
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0 or not game.target_ok(e):
 			continue
 		var v := Vector2(float(e.node.position.x) - po.x, float(e.node.position.z) - po.z)
 		var dist := v.length()
@@ -1559,89 +1533,41 @@ func _find_in_cone(po: Vector3, wd: Vector2):
 	return best
 
 
-# Hedef olarak gecerli mi? Canli, gorunur, EMA ile kilidi bozulmamis, dost degil ve (cevrimiciyse) GERCEK ag kimligi var.
-# Ag kimligi: NPC -> e.uid, dusman oyuncu -> e.peer (ates/hasar paketleri bunlari kullanir; yeni protokol yok).
-func _target_valid(e) -> bool:
-	if e == null or not is_instance_valid(e.node):
-		return false
-	if float(e.hp) <= 0.0 or not e.node.visible or not game.target_ok(e):
-		return false
-	if bool(e.get("friendly", false)):
-		return false   # ayni sirket: hedef OLMAZ, ates edilemez
-	if game.net_on:
-		if not (e.has("uid") or (bool(e.get("player", false)) and e.has("peer"))):
-			return false
-	return true
-
-
-# Oyuncunun yakinindaki (tarama yaricapi = lazer menzili x AIM_RANGE_MUL) en yakin gecerli dusman: NPC ya da dusman sirket oyuncusu.
-func _find_nearest_enemy():   # Dictionary (hedef kaydi) ya da null dondurur; '-> Object' yazilirsa Dictionary donerken calisma hatasi verir
+# En yakin gorunur dusmani bul (NPC ya da dusman sirket oyuncusu). Menzil siniri YOK:
+# uzaktaysa gemi hedefe yaklasip ates eder. Aim stick kisa tap ile kullanilir.
+func _find_nearest_enemy() -> Object:
 	var best = null
 	var best_dist := 1e9
 	if game.P == null or not is_instance_valid(game.P.node):
 		return null
 	var po: Vector3 = game.P.node.position
-	var scan_r: float = DOData.LASER_RANGE * DOData.S * AIM_RANGE_MUL
 	for e in game.enemies:
-		if not _target_valid(e):
+		if not is_instance_valid(e.node) or float(e.hp) <= 0.0 or not e.node.visible or not game.target_ok(e):
 			continue
 		var v := Vector2(float(e.node.position.x) - po.x, float(e.node.position.z) - po.z)
 		var dist := v.length()
-		if dist > scan_r:
-			continue
 		if dist < best_dist:
 			best_dist = dist
 			best = e
 	return best
 
 
-# Hedef joystigi dokunusu.
-#  * Ayni hedef kilitli + ates acik  -> ates DURUR, kilit KALIR.
-#  * Ayni hedef kilitli + ates kapali -> ates yeniden baslar.
-#  * Farkli (en yakin) hedef          -> eski hedef birakilir, yenisine kilitlenilir, ates devam eder.
+# Hedef joystigi dokunusu: en yakin dusmani sec ve atesi baslat.
 func _fire_nearest() -> void:
+	# Zaten gecerli bir hedef isaretliyse (elle secilmis ya da onceki atesten kalmis) onu DEGISTIRME:
+	# yalnizca atesi yeniden baslat. Hedef yoksa / olduyse en yakin dusman NPC ya da oyuncu secilir.
 	var cur = game.target
-	var cur_ok: bool = _target_valid(cur)
-	if cur != null and not cur_ok:
-		game.fire = false   # olu / gecersiz kilit: temizle
-		game.target = null
-		cur = null
+	if cur != null and is_instance_valid(cur.node) and float(cur.hp) > 0.0 and cur.node.visible and game.target_ok(cur):
+		game._cancel_collect()
+		_haptic(30)
+		game._set_fire(true)
+		return
 	var t = _find_nearest_enemy()
-	if t == null:
-		if cur_ok:
-			# Tarama yaricapinda kimse yok ama kilitli hedef var (menzil disina cikmis olabilir): dokunus ates/kilidi degistirir.
-			if game.fire:
-				_stop_attack()
-			else:
-				game._cancel_collect()
-				_haptic(30)
-				game._set_fire(true)
-		else:
-			game.toast("Yakinda hedef yok.")
+	if t == null or not is_instance_valid(t.node):
+		game.toast("Yakinda hedef yok.")
 		return
-	if cur_ok and is_same(t, cur):
-		if game.fire:
-			_stop_attack()
-		else:
-			game._cancel_collect()
-			_haptic(30)
-			game._set_fire(true)
-		return
-	_lock_and_fire(t)
-
-
-# Sadece atesi durdur; hedef kilidi KALIR (hedef yalniz olunce / baska hedef secilince / bilerek birakilinca degisir).
-func _stop_attack() -> void:
-	game.fire = false
-	_haptic(20)
-	queue_redraw()
-
-
-# Yeni hedefe kilitlen. Once ates kapatilir ki eski hedefe tek bir salvo bile gitmesin; sonra yeni hedefle ates acilir.
-func _lock_and_fire(e) -> void:
 	game._cancel_collect()
-	game.fire = false
-	game.target = e
+	game.target = t
 	_haptic(30)
 	game._set_fire(true)
 
@@ -1709,7 +1635,10 @@ func _draw_aim() -> void:
 
 
 func _aim_fire(e) -> void:
-	_lock_and_fire(e)
+	game._cancel_collect()
+	game.target = e
+	_haptic(30)
+	game._set_fire(true)
 
 
 # ------------------------------------------------------------------ buyuk harita

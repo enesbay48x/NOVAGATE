@@ -48,11 +48,6 @@ var ban_tick_t: float = 0.0   # ban kick tick sayaci
 var balance_tick_t: float = 0.0   # online oyuncu bakiye senkronizasyon sayaci
 var pos_save_t: float = 0.0   # oyuncu konumu periyodik kayit sayaci
 var rank_t: float = 0.0       # rütbe yeniden hesaplama sayaci (60 sn'de bir)
-# Sunucu sıralaması (TÜM hesaplar, çevrimdışılar dahil). Rütbeler + "En iyi 10" saatte bir güncellenir.
-var rank_board: Dictionary = {}        # {by_acct, top, total}: son hesaplanan sıralama
-var rank_board_try: float = 0.0        # son yenileme denemesi (unix sn)
-var rank_top: Array = []               # istemciye giden "en iyi 10" (YALNIZCA saatlik güncellenir)
-var rank_top_ts: float = 0.0           # en iyi 10 listesinin son güncellenme zamanı (unix sn)
 var admin_tick_t: float = 0.0 # admin durumu yenileme sayaci (30 sn'de bir)
 var stale_lock_t: float = 0.0 # bayat kilit temizleme sayaci (30 sn'de bir)
 var npc_overrides: Dictionary = {}   # map_id -> npc_count (admin panelden)
@@ -75,7 +70,6 @@ const DMG_RAND_MAX := 1.12       # istemci salvo rastgeleligi ust siniri (0.88..
 const SV_ROCKET_DMG := 400.0     # R-310 (istemci ile ayni)
 const SV_ROCKET_CD := 5.0
 const SV_NUKE_FRAC := 0.15       # extras.gd NUKE_FRAC ile ayni
-const SV_NUKE_FRAC_GATE := 0.5   # Galaxy Gate NPC'lerine nuke: extras.gd NUKE_FRAC_GATE ile ayni
 const SV_NUKE_WINDOW := 2.0      # Nukleer vuruslarinin kabul edildigi pencere (sn)
 const KILL_CREDIT_WINDOW := 20.0 # oldurme kredisi icin son hasar suresi (sn)
 const KILL_CREDIT_FRAC := 0.25   # kurbanin (can+kalkan) en az bu kadari saldirandan gelmis olmali
@@ -111,15 +105,6 @@ func db_send(method: String, payload: Dictionary) -> Dictionary:
 	server_db'ye JSON mesaj gonderir ve cevabi dondurur (bloklayan, kisa zaman asimli).
 	Protokol: tek satir JSON + "\\n" gonder, tek satir JSON + "\\n" cevap al, baglanti kapanir.
 	"""
-	if method == "save_player_position" and DOData.is_gate_map(str(payload.get("map_name", ""))):
-		# Galaxy Gate ornegi KALICI konum olamaz: oyuncunun girdigi haritadaki konumunu kaydet.
-		var gr: Dictionary = gate_return.get(int(payload.get("account_id", 0)), {})
-		if gr.is_empty():
-			return {"ok": true, "skipped": "gate_instance"}
-		payload = payload.duplicate()
-		payload["map_name"] = str(gr.map)
-		payload["px"] = float(gr.x)
-		payload["pz"] = float(gr.z)
 	var request: Dictionary = {"method": method}
 	for key in payload.keys():
 		request[key] = payload[key]
@@ -388,17 +373,10 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 		"_sv_rd_resets": int((ps.get("settings", {}) as Dictionary).get("rd_resets", 0)) if typeof(ps.get("settings", {})) == TYPE_DICTIONARY else 0,
 		"_sv_quests": ps.get("quests", {}),    # gorevler (rutbe hesabi)
 		"_sv_rank": 0,    # rutbe rozeti (1..21), _calculate_ranks ile doldurulur
-		"_sv_rings": clampi(int(ps.get("gate_rings", 0)), 0, 3),   # Galaxy Gate halkalari (ilk bitirdigin kapilar, en fazla 3)
 		"_sv_owned": ps.get("owned", [str(ps.get("ship", "phoenix"))]),  # sahip oldugu gemiler
 		"_session_hash": session_hash,   # tek cihaz kurali: bu oturumun kilit kimligi
 	}
 	var p: Dictionary = players[peer_id]
-	# Rutbe: giris yapar yapmaz (dakikalik tur beklemeden) mevcut siralamadan ata; admin dogrudan rank_21.
-	var rb_acct: Dictionary = rank_board.get("by_acct", {})
-	if bool(p.get("_sv_admin", 0)):
-		p["_sv_rank"] = 21
-	elif rb_acct.has(acct_id):
-		p["_sv_rank"] = int((rb_acct[acct_id] as Dictionary).icon)
 	# Klan kimligi (etiket + rol): isim etiketi ve klan sohbeti icin
 	var clan_id_resp: Dictionary = db_send("clan_tag_of", {"account_id": acct_id})
 	p["_clan_id"] = int(clan_id_resp.get("clan_id", 0)) if bool(clan_id_resp.get("ok", false)) else 0
@@ -414,9 +392,7 @@ func on_attach_token(peer_id: int, token: String) -> Array:
 	# (harita, konum, can, kalkan, savas sayaclari). Eski kimlik haritadakilerden silinir.
 	var ghost_id: int = -1
 	for gk in players.keys():
-		# Galaxy Gate orneklerindeki hayalet devralinmaz: istemci kapi haritasini bilmez; oyuncu X-1'de normal girer,
-		# kapi ilerlemesi DB'den okunur (hayalet suresi dolunca ornek kapanir ve ilerleme yazilir).
-		if int(gk) != peer_id and _is_ghost(players[gk]) and int(players[gk].get("account_id", -1)) == acct_id and not DOData.is_gate_map(str(players[gk].get("map", ""))):
+		if int(gk) != peer_id and _is_ghost(players[gk]) and int(players[gk].get("account_id", -1)) == acct_id:
 			ghost_id = int(gk)
 			break
 	if ghost_id != -1:
@@ -477,7 +453,7 @@ func on_join(peer: int, proto: int, nm: String, faction: int, ship: String) -> A
 	# Token asamasinda yuklenen sunucu ekonomi/profil kopyasini KORU (odul kaybi olmasin).
 	for _k in ["_sv_cr", "_sv_uri", "_sv_xp", "_sv_hon", "_sv_sep", "_sv_kills",
 			"_sv_pvp_kills", "_sv_settings", "_sv_inventory", "_sv_admin",
-			"_sv_rank", "_sv_rings", "_sv_reg_ts", "_sv_rank_pen", "_sv_quests", "_sv_owned", "_session_hash"]:
+			"_sv_rank", "_sv_reg_ts", "_sv_rank_pen", "_sv_quests", "_sv_owned", "_session_hash"]:
 		if old_p.has(_k):
 			players[peer][_k] = old_p[_k]
 	if ghosts.has(nm.to_lower()):
@@ -787,11 +763,7 @@ func on_disconnect(peer: int, release_lock: bool = true, force_remove: bool = fa
 
 func _maybe_free_world(map_name: String) -> void:
 	if worlds.has(map_name) and _players_in(map_name).is_empty():
-		if DOData.is_gate_map(map_name):
-			_gate_flush(worlds[map_name], true)   # kapidan cikis/baglanti kopmasi: ilerleme kaybolmasin
 		worlds.erase(map_name)
-		if DOData.is_gate_map(map_name):
-			maps.erase(map_name)   # kapi ornegi gecici: ilerleme sifirlanir
 		print("[SUNUCU] Harita %s bos, NPC'ler temizlendi." % map_name)
 
 
@@ -838,11 +810,6 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 	p.jump_dl = -1.0
 	p.respawn_ok = false
 	p.map = map_name
-	if DOData.is_gate_map(map_name):
-		# Galaxy Gate: oyuncu kapiya atladiginda HER ZAMAN haritanin ortasinda dogar.
-		var gm0: Dictionary = maps[map_name]
-		x = float(gm0.w) * DOData.S * 0.5
-		z = float(gm0.h) * DOData.S * 0.5
 	p.pos = Vector3(x, 0.0, z)
 	p.in_safe = false
 	var w: Dictionary = _get_world(map_name)
@@ -873,149 +840,79 @@ func on_map(peer: int, map_name: String, x: float, z: float) -> void:
 func _player_info(p: Dictionary, include_owned: bool = false) -> Array:
 	var arr: Array = [int(p.id), str(p.name), int(p.faction), str(p.ship), float((p.pos as Vector3).x), float((p.pos as Vector3).z),
 		float(p.yaw), float(p.hp), float(p.mhp), float(p.sh), float(p.msh), str(p.form), (p.drn as Array).duplicate(),
-		int(p.get("_sv_admin", 0)), int(p.get("_sv_rank", 0)) + 100 * clampi(int(p.get("_sv_rings", 0)), 0, 3)]
-	# NOT: 14. eleman = rutbe (1..21) + 100 x halka sayisi (0..3). Istemci: rutbe = v % 100, halka = v / 100.
+		int(p.get("_sv_admin", 0)), int(p.get("_sv_rank", 0))]
 	if include_owned:
 		arr.append((p.get("_sv_owned", []) as Array).duplicate())
 	return arr
 
-# RUTBE SIRALAMASI (sunucu otoriter).
-#  * TUM hesaplar (cevrimdisi olanlar dahil) kendi sirketi icinde puana gore siralanir; yalnizca cevrimici olanlar degil.
-#  * Siralama + "En iyi 10" listesi SAATTE BIR guncellenir (RankSys.BOARD_SECONDS). Listede olmayan yeni bir hesap
-#    cevrimici olursa rutbeler en fazla dakikada bir yenilenir (liste yine saatlik).
-#  * Sirketin puan sirasinda 1. olan her zaman en yuksek rutbeyi (General) alir.
-#  * Adminler siralamaya girmez (rank_21.png). Her dakika cagrilir; gerekmedikce DB'ye gitmez.
+# Her 60 saniyede bir calistirilir: her sirket icin oyuncularin rutbesini hesaplar.
+# Adminler siralamaya girmez. RankSys.points() formulu ile puan hesaplanir, RankSys.rank_index()
+# ile rutbe indeksi (0..19) bulunur ve 1..21 arasinda bir rozet numarasina donusturulur
+# (20 = en yuksek rutbe rank_20.png, 21 = admin rank_21.png).
 func _calculate_ranks() -> void:
 	var now: float = Time.get_unix_time_from_system()
-	var by_acct: Dictionary = rank_board.get("by_acct", {})
-	var stale: bool = rank_board.is_empty() or now - rank_top_ts >= RankSys.BOARD_SECONDS
-	if not stale:
-		for pid in players.keys():
-			var np: Dictionary = players[pid]
-			if str(np.map) == "" or bool(np.get("_sv_admin", 0)):
-				continue
-			if not by_acct.has(int(np.get("account_id", -1))):
-				stale = now - rank_board_try >= 60.0   # yeni hesap: en fazla dakikada bir yenile
-				break
-	if stale:
-		rank_board_try = now
-		_refresh_rank_board(now)
-	_apply_ranks()
-
-
-func _refresh_rank_board(now: float) -> bool:
-	var resp: Dictionary = db_send("rank_rows", {})
-	if not (resp.has("ok") and bool(resp.get("ok", false))):
-		print("[RANK] rank_rows basarisiz: %s" % str(resp.get("error", "?")))
-		return false
-	# Cevrimici oyuncularin CANLI degerleri (veritabani satirindan daha guncel) uzerine yazilir.
-	var live: Dictionary = {}
-	for pid in players.keys():
-		var lp: Dictionary = players[pid]
-		var la: int = int(lp.get("account_id", -1))
-		if la > 0:
-			live[la] = lp
-	var entries: Array = []
-	for r in (resp.get("rows", []) as Array):
-		var acct: int = int(r.get("account_id", 0))
-		var sv: Dictionary = {
-			"xp": float(r.get("xp", 0.0)), "hon": float(r.get("hon", 0.0)), "ship": str(r.get("ship", "phoenix")),
-			"pvp_kills": int(r.get("pvp_kills", 0)), "kills": int(r.get("kills", 0)),
-			"reg_ts": int(r.get("reg_ts", now)), "rank_pen": float(r.get("rank_pen", 0.0)),
-			"quests_done": int(r.get("quests_done", 0)),
-		}
-		var admin: bool = int(r.get("is_admin", 0)) != 0
-		var rings: int = int(r.get("rings", 0))
-		if live.has(acct):
-			var p: Dictionary = live[acct]
-			sv["xp"] = float(p.get("_sv_xp", sv.xp))
-			sv["hon"] = float(p.get("_sv_hon", sv.hon))
-			sv["ship"] = str(p.get("ship", sv.ship))
-			sv["pvp_kills"] = int(p.get("_sv_pvp_kills", sv.pvp_kills))
-			sv["kills"] = int(p.get("_sv_kills", sv.kills))
-			sv["rank_pen"] = float(p.get("_sv_rank_pen", sv.rank_pen))
-			var lq = p.get("_sv_quests", null)
-			if typeof(lq) == TYPE_DICTIONARY:
-				sv.erase("quests_done")
-				sv["quests"] = lq
-			admin = admin or bool(p.get("_sv_admin", 0))
-			rings = int(p.get("_sv_rings", rings))
-		var pts: Dictionary = RankSys.points(sv, now)
-		entries.append({"acct": acct, "name": str(r.get("name", "?")), "faction": int(r.get("faction", 1)),
-			"pts": float(pts.total), "admin": admin, "rings": clampi(rings, 0, 3)})
-	var board: Dictionary = RankSys.build_board(entries)
-	var first_time: bool = rank_board.is_empty()
-	rank_board = board
-	# "En iyi 10" yalnizca saatlik (veya ilk) yenilemede degisir.
-	if first_time or now - rank_top_ts >= RankSys.BOARD_SECONDS:
-		rank_top = (board.top as Array).duplicate(true)
-		rank_top_ts = now
-		print("[RANK] siralama guncellendi: %d oyuncu, ilk 10 yenilendi" % int(board.total))
-	return true
-
-
-func _apply_ranks() -> void:
-	var by_acct: Dictionary = rank_board.get("by_acct", {})
+	# Sirketlere gore ayir: {faction: [peer_id, ...]}
+	var by_faction: Dictionary = {}
 	for pid in players.keys():
 		var p: Dictionary = players[pid]
 		if str(p.map) == "":
 			continue
-		var old_rank: int = int(p.get("_sv_rank", 0))
-		var rank_num: int = old_rank
-		if bool(p.get("_sv_admin", 0)):
-			rank_num = 21   # admin: rank_21.png
-		else:
-			var acct: int = int(p.get("account_id", -1))
-			if by_acct.has(acct):
-				rank_num = int((by_acct[acct] as Dictionary).icon)   # 1..20
-		if rank_num != old_rank:
+		var f: int = int(p.faction)
+		if not by_faction.has(f):
+			by_faction[f] = []
+		(by_faction[f] as Array).append(pid)
+	# Her sirket icin sirala ve rutbe ata
+	for f in by_faction.keys():
+		var members: Array = by_faction[f]
+		# Puan hesapla
+		var entries: Array = []
+		for pid in members:
+			var p: Dictionary = players[pid]
+			var acct_id: int = int(p.get("account_id", -1))
+			if bool(p.get("_sv_admin", 0)):
+				var old_rank: int = int(p.get("_sv_rank", 0))
+				p["_sv_rank"] = 21   # admin: rank_21.png
+				if 21 != old_rank and str(p.map) != "":
+					# Admin rozeti: kendine ve haritadaki digerlere gonder (mevcut s_pjoin RPC'si, yeni RPC yok).
+					_to(int(pid), "s_pjoin", [_player_info(p, true)])
+					_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
+				print("[RANK DEBUG] account_id=%d faction=%d admin -> rank=21 (rank_21.png), old=%d" % [acct_id, f, old_rank])
+				continue
+			var sv: Dictionary = {
+				"xp": float(p.get("_sv_xp", 0.0)),
+				"hon": float(p.get("_sv_hon", 0.0)),
+				"ship": str(p.get("ship", "phoenix")),
+				"pvp_kills": int(p.get("_sv_pvp_kills", 0)),
+				"kills": int(p.get("_sv_kills", 0)),
+				"reg_ts": int(p.get("_sv_reg_ts", now)),
+				"rank_pen": float(p.get("_sv_rank_pen", 0.0)),
+				"quests": p.get("_sv_quests", {}),
+				"settings": p.get("_sv_settings", "{}"),
+			}
+			var pts: Dictionary = RankSys.points(sv, now)
+			entries.append({"pid": pid, "pts": float(pts.total), "acct_id": acct_id})
+		# Puanla sirala (yukselen)
+		entries.sort_custom(func(a, b): return float(a.pts) > float(b.pts))
+		# Sira no ver ve rutbe indeksi hesapla
+		var counts: int = entries.size()
+		for i in range(entries.size()):
+			var e: Dictionary = entries[i]
+			var pos: int = i + 1
+			var idx: int = RankSys.rank_index(pos, counts)
+			var rank_num: int = RankSys.icon_id(idx)   # 1..20
+			var p: Dictionary = players[e.pid]
+			var old_rank: int = int(p.get("_sv_rank", 0))
 			p["_sv_rank"] = rank_num
-			# Rozette degisiklik var: digerlerine ve kendine gonder (mevcut s_pjoin RPC'si, yeni RPC yok).
-			_bcast(str(p.map), "s_pjoin", [_player_info(p)], int(pid))
-			_to(int(pid), "s_pjoin", [_player_info(p)])
+			print("[RANK DEBUG] account_id=%d faction=%d pos=%d/%d pts=%.2f idx=%d rank=%d, old=%d" % [e.acct_id, f, pos, counts, float(e.pts), idx, rank_num, old_rank])
+			if rank_num != old_rank and str(p.map) != "":
+				# Rozette degisiklik var: digerlerine ve kendine gonder (mevcut s_pjoin RPC'si, yeni RPC yok).
+				_bcast(str(p.map), "s_pjoin", [_player_info(p)], e.pid)
+				_to(int(e.pid), "s_pjoin", [_player_info(p)])
 
-
-# Istemciye siralama bilgisi: en iyi 10 (saatlik) + kendi sirasi. Istemci "rank_top" olayini ister.
-func _send_rank_top(peer: int) -> void:
-	if not players.has(peer):
-		return
-	if rank_board.is_empty():
-		_refresh_rank_board(Time.get_unix_time_from_system())
-	var p: Dictionary = players[peer]
-	var me: Dictionary = {}
-	if bool(p.get("_sv_admin", 0)):
-		me = {"admin": true}
-	else:
-		var by_acct: Dictionary = rank_board.get("by_acct", {})
-		var acct: int = int(p.get("account_id", -1))
-		if by_acct.has(acct):
-			me = (by_acct[acct] as Dictionary).duplicate()
-	send_event_to(peer, "rank_top", {"top": rank_top, "me": me, "ts": rank_top_ts,
-		"next": rank_top_ts + float(RankSys.BOARD_SECONDS), "total": int(rank_board.get("total", 0)),
-		"rings": int(p.get("_sv_rings", 0))})
-
-
-# Kapiyi ILK bitiren oyuncuya halka verildi (DB gate_finish -> first): rozeti herkese yenile + oyuncuya bildir.
-func _gate_ring_awarded(acct: int, gid: String, rings: int) -> void:
-	for pid in players.keys():
-		var rp: Dictionary = players[pid]
-		if int(rp.get("account_id", -1)) != acct:
-			continue
-		rp["_sv_rings"] = clampi(rings, 0, 3)
-		var gname: String = str(DOData.GALAXY_GATES.get(gid, {}).get("name", gid))
-		var txt: String = "★ %s kapısını ilk bitiren sensin! Rütbenin üstüne bir halka eklendi (%d/3)." % [gname, clampi(rings, 0, 3)]
-		if clampi(rings, 0, 3) >= 3:
-			txt = "★ Üç Galaxy Gate'i de ilk bitiren sensin! Rütbenin üstünde 3 ALTIN halka var."
-		send_event_to(int(pid), "gg_ring", {"gate": gid, "rings": clampi(rings, 0, 3), "text": txt})
-		if str(rp.map) != "":
-			_bcast(str(rp.map), "s_pjoin", [_player_info(rp)], int(pid))
-			_to(int(pid), "s_pjoin", [_player_info(rp)])
 
 
 func _npc_info(e: Dictionary) -> Array:
-	# 8. eleman: kapi guc carpani (istemci can/kalkan cubugu icin; normal NPC'lerde 1)
-	return [int(e.uid), str(e.id), float((e.pos as Vector3).x), float((e.pos as Vector3).z), float(e.yaw), float(e.hp), float(e.sh),
-		float(e.get("mul", 1.0))]
+	return [int(e.uid), str(e.id), float((e.pos as Vector3).x), float((e.pos as Vector3).z), float(e.yaw), float(e.hp), float(e.sh)]
 
 
 # Koruma durumunu SUNUCU hesaplar (konum + saldiri kilidi + gecici koruma); degisince oyuncuya bildirir.
@@ -1059,11 +956,6 @@ func on_jump(peer: int, to: String) -> void:
 	var why: String = SafeZone.jump_block_reason(w.m, clock, float(p.combat_t))
 	if why != "":
 		_to(peer, "s_jump_result", [false, mn, why])
-		return
-	if to == "@next":
-		# Galaxy Gate: merkezdeki "sonraki kat" kapisi (harita degismez, oyuncu ortaya alinir)
-		if DOData.is_gate_map(mn) and w.has("gate"):
-			_gate_next_floor(peer, w)
 		return
 	var dest: String = to
 	if to == "random":
@@ -1124,14 +1016,6 @@ func on_fire_vis(peer: int, kind: int, ref: int, nb: int, ammo: String) -> void:
 	# Sunucu dogrulamasi: oyuncu salvosu PLAYER_FIRE_INTERVAL'dan sik olamaz. Jeton kovasi: ortalama hiz tam sinirda tutulur,
 	# ag gecikmesi yuzunden birikip gelen en fazla FIRE_BURST salvoya izin verilir. Fazlasi yayinlanmaz / saldiri sayilmaz.
 	var fp: Dictionary = players[peer]
-	# Hedef GERCEKTEN korumadaki (guvenli bolge / kapi) bir oyuncuysa ates yayinlanmaz, saldiri sayilmaz (saldiranin korumasi kalkmaz).
-	if kind == 1 and players.has(ref) and ref != peer:
-		var fv: Dictionary = players[ref]
-		if str(fv.map) != "" and str(fv.map) == str(fp.map) and int(fv.faction) != int(fp.faction) and worlds.has(str(fv.map)):
-			_update_safe(fv, worlds[str(fv.map)])
-			if bool(fv.in_safe):
-				_to(peer, "s_safe_target", [ref])
-				return
 	var ftok: float = minf(FIRE_BURST, float(fp.get("fire_tok", FIRE_BURST)) + (clock - float(fp.get("fire_tok_t", clock))) / DOData.PLAYER_FIRE_INTERVAL)
 	fp["fire_tok_t"] = clock
 	if ftok < 1.0:
@@ -1223,10 +1107,10 @@ func _rocket_cap(p: Dictionary) -> float:
 # Hasar kovasi: kapasite = birkac salvo (ag gecikmesiyle birikip gelen vuruslar icin), dolum hizi = azami salvo hasari /
 # atis araligi + roket. Nukleer penceresinde hedef basina tek vurus (<= %15 maks can) kovadan bagimsiz kabul edilir.
 # Donus: UYGULANACAK hasar (bildirilenden kucuk olabilir, 0 = reddet).
-func _grant_dmg(p: Dictionary, dmg: float, key: String, target_max: float, nuke_frac: float = SV_NUKE_FRAC) -> float:
+func _grant_dmg(p: Dictionary, dmg: float, key: String, target_max: float) -> float:
 	if clock < float(p.get("nuke_until", 0.0)):
 		var nh: Dictionary = p.get("nuke_hit", {}) as Dictionary
-		if not nh.has(key) and dmg <= target_max * nuke_frac * 1.02 + 1.0:
+		if not nh.has(key) and dmg <= target_max * SV_NUKE_FRAC * 1.02 + 1.0:
 			nh[key] = true
 			p["nuke_hit"] = nh
 			return dmg
@@ -1295,7 +1179,7 @@ func on_hit_npc(peer: int, uid: int, dmg: float, mode: int = 0) -> void:
 	if dd.length() > DOData.LASER_RANGE * DOData.S * HIT_RANGE_MUL:
 		return    # cok uzaktan gelen vurus: reddedildi
 	# SUNUCU OTORITER HASAR: bildirilen hasar, oyuncunun gemisinin teorik azami hasar kovasina gore SINIRLANIR.
-	dmg = _grant_dmg(p, dmg, "n%d" % uid, float(e.get("mx", e.hp)), SV_NUKE_FRAC_GATE if bool(e.get("gate", false)) else SV_NUKE_FRAC)
+	dmg = _grant_dmg(p, dmg, "n%d" % uid, float(e.get("mx", e.hp)))
 	if dmg <= 0.0:
 		return
 	_register_attack(p)   # guvenli bolgede NPC'ye saldirmak korumayi kaldirir
@@ -1340,7 +1224,7 @@ func _top_damager(w: Dictionary, e: Dictionary, fallback: int) -> int:
 	return best
 
 
-func on_hit_player(peer: int, victim: int, dmg: float, mode: int = 0) -> void:
+func on_hit_player(peer: int, victim: int, dmg: float) -> void:
 	if not players.has(peer) or not players.has(victim) or peer == victim or dmg <= 0.0 or dmg > 5.0e6:
 		return
 	if _is_ghost(players[peer]):
@@ -1359,33 +1243,23 @@ func on_hit_player(peer: int, victim: int, dmg: float, mode: int = 0) -> void:
 	dd.y = 0.0
 	if dd.length() > DOData.LASER_RANGE * DOData.S * HIT_RANGE_MUL:
 		return
-	# 0) KORUMA KONTROLU EN BASTA: kurban GERCEKTEN korumadaysa (guvenli bolge / kapi / gecici koruma) saldiri hic baslamaz.
-	#    Saldirana "guvenli bolgede" uyarisi gider; saldiranin korumasi KALKMAZ, hasar / SAB emilimi YOK.
-	if str(v.map) != "" and worlds.has(str(v.map)):
-		_update_safe(v, worlds[str(v.map)])
-	if bool(v.in_safe):
-		_to(peer, "s_safe_target", [victim])
-		return
 	# SUNUCU OTORITER HASAR: (bkz. _grant_dmg) bildirilen hasar teorik azami kovayla sinirlanir.
 	dmg = _grant_dmg(a, dmg, "p%d" % victim, float(v.get("mhp", 1.0)))
 	if dmg <= 0.0:
 		return
 	# 1) Saldiran, guvenli bolgede olsa bile koruma DERHAL kalkar (ve kilitlenir: kacarak kurtulamaz).
 	_register_attack(a)
-	# 2) Iki taraf da "catisma" durumuna girer (kapi kilidi icin; hasar almaktan ayri sayac).
+	# 2) Kurban hala GERCEK korumadaysa (guvenli bolge / gecici koruma) hasar YOK. Saldiran artik korumasiz oldugu icin
+	#    kurban misilleme yapabilir; kurban kendisi saldirdiysa (kilitliyse) zaten korumasizdir.
+	_update_safe(v, worlds[str(v.map)])
+	if bool(v.in_safe):
+		return
+	# 3) Hasar verildi: iki taraf da "catisma" durumuna girer (kapi kilidi icin; hasar almaktan ayri sayac).
 	a.combat_t = clock + DOData.COMBAT_SEC
 	v.combat_t = clock + DOData.COMBAT_SEC
 	v.last_dmg_t = clock
 	a["last_pvp_t"] = clock
 	v["last_pvp_t"] = clock
-	# SAB (mode 1): yalnizca kalkan emilir, govdeye hasar verilmez. Kurbanin kalkani sunucuda da, kurbanin istemcisinde de dusurulur.
-	if mode == 1:
-		var drain: float = minf(maxf(float(v.sh), 0.0), dmg)
-		if drain > 0.0:
-			v.sh = float(v.sh) - drain
-			if not _is_ghost(v):
-				_to(victim, "s_drain", [peer, drain])
-		return
 	_note_damage_from(v, peer, dmg)   # oldurme kredisi dogrulamasi icin kim ne kadar vurdu
 	if _is_ghost(v):
 		_ghost_damage(victim, dmg, peer, true)   # baglantisi kopmus gemi: hasari sunucu uygular, sure yenilenir
@@ -1606,17 +1480,6 @@ func _get_world(map_name: String) -> Dictionary:
 		(w.portals as Array).append(w2g(float(pt.x), float(pt.y)))
 		(w.portal_defs as Array).append({"to": str(pt.to), "pos": w2g(float(pt.x), float(pt.y))})
 	worlds[map_name] = w
-	if DOData.is_gate_map(map_name):
-		var gid: String = DOData.gate_id_of_map(map_name)
-		var rs: Dictionary = m.get("resume", {})
-		var wv0: int = int(rs.get("wave", 0))
-		var gp0: int = 0   # dalgalar zamanla gelir: kat her zaman bastan baslar (kismi ilerleme tutulmaz)
-		var gk0: int = 0
-		w["gate"] = {"id": gid, "wave": wv0, "grp": gp0, "gk": gk0, "st": "intro", "t": GATE_INTRO_SEC,
-			"killed": DOData.gate_killed_before(gid, wv0, gp0) + gk0,
-			"total": DOData.gate_total_npcs(gid), "done": false, "tries": 0,
-			"owner": int(m.get("owner", 0)), "dirty": false, "save_t": 0.0}
-		gate_pending.erase(map_name)
 	_spawn_world_boxes(w)
 	_spawn_world_npcs(w)
 	print("[SUNUCU] Harita %s etkinlestirildi: %d NPC dogdu." % [map_name, (w.npcs as Dictionary).size()])
@@ -1634,8 +1497,6 @@ func _box_rand_pos(w: Dictionary) -> Vector3:
 
 
 func _spawn_world_boxes(w: Dictionary) -> void:
-	if DOData.is_gate_map(str(w.name)):
-		return   # Galaxy Gate icinde bonus kutu YOK
 	var m: Dictionary = w.m
 	var size_mul: float = maxf(1.0, sqrt(float(m.w) * float(m.h) / (DOData.STD_MAP_W * DOData.STD_MAP_H)))
 	for i in int(35.0 * size_mul):
@@ -1755,16 +1616,10 @@ func _zone_spot(w: Dictionary, z: Dictionary, used: Array) -> Vector3:
 	var m: Dictionary = w.m
 	if z.has("fixed"):
 		var fp: Vector3 = w2g(float(z["fixed"][0]), float(z["fixed"][1]))
-		var bd: Array = z.get("bounds", [])
 		for gi in 24:
 			if _spot_free(w, fp, used):
 				return fp
-			if bd.size() == 4:
-				# Sektor sinirlari varsa (Cubikon): yeni nokta YALNIZCA sektorun icinden secilir, disina tasmaz.
-				var mg: float = float(DOData.CUBIKON.get("sector_margin", 600.0))
-				fp = w2g(randf_range(float(bd[0]) + mg, float(bd[2]) - mg), randf_range(float(bd[1]) + mg, float(bd[3]) - mg))
-			else:
-				fp += Vector3(randf_range(-1600.0, 1600.0), 0.0, randf_range(-1600.0, 1600.0)) * DOData.S
+			fp += Vector3(randf_range(-1600.0, 1600.0), 0.0, randf_range(-1600.0, 1600.0)) * DOData.S
 		return fp
 	var fa: Array = z.get("area", [1500.0, 1500.0, float(m.w) - 1500.0, float(m.h) - 1500.0])
 	for gi in 48:
@@ -1821,13 +1676,6 @@ func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 	e["dead"] = true
 	e.hp = 0.0
 	(w.npcs as Dictionary).erase(e.uid)
-	if bool(e.get("gate", false)) and w.has("gate") and not silent:
-		w.gate.killed = int(w.gate.killed) + 1
-		w.gate.gk = int(w.gate.get("gk", 0)) + 1
-		if not bool(w.gate.dirty):
-			w.gate.save_t = GATE_SAVE_SEC
-			w.gate.dirty = true
-		_gate_push(w)
 	# --- Cubikon hasar-oranli odul (B) ---
 	if str(e.id) == "cubikon" and not silent:
 		_cubikon_reward(w, e)
@@ -1899,8 +1747,8 @@ func _kill_npc(w: Dictionary, e: Dictionary, killer: int, silent: bool) -> void:
 					"kills": 1,
 					"state": res,
 				}])
-	if silent or int(e.guard_home) != 0 or bool(e.get("gate", false)):
-		return   # kapi NPC'leri yeniden dogmaz
+	if silent or int(e.guard_home) != 0:
+		return
 	var at: Variant = null
 	if str(e.id) == "cubikon":
 		at = e.pos
@@ -2003,7 +1851,6 @@ func tick(dt: float) -> void:
 	clock += dt
 	if auc != null:
 		auc.tick(dt)
-	_tick_gates(dt)
 	for wn in worlds.keys():
 		var w: Dictionary = worlds[wn]
 		_tick_respawn(w, dt)
@@ -2013,7 +1860,6 @@ func tick(dt: float) -> void:
 			if not (w.npcs as Dictionary).has(uid):
 				continue
 			_update_npc(w, w.npcs[uid], dt)
-		_gate_resolve_overlaps(w)   # Galaxy Gate NPC'leri ASLA ic ice giremez (sert cozum)
 	nsnap_t += dt
 	if nsnap_t >= NSNAP_DT:
 		nsnap_t = 0.0
@@ -2248,7 +2094,7 @@ func _send_player_snaps() -> void:
 				# bant genisligi: uzaktaki oyuncular seyrek (her FAR_EVERY. pakette), yakindakiler her pakette
 				if psnap_n % FAR_EVERY != 0 and ((o.pos as Vector3) - mypos).length() > near_u:
 					continue
-				arr.append([int(oid), (o.pos as Vector3).x, (o.pos as Vector3).z, float(o.yaw), float(o.hp), float(o.mhp), float(o.sh), float(o.msh), float(o.spd), int(o.get("prot", 0))])
+				arr.append([int(oid), (o.pos as Vector3).x, (o.pos as Vector3).z, float(o.yaw), float(o.hp), float(o.mhp), float(o.sh), float(o.msh), float(o.spd)])
 			net.rpc_id(int(pid), "s_psnap", arr)
 
 
@@ -2281,183 +2127,6 @@ func _emit_fire(w: Dictionary, e: Dictionary, target_peer: int, dmg: float) -> v
 	_bcast(str(w.name), "s_npc_fire", [int(e.uid), target_peer, dmg])
 
 
-# ---------------- Galaxy Gate NPC konumlanmasi
-# Her kapi NPC'si oyuncunun etrafinda kendine ait bir YUVA (aci + halka) alir: acilar esit dagilir, halkalar
-# lazer menzili icinde/disinda kademeli. NPC yuvaya gider, yuva oyuncuyla birlikte yavasca doner (hareket
-# ederek ates eder) ve komsulardan ayrilma kuvvetiyle itilir -> ust uste binmez. Hasar/atis kodu degismedi.
-const GATE_RING_OUTER := 0.9        # en dis halka yaricapi = NPC lazer menzili x bu deger (hepsi menzil ICINDE kalir)
-const GATE_SLOT_SZ := 6.0          # yuva hesabi icin referans gemi boyu (Saimon = 6)
-const GATE_SLOT_SPACING := 0.8     # ayni halkada yuvalar arasi mesafe = referans boy x bu deger
-const GATE_RING_GAP := 0.7         # halkalar arasi mesafe = referans boy x bu deger (halkalar sirali/kaydirmali dizilir)
-const GATE_SEP_FRAC := 0.75        # iki NPC arasi en az mesafe = ortalama gemi boyu x bu deger (yuva araligindan KUCUK olmali)
-const GATE_SEP_PUSH := 1.6         # ayrilma itmesinin en yuksek hizi (NPC hizinin kati)
-const GATE_ORBIT_W := 0.0          # yuva donus hizi (rad/sn). 0 = oyuncu durunca NPC'ler de sabit daire olarak durur
-
-
-func _gate_ship_sz(e: Dictionary) -> float:
-	return maxf(1.0, float((e.d as Dictionary).get("sz", 5.0)))
-
-
-# Halka k'nin yaricapi (Godot birimi). Yaricap cok kuculurse -1 doner (halka yok).
-func _gate_ring_radius(range_u: float, k: int) -> float:
-	var r: float = range_u * GATE_RING_OUTER - float(k) * GATE_SLOT_SZ * GATE_RING_GAP
-	return r if r >= 1.0 else -1.0
-
-
-# Halkadaki yuva sayisi: cevre / yuva araligi
-func _gate_ring_cap(r: float) -> int:
-	return maxi(1, int(TAU * r / (GATE_SLOT_SZ * GATE_SLOT_SPACING)))
-
-
-# Yuva (halka k, sira j) -> oyuncuya gore aci. Tek sayili halkalar yarim yuva kaydirilir (petek dizilim).
-func _gate_slot_angle(k: int, j: int, cap: int) -> float:
-	return TAU * (float(j) + 0.5 * float(k % 2)) / float(cap)
-
-
-func _gate_assign_slot(w: Dictionary, e: Dictionary, tgt: Dictionary, range_u: float) -> void:
-	# Hedefe saldiran diger kapi NPC'lerinin dolu yuvalarini topla; en dis halkadan baslayarak NPC'nin
-	# geldigi yone EN YAKIN bos yuvayi sec. Tum halkalar lazer menzili ICINDE oldugundan her NPC vurabilir;
-	# yuvalar esit aralikli oldugundan oyuncu durunca NPC'ler duzgun daire/halka olusturur.
-	var taken: Dictionary = {}
-	for uid in (w.npcs as Dictionary).keys():
-		var o: Dictionary = w.npcs[uid]
-		if int(o.uid) == int(e.uid) or not bool(o.get("gate", false)) or float(o.hp) <= 0.0:
-			continue
-		if not o.has("slot_j") or int(o.get("slot_t", 0)) != int(tgt.id):
-			continue
-		taken[int(o.ring) * 1000 + int(o.slot_j)] = true
-	var bearing: float = atan2((e.pos as Vector3).z - (tgt.pos as Vector3).z, (e.pos as Vector3).x - (tgt.pos as Vector3).x)
-	var best_k: int = 0
-	var best_j: int = 0
-	var found: bool = false
-	var k: int = 0
-	while not found:
-		var rr: float = _gate_ring_radius(range_u, k)
-		if rr < 0.0:
-			break
-		var cap: int = _gate_ring_cap(rr)
-		var diff_best: float = 1.0e9
-		for j in cap:
-			if taken.has(k * 1000 + j):
-				continue
-			var diff: float = absf(wrapf(_gate_slot_angle(k, j, cap) - bearing, -PI, PI))
-			if diff < diff_best:
-				diff_best = diff
-				best_k = k
-				best_j = j
-				found = true
-		k += 1
-	if not found:
-		# Tum halkalar dolu (cok kalabalik): en dis halkada geldigi yone en yakin yuvayi al, cakismayi ayirma kodu cozer
-		var cap0: int = _gate_ring_cap(_gate_ring_radius(range_u, 0))
-		best_k = 0
-		best_j = int(roundf(wrapf(bearing, 0.0, TAU) / TAU * float(cap0))) % cap0
-	e["ring"] = best_k
-	e["slot_j"] = best_j
-	e["slot_t"] = int(tgt.id)
-
-
-const GATE_RESOLVE_ITERS := 30  # sert cakisma cozumu tekrar sayisi (kalabalikta da tamamen ayirir)
-
-
-# Her tick sonunda: kapi NPC'leri arasinda en az (gemi boylari ortalamasi x GATE_SEP_FRAC) mesafe ZORUNLU.
-# Yumusak itme kalabalikta birbirini goturup yetersiz kalabildigi icin burada konum dogrudan duzeltilir:
-# cakisan cift, cakisma miktarinin yarisi kadar zit yonlere kaydirilir; harita kenarina sikisanlar tekrar sinirlanir.
-func _gate_resolve_overlaps(w: Dictionary) -> void:
-	var list: Array = []
-	for uid in (w.npcs as Dictionary).keys():
-		var e: Dictionary = w.npcs[uid]
-		if bool(e.get("gate", false)) and float(e.hp) > 0.0:
-			list.append(e)
-	var n: int = list.size()
-	if n < 2:
-		return
-	for it in GATE_RESOLVE_ITERS:
-		var moved: bool = false
-		for i in n:
-			var a: Dictionary = list[i]
-			for j in range(i + 1, n):
-				var b: Dictionary = list[j]
-				var pa: Vector3 = a.pos
-				var pb: Vector3 = b.pos
-				var off: Vector3 = pa - pb
-				off.y = 0.0
-				var need: float = (_gate_ship_sz(a) + _gate_ship_sz(b)) * 0.5 * GATE_SEP_FRAC
-				var L: float = off.length()
-				if L >= need:
-					continue
-				var dir: Vector3
-				if L < 0.001:
-					var h: float = float((int(a.uid) * 31 + int(b.uid) * 17) % 360) * PI / 180.0   # tam ust uste: cift icin sabit yon
-					dir = Vector3(cos(h), 0.0, sin(h))
-				else:
-					dir = off / L
-				var half: float = (need - L) * 0.5
-				a.pos = pa + dir * half
-				b.pos = pb - dir * half
-				moved = true
-		for e2 in list:
-			_clamp_pos(w, e2)
-		if not moved:
-			break
-
-
-func _gate_npc_move(w: Dictionary, e: Dictionary, tgt: Dictionary, spd: float, range_u: float, dt: float) -> void:
-	var tpos: Vector3 = tgt.pos
-	var epos: Vector3 = e.pos
-	if not e.has("slot_j") or int(e.get("slot_t", 0)) != int(tgt.id):
-		_gate_assign_slot(w, e, tgt, range_u)
-	var ring_k: int = int(e.ring)
-	var ring_r: float = _gate_ring_radius(range_u, ring_k)
-	if ring_r < 0.0:
-		ring_r = range_u * GATE_RING_OUTER
-	var ring_cap: int = _gate_ring_cap(ring_r)
-	var ang: float = _gate_slot_angle(ring_k, int(e.slot_j) % ring_cap, ring_cap) + GATE_ORBIT_W * float(clock)
-	var m: Dictionary = w.m
-	var slot := Vector3(
-		clampf(tpos.x + cos(ang) * ring_r, 0.0, float(m.w) * DOData.S),
-		epos.y,
-		clampf(tpos.z + sin(ang) * ring_r, 0.0, float(m.h) * DOData.S))
-	# 1) yuvaya yaklas (asmadan, titremeden)
-	var to_slot: Vector3 = slot - epos
-	to_slot.y = 0.0
-	var dist: float = to_slot.length()
-	var move := Vector3.ZERO
-	if dist > 0.01:
-		move = to_slot / dist * minf(spd * dt, dist)
-	# 2) komsu kapi NPC'lerinden ayril
-	var push := Vector3.ZERO
-	var my_sz: float = _gate_ship_sz(e)
-	for uid in (w.npcs as Dictionary).keys():
-		var o: Dictionary = w.npcs[uid]
-		if int(o.uid) == int(e.uid) or not bool(o.get("gate", false)) or float(o.hp) <= 0.0:
-			continue
-		var off: Vector3 = epos - (o.pos as Vector3)
-		off.y = 0.0
-		var sep: float = (my_sz + _gate_ship_sz(o)) * 0.5 * GATE_SEP_FRAC
-		var L: float = off.length()
-		if L >= sep:
-			continue
-		var dir: Vector3
-		if L < 0.001:
-			var h: float = float(int(e.uid) % 360) * PI / 180.0   # tam ust uste: kimliginden turetilen yone it
-			dir = Vector3(cos(h), 0.0, sin(h))
-		else:
-			dir = off / L
-		push += dir * ((sep - L) / sep)
-	if push.length() > 1.0:
-		push = push.normalized()
-	move += push * spd * GATE_SEP_PUSH * dt
-	e.pos = epos + move
-	# Yuzunu: menzile yakinsa oyuncuya, uzaksa gittigi yone cevir
-	var to_p: Vector3 = tpos - (e.pos as Vector3)
-	to_p.y = 0.0
-	if to_p.length() < range_u * 1.1 or move.length_squared() < 0.000001:
-		_face(e, to_p, dt)
-	else:
-		_face(e, move, dt)
-
-
 func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 	if str(e.id) == "cubikon":
 		_update_cubic(w, e, dt)
@@ -2468,7 +2137,7 @@ func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 	var d: Dictionary = e.d
 	var spd: float = float(d.spd) * DOData.S * DOData.SPEEDMULT * 0.8
 	var aggro_u: float = DOData.AGGRO_RANGE * DOData.S
-	var range_u: float = (DOData.GATE_NPC_LASER_RANGE if bool(e.get("gate", false)) else DOData.NPC_LASER_RANGE) * DOData.S   # kapi NPC'si: oyuncunun %50'si, diger NPC'ler %80'i
+	var range_u: float = DOData.LASER_RANGE * DOData.S
 	# --- Sahiplik sure dolumu ve temizleme (A) ---
 	if int(e.owner) != 0:
 		var owner_ok: bool = false
@@ -2496,8 +2165,6 @@ func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 		dv.y = 0.0
 		var L: float = dv.length()
 		var ok: bool = (bool(d.aggr) and L < aggro_u) or (bool(e.aggro) and L < aggro_u * 3.0)
-		if bool(e.get("gate", false)):
-			ok = true   # Galaxy Gate NPC'si: sen ates etmesen de, nerede olursan ol sana saldirir
 		if not ok:
 			continue
 		var score: float = L - (1000.0 if int(pid) == int(e.target) else 0.0)
@@ -2510,12 +2177,9 @@ func _update_npc(w: Dictionary, e: Dictionary, dt: float) -> void:
 		var Ld: float = dvec.length()
 		e.aggro = true
 		e.target = int(tgt.id)
-		if bool(e.get("gate", false)):
-			_gate_npc_move(w, e, tgt, spd, range_u, dt)   # kapi NPC'si: acili konumlanma + yorunge + ayrilma
-		else:
-			if Ld > range_u * 0.6:
-				e.pos = (e.pos as Vector3) + dvec.normalized() * spd * dt
-			_face(e, dvec, dt)
+		if Ld > range_u * 0.6:
+			e.pos = (e.pos as Vector3) + dvec.normalized() * spd * dt
+		_face(e, dvec, dt)
 		var cd_prev: float = float(e.cd)
 		e.cd = cd_prev - dt
 		if Ld < range_u and float(e.cd) <= 0.0:
@@ -2571,7 +2235,7 @@ func _update_cubic(w: Dictionary, e: Dictionary, dt: float) -> void:
 		L = dv.length()
 		_face(e, dv, dt)   # sadece bakar, konumu degismez
 	var since_hit: float = clock - float(e.last_hit_t)
-	if since_hit > float(C.regen_delay) and float(e.hp) < float(e.mx) and not bool(e.get("gate", false)):   # Galaxy Gate NPC'leri can DOLDURAMAZ
+	if since_hit > float(C.regen_delay) and float(e.hp) < float(e.mx):
 		e.hp = minf(float(e.mx), float(e.hp) + float(C.regen_hp) * dt)
 	# Tamamen yenelirse tally'yi temizle (eski saldirilar yeni savasa karismasin)
 	if since_hit > float(C.regen_delay) and float(e.hp) >= float(e.mx):
@@ -2690,7 +2354,7 @@ func _update_guard(w: Dictionary, e: Dictionary, dt: float) -> void:
 		var gcl: Vector3 = goff.normalized() * leash_u
 		e.pos = Vector3(hpos.x + gcl.x, (e.pos as Vector3).y, hpos.z + gcl.z)
 	var L: float = ((tp.pos as Vector3) - (e.pos as Vector3)).length()
-	var engaged: bool = pflat.length() <= float(C.engage_range) * DOData.S and L <= minf(float(C.guard_range), DOData.NPC_LASER_RANGE) * DOData.S
+	var engaged: bool = pflat.length() <= float(C.engage_range) * DOData.S and L <= float(C.guard_range) * DOData.S
 	if engaged and not _untargetable(tp) and not bool(tp.in_safe):
 		_face(e, (tp.pos as Vector3) - (e.pos as Vector3), dt)
 		var cd_prev: float = float(e.cd)
@@ -2840,20 +2504,6 @@ func on_event(peer: int, tip: String, veri: Dictionary) -> void:
 			_clan_event(peer, veri)
 		"clan_chat":
 			_clan_chat(peer, str(veri.get("text", "")))
-		"rank_top":
-			_send_rank_top(peer)
-		"gg_enter":
-			_gate_enter(peer, str(veri.get("gate", "")))
-		"gg_info":
-			_gate_send_info(peer)
-		"gg_activate":
-			_gate_activate(peer, str(veri.get("gate", "")))
-		"gg_choice":
-			_gate_choice(peer, bool(veri.get("next", false)))
-		"gg_pulse":
-			_gate_generator_pulse(peer, str(veri.get("tx_id", "")), int(veri.get("count", 1)))
-		"gg_arm":
-			_gate_generator_arm(peer, bool(veri.get("armed", false)))
 		_:
 			pass  # bilinmeyen tip: yok say (eski/yeni surum uyumu)
 
@@ -2862,566 +2512,7 @@ func send_event_to(peer: int, tip: String, veri: Dictionary = {}) -> void:
 	_to(peer, "s_event", [tip, veri])
 
 
-# ------------------------------------------------------------------ GALAXY GATES (sunucu otoriter)
-# Istemci -> sunucu: "gg_enter" {gate} | "gg_activate" {gate} | "gg_info" {} | "gg_choice" {next: bool}
-#                    | "gg_pulse" {tx_id} (jenerator, 100 Uridium) | "gg_arm" {armed: bool} (saklanan carpani kullan)
-# Sunucu -> istemci: "gg_go" {gate,key,ret} | "gg_state" {...} | "gg_done" {...} | "gg_fail" {text}
-#                    | "gg_info" {gates:{gid:{parts,slots,active,required}}, progress, gen:{mult,armed}}
-#                    | "gg_pulse_result" {...} | "gg_activated" {gate} | "gg_return" {map}
-# Akis (orijinal DarkOrbit): Galaxy Gates menusundeki JENERATOR (100 Uridium/basim) -> parca yuvalari dolar (tekrar = carpan)
-#       -> tum parcalar tamam: menuden "KAPIYI AKTIF ET" ("gg_activate") -> sirketin X-1 haritasindaki kapidan "gg_enter".
-#       NPC oldurerek kapi parcasi KAZANILMAZ.
-# Her giris OYUNCUYA OZEL bir harita ornegi ("gg-<kapi>-<no>") acar. Ilerleme (bolum/grup/oldurulen) DB'de tutulur;
-# tekrar girince kalinan yerden devam edilir ve oldurulmus NPC'ler yeniden dogmaz. Veri tablosu: data.gd GALAXY_GATES.
-const GATE_INTRO_SEC := 5.0      # kapiya girince ilk grubun dogmasina kadar
-const GATE_GROUP_GAP := 5.0      # bir dalga dogdugunda SIRADAKI dalga bu kadar sn sonra gelir (oldurmeye bakmaz)
-const GATE_CIRCLE_R := 1700.0    # katin 1. dalgasinin oyuncunun etrafinda dizildigi daire yaricapi (DO birimi)
-const GATE_CIRCLE_STEP := 500.0  # her sonraki dalga bir oncekinden bu kadar DAHA UZAKTA dogar (DO birimi); kat basinda sifirlanir
-const GATE_EXIT_DX := 500.0      # kat bitince merkezde acilan iki kapinin merkezden yatay uzakligi (DO birimi)
-const GATE_WAVE_GAP := 6.0       # oyuncu "sonraki bolum" dedikten sonra bekleme
-const GATE_SPAWN_MIN := 1500.0   # grup, oyuncudan en az bu kadar (DO birimi) uzakta dogar
-const GATE_SPAWN_MAX := 2200.0
-const GATE_SPREAD := 700.0       # grup uyelerinin dagilma yaricapi (DO birimi)
-const GATE_REWARD_TRIES := 3
-const GATE_SAVE_SEC := 4.0       # oldurme sayaci degisince ilerleme en gec bu surede DB'ye yazilir
-var gate_return: Dictionary = {}    # account_id -> {map, x, z}: kapidan once bulunulan konum
-var gate_pending: Dictionary = {}   # kapi anahtari -> son gecerlilik zamani (girilmeyen kapi kayitlari temizlenir)
-var gate_seq: int = 0
-
-
-func _gate_fail(peer: int, text: String) -> void:
-	send_event_to(peer, "gg_fail", {"text": text})
-
-
-func _gate_required(gid: String) -> int:
-	return int(DOData.GALAXY_GATES.get(gid, {}).get("parts", 0))
-
-
-# DB'den parca/aktiflik/ilerleme durumunu okur. Bos sozluk = DB'ye ulasilamadi.
-func _gate_info_payload(aid: int) -> Dictionary:
-	var resp: Dictionary = db_send("gate_info", {"account_id": aid})
-	if not (resp.has("ok") and bool(resp.get("ok", false))):
-		return {}
-	var have: Dictionary = resp.get("gates", {})
-	var gates: Dictionary = {}
-	for gid in DOData.GATE_ORDER:
-		var gi: Dictionary = have.get(gid, {})
-		gates[gid] = {"parts": int(gi.get("parts", 0)), "slots": gi.get("slots", []), "active": bool(gi.get("active", false)), "required": _gate_required(str(gid))}
-	var gen: Dictionary = resp.get("gen", {}) if typeof(resp.get("gen", {})) == TYPE_DICTIONARY else {}
-	return {"gates": gates, "progress": resp.get("progress", {}),
-		"gen": {"mult": int(gen.get("mult", 0)), "armed": bool(gen.get("armed", false))}}
-
-
-func _gate_send_info(peer: int) -> void:
-	if not players.has(peer) or _is_ghost(players[peer]):
-		return
-	var p: Dictionary = players[peer]
-	if clock < float(p.get("gate_info_cd", 0.0)):
-		return
-	p["gate_info_cd"] = clock + 0.4
-	var aid: int = int(p.get("account_id", 0))
-	if aid <= 0:
-		return
-	var pl: Dictionary = _gate_info_payload(aid)
-	if pl.is_empty():
-		_gate_fail(peer, "Kapı bilgisi alınamadı.")
-		return
-	send_event_to(peer, "gg_info", pl)
-
-
-func _gate_activate(peer: int, gid: String) -> void:
-	if not players.has(peer) or _is_ghost(players[peer]):
-		return
-	var p: Dictionary = players[peer]
-	if clock < float(p.get("gate_act_cd", 0.0)):
-		return
-	p["gate_act_cd"] = clock + 1.0
-	var aid: int = int(p.get("account_id", 0))
-	var req: int = _gate_required(gid)
-	if aid <= 0 or req <= 0 or not bool(DOData.GALAXY_GATES.get(gid, {}).get("open", false)):
-		_gate_fail(peer, "Bu kapı henüz açık değil.")
-		return
-	var r: Dictionary = db_send("gate_activate", {"account_id": aid, "gate_id": gid, "required": req})
-	if not (r.has("ok") and bool(r.get("ok", false))):
-		match str(r.get("error", "")):
-			"parca_eksik":
-				_gate_fail(peer, "Kapıyı aktif etmek için %d parçanın tamamı gerekir." % req)
-			"zaten_aktif":
-				_gate_fail(peer, "Bu kapı zaten aktif.")
-			_:
-				_gate_fail(peer, "Kapı aktif edilemedi.")
-		_gate_send_info(peer)
-		return
-	send_event_to(peer, "gg_activated", {"gate": gid})
-	p["gate_info_cd"] = 0.0
-	_gate_send_info(peer)
-
-
-# Bu hesaba ait (kurulmakta olan ya da calisan) kapi ornegi var mi? Varsa anahtarini dondurur.
-func _gate_instance_of(aid: int) -> String:
-	for wn in worlds.keys():
-		var w: Dictionary = worlds[wn]
-		if w.has("gate") and int(w.gate.owner) == aid:
-			return str(wn)
-	for key in gate_pending.keys():
-		if maps.has(key) and int((maps[key] as Dictionary).get("owner", 0)) == aid:
-			return str(key)
-	return ""
-
-
-func _gate_site_of(map_name: String, gid: String) -> Dictionary:
-	if not maps.has(map_name):
-		return {}
-	for st in (maps[map_name] as Dictionary).get("gates", []):
-		if str(st.gate) == gid:
-			return st
-	return {}
-
-
-# Kayitli ilerlemeyi dogrular (bozuk/eski kayit varsa guvenli sekilde bolum basina doner).
-func _gate_resume_of(gid: String, progress: Dictionary) -> Dictionary:
-	var pr: Dictionary = progress.get(gid, {})
-	var waves: Array = DOData.GALAXY_GATES[gid].waves
-	var wi: int = int(pr.get("section", 0))
-	var gi: int = int(pr.get("grp", 0))
-	var gk: int = int(pr.get("grp_killed", 0))
-	if wi < 0 or wi >= waves.size():
-		return {"wave": 0, "grp": 0, "gk": 0}
-	var groups: Array = waves[wi].groups
-	if gi < 0 or gi >= groups.size():
-		return {"wave": wi, "grp": 0, "gk": 0}
-	if gk < 0 or gk >= int(groups[gi]):
-		gk = 0
-	return {"wave": wi, "grp": gi, "gk": gk}
-
-
-func _gate_enter(peer: int, gid: String) -> void:
-	if not players.has(peer) or _is_ghost(players[peer]):
-		return
-	var p: Dictionary = players[peer]
-	if clock < float(p.get("gate_cd", 0.0)):
-		return
-	p["gate_cd"] = clock + 2.0
-	var def: Dictionary = DOData.GALAXY_GATES.get(gid, {})
-	if def.is_empty() or not bool(def.get("open", false)):
-		_gate_fail(peer, "Bu kapı henüz açık değil.")
-		return
-	var aid: int = int(p.get("account_id", 0))
-	if aid <= 0:
-		_gate_fail(peer, "Kapıya girmek için hesap girişi gerekir.")
-		return
-	var mn: String = str(p.map)
-	if mn == "" or not worlds.has(mn):
-		return
-	if DOData.is_gate_map(mn):
-		_gate_fail(peer, "Zaten bir kapının içindesin.")
-		return
-	# Kapilar yalnizca oyuncunun KENDI sirketinin X-1 haritasindadir ve kapinin yakininda olunmalidir.
-	if mn != "%d-1" % int(p.faction):
-		_gate_fail(peer, "Galaxy Gate kapıları yalnızca kendi şirketinin X-1 haritasında bulunur.")
-		return
-	var site: Dictionary = _gate_site_of(mn, gid)
-	if site.is_empty():
-		_gate_fail(peer, "Bu haritada böyle bir kapı yok.")
-		return
-	var sp: Vector3 = w2g(float(site.x), float(site.y))
-	if ((p.pos as Vector3) - sp).length() > DOData.GATE_ENTER_RANGE * DOData.S:
-		_gate_fail(peer, "Kapıya yeterince yakın değilsin.")
-		return
-	var w: Dictionary = worlds[mn]
-	var why: String = SafeZone.jump_block_reason(w.m, clock, float(p.combat_t))
-	if why != "":
-		_gate_fail(peer, "Kapıya girilemiyor: " + why)
-		return
-	if _gate_instance_of(aid) != "":
-		_gate_fail(peer, "Önceki kapı oturumun kapanıyor, birkaç saniye sonra tekrar dene.")
-		return
-	var info: Dictionary = _gate_info_payload(aid)
-	if info.is_empty():
-		_gate_fail(peer, "Kapı bilgisi alınamadı, tekrar dene.")
-		return
-	if not bool((info.gates[gid] as Dictionary).get("active", false)):
-		_gate_fail(peer, "Bu kapı aktif değil. Önce %d parçayı toplayıp kapıyı aktif etmelisin." % _gate_required(gid))
-		return
-	gate_seq += 1
-	var key: String = "%s%s-%d" % [DOData.GATE_MAP_PREFIX, gid, gate_seq]
-	maps[key] = DOData.gate_map(gid, mn, key)
-	(maps[key] as Dictionary)["owner"] = aid                                                  # yalnizca sunucuda
-	(maps[key] as Dictionary)["resume"] = _gate_resume_of(gid, info.progress as Dictionary)   # kalinan yerden devam
-	gate_pending[key] = clock + 30.0
-	gate_return[aid] = {"map": mn, "x": float((p.pos as Vector3).x), "z": float((p.pos as Vector3).z)}
-	p.jump_to = key
-	p.jump_dl = clock + JUMP_TOKEN_SEC
-	send_event_to(peer, "gg_go", {"gate": gid, "key": key, "ret": mn})
-
-
-# Oyuncuyu kapidan cikarip girdigi haritaya geri gonderir (sunucu atlama izni verir).
-func _gate_send_return(peer: int) -> void:
-	if not players.has(peer):
-		return
-	var p: Dictionary = players[peer]
-	var gr: Dictionary = gate_return.get(int(p.get("account_id", 0)), {})
-	var ret: String = str(gr.get("map", ""))
-	if ret == "" or not maps.has(ret):
-		ret = str(DOData.FACTIONS[int(p.faction)].home)
-	p.jump_to = ret
-	p.jump_dl = clock + JUMP_TOKEN_SEC
-	send_event_to(peer, "gg_return", {"map": ret})
-
-
-# Bolum sonu secimi: next=true -> sonraki bolum, false -> ana haritaya don (ilerleme kayitli kalir).
-func _gate_choice(peer: int, next: bool) -> void:
-	if not players.has(peer) or _is_ghost(players[peer]):
-		return
-	var p: Dictionary = players[peer]
-	var mn: String = str(p.map)
-	if not worlds.has(mn) or not DOData.is_gate_map(mn):
-		return
-	var w: Dictionary = worlds[mn]
-	if not w.has("gate"):
-		return
-	var g: Dictionary = w.gate
-	if str(g.st) != "choice" or int(g.owner) != int(p.get("account_id", 0)):
-		return
-	if next:
-		g.st = "gap"
-		g.t = GATE_WAVE_GAP
-		_gate_push(w)
-	else:
-		_gate_flush(w, true)
-		_gate_send_return(peer)
-
-
-# Kapi ilerlemesini DB'ye yazar (yalnizca degisiklik varsa ya da force).
-func _gate_flush(w: Dictionary, force: bool = false) -> void:
-	if not w.has("gate"):
-		return
-	var g: Dictionary = w.gate
-	if bool(g.done) or int(g.owner) <= 0:
-		return
-	if not force and not bool(g.dirty):
-		return
-	var r: Dictionary = db_send("gate_save_progress", {"account_id": int(g.owner), "gate_id": str(g.id),
-		"section": mini(int(g.wave), (DOData.GALAXY_GATES[str(g.id)].waves as Array).size() - 1), "grp": 0, "grp_killed": 0})
-	if r.has("ok") and bool(r.get("ok", false)):
-		g.dirty = false
-	else:
-		g.save_t = GATE_SAVE_SEC   # DB mesgul: kisa sure sonra tekrar dene
-		print("[KAPI] ilerleme yazilamadi: acct=%d hata=%s" % [int(g.owner), str(r.get("error", "?"))])
-
-
-func _gate_alive(w: Dictionary) -> int:
-	var n: int = 0
-	for uid in (w.npcs as Dictionary).keys():
-		if bool(w.npcs[uid].get("gate", false)):
-			n += 1
-	return n
-
-
-func _gate_payload(w: Dictionary) -> Dictionary:
-	var g: Dictionary = w.gate
-	var waves: Array = DOData.GALAXY_GATES[str(g.id)].waves
-	var wi: int = mini(int(g.wave), waves.size() - 1)
-	return {"gate": str(g.id), "wave": int(g.wave), "waves": waves.size(), "grp": int(g.grp),
-		"grps": (waves[wi].groups as Array).size(), "npc": str(waves[wi].npc), "st": str(g.st),
-		"t": maxf(0.0, float(g.t)), "alive": _gate_alive(w), "killed": int(g.killed), "total": int(g.total)}
-
-
-func _gate_push(w: Dictionary) -> void:
-	var pl: Dictionary = _gate_payload(w)
-	for pid in _players_in(str(w.name)):
-		send_event_to(int(pid), "gg_state", pl)
-
-
-func _gate_spawn_group(w: Dictionary) -> void:
-	var g: Dictionary = w.gate
-	var wv: Dictionary = DOData.GALAXY_GATES[str(g.id)].waves[int(g.wave)]
-	var n: int = int((wv.groups as Array)[int(g.grp)])
-	if n <= 0:
-		return
-	var m: Dictionary = w.m
-	var ref: Vector3 = w2g(float(m.w) / 2.0, float(m.h) / 2.0)
-	var pls: Array = _players_in(str(w.name))
-	if not pls.is_empty():
-		ref = players[int(pls[0])].pos
-	# Dalga: oyuncunun etrafinda GENIS, esit aralikli bir daire; herkes ustune gelir.
-	var radius: float = (GATE_CIRCLE_R + GATE_CIRCLE_STEP * float(int(g.grp))) * DOData.S   # g.grp = bu katta simdiye dek dogan dalga sayisi
-	var cx: float = clampf(ref.x, radius, float(m.w) * DOData.S - radius)
-	var cz: float = clampf(ref.z, radius, float(m.h) * DOData.S - radius)
-	var a0: float = randf() * TAU
-	var mul: float = float(DOData.GALAXY_GATES[str(g.id)].get("mul", 1))
-	for i in n:
-		var ang: float = a0 + TAU * float(i) / float(n)
-		var pos: Vector3 = Vector3(cx + cos(ang) * radius, 0.0, cz + sin(ang) * radius)
-		var e: Dictionary = _make_npc(w, str(wv.npc), pos, -1)
-		if e.is_empty():
-			continue
-		e["gate"] = true
-		e["mul"] = mul
-		if mul != 1.0:
-			# Kapi guc/odul carpani: NPC verisinin KOPYASI olceklenir (global NPCS tablosu degismez)
-			var d2: Dictionary = (e.d as Dictionary).duplicate()
-			for k in ["hp", "sh", "dmg", "dmg_max", "cr", "uri", "xp", "hon"]:
-				if d2.has(k):
-					d2[k] = float(d2[k]) * mul
-			e.d = d2
-			e.hp = float(d2.hp)
-			e.mx = float(d2.hp)
-			e.sh = float(d2.sh)
-			e.msh = float(d2.sh)
-		e.aggro = true   # kapi NPC'leri oyuncuya dogrudan saldirir
-		_clamp_pos(w, e)
-		_bcast(str(w.name), "s_npc_spawn", [_npc_info(e)])
-
-
-# Kat akisi: intro (5 sn) -> dalga 1 -> her GATE_GROUP_GAP sn'de bir sonraki dalga (oldurulmesi beklenmez)
-# -> tum dalgalar dogdu ve hepsi oldu -> kat bitti: merkezde X-1 cikisi + sonraki kat kapisi ("open").
-# Son katta odul OTOMATIK yazilir ve yalnizca X-1 cikis kapisi acilir.
-func _tick_gates(dt: float) -> void:
-	for key in gate_pending.keys():
-		if clock > float(gate_pending[key]) and not worlds.has(key):
-			gate_pending.erase(key)
-			maps.erase(key)   # oyuncu hic girmedi
-	for wn in worlds.keys():
-		var w: Dictionary = worlds[wn]
-		if not w.has("gate"):
-			continue
-		var g: Dictionary = w.gate
-		if bool(g.done) or _players_in(str(wn)).is_empty():
-			continue
-		var waves: Array = DOData.GALAXY_GATES[str(g.id)].waves
-		if bool(g.dirty):
-			g.save_t = float(g.save_t) - dt
-			if float(g.save_t) <= 0.0:
-				_gate_flush(w, true)
-		match str(g.st):
-			"intro":
-				g.t = float(g.t) - dt
-				if float(g.t) <= 0.0:
-					_gate_spawn_group(w)
-					g.grp = 1
-					g.st = "fight"
-					g.t = GATE_GROUP_GAP
-					_gate_push(w)
-			"fight":
-				var gcount: int = ((waves[int(g.wave)].groups) as Array).size()
-				if int(g.grp) < gcount:
-					g.t = float(g.t) - dt
-					if float(g.t) <= 0.0:
-						_gate_spawn_group(w)
-						g.grp = int(g.grp) + 1
-						g.t = GATE_GROUP_GAP if int(g.grp) < gcount else 0.0
-						_gate_push(w)
-				elif _gate_alive(w) == 0:
-					_gate_floor_cleared(w)
-			"reward":
-				g.t = float(g.t) - dt
-				if float(g.t) <= 0.0:
-					_gate_complete(w)
-			_:
-				pass   # "open" / "done": oyuncu kapiya girene kadar bekle
-
-
-func _gate_floor_cleared(w: Dictionary) -> void:
-	var g: Dictionary = w.gate
-	var waves: Array = DOData.GALAXY_GATES[str(g.id)].waves
-	g.grp = 0
-	g.gk = 0
-	g.wave = int(g.wave) + 1
-	g.t = 0.0
-	if int(g.wave) >= waves.size():
-		g.st = "reward"   # son kat: odul otomatik yuklenir, ardindan yalnizca X-1 kapisi acilir
-		_gate_push(w)
-		_gate_complete(w)
-		return
-	g.st = "open"
-	_gate_flush(w, true)   # bir sonraki kat kaydedilir: X-1'e donup tekrar girince kaldigin kattan devam
-	_gate_open_exit(w, true)
-	_gate_push(w)
-
-
-# X-1'e donus haritasi (kapiya girmeden onceki harita; yoksa sirket ana haritasi).
-func _gate_return_map(peer: int) -> String:
-	if not players.has(peer):
-		return ""
-	var p: Dictionary = players[peer]
-	var gr: Dictionary = gate_return.get(int(p.get("account_id", 0)), {})
-	var ret: String = str(gr.get("map", ""))
-	if ret == "" or not maps.has(ret):
-		ret = str(DOData.FACTIONS[int(p.faction)].home)
-	return ret
-
-
-# Haritanin ORTASINDA kapilari acar: solda X-1 cikisi, (son kat degilse) sagda sonraki kat kapisi.
-func _gate_open_exit(w: Dictionary, has_next: bool) -> void:
-	var m: Dictionary = w.m
-	var cx: float = float(m.w) * 0.5
-	var cy: float = float(m.h) * 0.5
-	var pls: Array = _players_in(str(w.name))
-	if pls.is_empty():
-		return
-	var ret: String = _gate_return_map(int(pls[0]))
-	var rx: float = cx - GATE_EXIT_DX if has_next else cx
-	(w.portals as Array).clear()
-	(w.portal_defs as Array).clear()
-	(w.portals as Array).append(w2g(rx, cy))
-	(w.portal_defs as Array).append({"to": ret, "pos": w2g(rx, cy)})
-	var pl: Dictionary = {"ret": ret, "next": has_next, "rx": rx, "ry": cy, "nx": cx + GATE_EXIT_DX, "ny": cy}
-	if has_next:
-		(w.portals as Array).append(w2g(cx + GATE_EXIT_DX, cy))
-		(w.portal_defs as Array).append({"to": "@next", "pos": w2g(cx + GATE_EXIT_DX, cy)})
-	for pid in pls:
-		send_event_to(int(pid), "gg_gates", pl)
-
-
-# Merkezdeki "sonraki kat" kapisina girildi: kapilar kapanir, oyuncu ortaya alinir, yeni katin 5 sn'lik hazirligi baslar.
-func _gate_next_floor(peer: int, w: Dictionary) -> void:
-	var g: Dictionary = w.gate
-	if str(g.st) != "open" or bool(g.done):
-		_to(peer, "s_jump_result", [false, str(w.name), "Sonraki kat henüz açılmadı."])
-		return
-	var p: Dictionary = players[peer]
-	var m: Dictionary = w.m
-	(w.portals as Array).clear()
-	(w.portal_defs as Array).clear()
-	p.pos = w2g(float(m.w) * 0.5, float(m.h) * 0.5)
-	g.st = "intro"
-	g.t = GATE_INTRO_SEC
-	g.grp = 0
-	g.gk = 0
-	_update_safe(p, w, true)
-	send_event_to(peer, "gg_next", {})
-	_gate_push(w)
-
-
-func _gate_complete(w: Dictionary) -> void:
-	var g: Dictionary = w.gate
-	var R: Dictionary = DOData.GALAXY_GATES[str(g.id)].reward
-	var all_ok: bool = true
-	for pid in _players_in(str(w.name)):
-		var p: Dictionary = players[int(pid)]
-		if _is_ghost(p) or int(p.get("account_id", 0)) <= 0 or bool(p.get("gate_paid:" + str(w.name), false)):
-			continue
-		var event_id: String = "gate:%s:%s:%d" % [reward_run_id, str(w.name), int(p.account_id)]
-		var res: Dictionary = _grant_reward(p, event_id, "gate_" + str(g.id),
-			0, int(R.uri), float(R.xp), float(R.hon), 0, 0, 0,
-			(R.ammo as Dictionary).duplicate(), (R.items as Dictionary).duplicate(),
-			{"map": str(w.name), "gate": str(g.id)})
-		if not (res.has("ok") and res.get("ok", false)):
-			all_ok = false
-			continue
-		p["gate_paid:" + str(w.name)] = true
-		var disks: int = _gate_grant_logdisks(int(pid), p, int(R.logdisks))
-		send_event_to(int(pid), "gg_done", {"gate": str(g.id), "state": res, "uri": int(R.uri), "xp": int(R.xp),
-			"hon": int(R.hon), "ammo": R.ammo, "items": R.items, "logdisks": disks})
-	if all_ok or int(g.tries) + 1 >= GATE_REWARD_TRIES:
-		g.done = true
-		g.st = "done"
-		g.t = 0.0
-		if all_ok and int(g.owner) > 0:
-			# Odul yazildi: ilerleme silinir; GATE_REBUILD_AFTER_COMPLETE ise parcalar sifirlanir (kapi tekrar kurulur).
-			var fr: Dictionary = db_send("gate_finish", {"account_id": int(g.owner), "gate_id": str(g.id),
-				"rebuild": DOData.GATE_REBUILD_AFTER_COMPLETE})
-			if not (fr.has("ok") and bool(fr.get("ok", false))):
-				print("[KAPI] gate_finish basarisiz: acct=%d hata=%s" % [int(g.owner), str(fr.get("error", "?"))])
-			elif bool(fr.get("first", false)):
-				_gate_ring_awarded(int(g.owner), str(g.id), int(fr.get("rings", 1)))
-		_gate_push(w)
-		_gate_open_exit(w, false)   # son kat bitti: yalnizca X-1 cikis kapisi acilir
-		for pid in _players_in(str(w.name)):
-			var pp: Dictionary = players[int(pid)]
-			pp["gate_info_cd"] = 0.0
-			_gate_send_info(int(pid))
-		if not all_ok:
-			for pid in _players_in(str(w.name)):
-				_gate_fail(int(pid), "Ödül kaydedilemedi, lütfen yöneticiyle iletişime geç.")
-	else:
-		g.tries = int(g.tries) + 1
-		g.st = "reward"
-		g.t = 3.0   # DB mesgulse tekrar dene (event_id ayni: cift odul verilmez)
-
-
-# Log Disk: Ar-Ge puani hesabinda saklanir (apply_skill_change); musteriye s_skill_result ile bildirilir.
-func _gate_grant_logdisks(peer: int, p: Dictionary, n: int) -> int:
-	var disks: int = int(p.get("_sv_logdisks", 0))
-	n = mini(n, int(SkillTree.CUM[SkillTree.MAX_POINTS]) - disks)
-	if n <= 0:
-		return 0
-	var skills: Dictionary = p.get("_sv_skills", {})
-	var resets: int = int(p.get("_sv_rd_resets", 0))
-	var resp: Dictionary = db_send("apply_skill_change", {"account_id": int(p.account_id), "d_cr": 0, "d_uri": 0, "d_sep": 0,
-		"skills": skills, "logdisks": disks + n, "rd_resets": resets})
-	if not (resp.has("ok") and resp["ok"]):
-		print("[KAPI] Log Disk yazilamadi: acct=%d hata=%s" % [int(p.account_id), str(resp.get("error", "?"))])
-		return 0
-	p["_sv_logdisks"] = disks + n
-	p["_sv_cr"] = int(resp.get("new_cr", p.get("_sv_cr", 0)))
-	p["_sv_uri"] = int(resp.get("new_uri", p.get("_sv_uri", 0)))
-	p["_sv_sep"] = int(resp.get("new_sep", p.get("_sv_sep", 0)))
-	_to(peer, "s_skill_result", ["logdisk", true, "", JSON.stringify(skills), disks + n, resets, int(p["_sv_cr"]), int(p["_sv_uri"]), int(p["_sv_sep"])])
-	return n
-
-
-# ------------------------------------------------------------------ GALAXY GATE ORTAK JENERATORU (sunucu)
-# Tum kurallar server_db.py gate_generator_pulse() icinde; burada yalnizca dogrulama, yonlendirme ve bildirim var.
-func _gate_pulse_fail(peer: int, err: String) -> void:
-	var uri: int = int((players[peer] as Dictionary).get("_sv_uri", 0)) if players.has(peer) else 0
-	send_event_to(peer, "gg_pulse_result", {"ok": false, "error": err, "new_uri": uri})
-
-
-func _gate_generator_pulse(peer: int, tx_id: String, count: int = 1) -> void:
-	if not players.has(peer) or _is_ghost(players[peer]):
-		return
-	var p: Dictionary = players[peer]
-	if clock < float(p.get("gate_pulse_cd", 0.0)):
-		_gate_pulse_fail(peer, "cok_hizli")   # yalnizca sel koruma
-		return
-	p["gate_pulse_cd"] = clock + 0.05
-	var aid: int = int(p.get("account_id", 0))
-	if aid <= 0 or tx_id == "" or tx_id.length() > 40:
-		_gate_pulse_fail(peer, "gecersiz_islem")
-		return
-	count = clampi(count, 1, 10)
-	# Toplu basim (5 / 10): hepsi bu istekte, beklemeden art arda islenir; sonuclar tek seferde gonderilir.
-	var results: Array = []
-	var fail_err := ""
-	for i in count:
-		var tid: String = tx_id if count == 1 else "%s_%d" % [tx_id, i]
-		var resp: Dictionary = db_send("gate_generator_pulse", {"account_id": aid, "tx_id": "gg:" + tid})
-		if not (resp.has("ok") and bool(resp.get("ok", false))):
-			fail_err = str(resp.get("error", "bilinmeyen_hata"))
-			if resp.has("new_uri"):
-				p["_sv_uri"] = int(resp.get("new_uri", 0))
-			break
-		p["_sv_uri"] = int(resp.get("new_uri", p.get("_sv_uri", 0)))
-		if str(resp.get("reward_type", "")) == "logdisk":
-			resp["logdisk_granted"] = _gate_grant_logdisks(peer, p, int(resp.get("reward_amount", 0)))
-		results.append(resp)
-	for r in results:
-		send_event_to(peer, "gg_pulse_result", r)
-	if fail_err != "":
-		_gate_pulse_fail(peer, fail_err)
-	p["gate_info_cd"] = 0.0
-	_gate_send_info(peer)
-
-
-func _gate_generator_arm(peer: int, armed: bool) -> void:
-	if not players.has(peer) or _is_ghost(players[peer]):
-		return
-	var p: Dictionary = players[peer]
-	if clock < float(p.get("gate_arm_cd", 0.0)):
-		return
-	p["gate_arm_cd"] = clock + 0.3
-	var aid: int = int(p.get("account_id", 0))
-	if aid <= 0:
-		return
-	var r: Dictionary = db_send("gate_generator_arm", {"account_id": aid, "armed": armed})
-	if not (r.has("ok") and bool(r.get("ok", false))):
-		_gate_fail(peer, "Çarpan kullanılamadı." if str(r.get("error", "")) == "carpan_yok" else "Çarpan değiştirilemedi.")
-	p["gate_info_cd"] = 0.0
-	_gate_send_info(peer)
-
-
+# ------------------------------------------------------------------ KLAN SISTEMI (sunucu)
 # Istemci -> sunucu:  "clan_op" {op, args}  /  "clan_chat" {text}     (genel olay kanali, yeni RPC YOK)
 # Sunucu -> istemci:  "clan_state" (kendi klanim + davetler), "clan_list", "clan_result", "clan_tags", "clan_chat"
 # Tum kurallar server_db.py clan_op() icinde dogrulanir; burada yalnizca yonlendirme, canli durum ve yayin var.
